@@ -14,6 +14,7 @@ en composer en briques « x min à y watts ».
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
 | Capteur cardiaque Bluetooth et ANT+ (+ simulé), affiché et enregistré | ✅ `src/home_trainer/sensors/` |
 | Éditeur graphique de briques, enregistrement .zwo/.mrc/.erg/.fit | ✅ `ui/editor.py` |
+| Mode libre : consigne ERG réglée à la main par pas de 5 W, courbe en direct | ✅ `ui/free_ride.py` |
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 
@@ -123,6 +124,19 @@ appui long pour défiler). Espace = démarrer / pause, → = brique suivante.
 Le home trainer réel et le simulateur (`ui/power.py`) offrent la même
 interface `PowerSource` (`set_target`, `read`), voir ci-dessous.
 La logique de déroulé (`ui/session.py`) ne dépend pas de Qt et est testée.
+
+### Mode libre
+
+Bouton **Mode libre** (ou Ctrl+L) : pas de séance, on règle la consigne ERG
+à la main, en direct, par pas de 5 W (boutons −5 / +5, ou ↑ ↓) et de 25 W
+(boutons −25 / +25, ou Page↑ Page↓), appui long pour défiler. Elle part de
+60 % de la FTP. Puissance, moyenne, cadence, cardio et temps s'affichent,
+avec la courbe des 10 dernières minutes (consigne colorée par zone,
+puissance et cardio). En pause, le home trainer repasse en résistance libre.
+**Retour à la séance** met le mode libre en pause et retrouve la séance là
+où elle en était (Page↑ Page↓ y règlent l'intensité de ±5 %).
+
+![Mode libre](docs/mode-libre.png)
 
 ## Pilotage du home trainer Wahoo
 

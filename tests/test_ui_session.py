@@ -1,7 +1,7 @@
 import pytest
 
 from home_trainer.bricks import parse_workout
-from home_trainer.ui import SimulatedTrainer, State, WorkoutSession
+from home_trainer.ui import FreeRideSession, SimulatedTrainer, State, WorkoutSession
 
 
 def make(text="1m@100 2x(30s@200 30s@100%) open@150", ftp=200):
@@ -72,3 +72,37 @@ def test_simulated_trainer_converges_to_target():
     assert r.power_w == pytest.approx(250, abs=2)
     t.set_target(0)
     assert t.read(0.2).power_w == 0
+
+
+def test_free_ride_starts_near_60_percent_ftp_in_5_w_steps():
+    s = FreeRideSession(ftp=250)
+    assert s.target_w == 150 and s.target_pct == 60
+    assert FreeRideSession(ftp=233).target_w == 140  # 139,8 W arrondi au multiple de 5
+
+
+def test_free_ride_adjusts_by_5_w_within_bounds():
+    s = FreeRideSession(ftp=200, target_w=100)
+    assert s.adjust_target(+5) == 105
+    assert s.adjust_target(-25) == 80
+    assert s.set_target(153) == 155
+    s.adjust_target(-10_000)
+    assert s.target_w == 25
+    s.adjust_target(+10_000)
+    assert s.target_w == 1500
+
+
+def test_free_ride_clock_and_samples_keep_the_target_of_the_moment():
+    s = FreeRideSession(ftp=200, target_w=150)
+    s.tick(10)
+    assert s.state is State.READY and s.elapsed_s == 0
+    s.start()
+    s.tick(1)
+    s.record(148, 90, 120)
+    s.adjust_target(+50)
+    s.tick(1)
+    s.record(196, 92, 130)
+    assert [(x.t, x.target_w) for x in s.samples] == [(1, 150), (2, 200)]
+    assert s.average_power() == 172 and s.average_heart_rate() == 125
+    s.toggle()
+    s.tick(30)
+    assert s.state is State.PAUSED and s.elapsed_s == 2
