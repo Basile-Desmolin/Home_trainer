@@ -1,0 +1,42 @@
+# Construit HomeTrainer.exe (Windows, sans console, avec icône) et le met à
+# disposition dans l'onglet Actions (« Artifacts ») de chaque exécution.
+name: Application Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[gui,ble,ant]" pyinstaller
+      - run: pyinstaller --noconfirm packaging/HomeTrainer.spec
+      - name: Vérifier que l'appli démarre (sans écran)
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $p = Start-Process dist/HomeTrainer.exe -PassThru
+          Start-Sleep -Seconds 20
+          if ($p.HasExited) { throw "HomeTrainer.exe s'est arrêté (code $($p.ExitCode))" }
+          Stop-Process -Id $p.Id
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HomeTrainer-windows
+          path: dist/HomeTrainer.exe

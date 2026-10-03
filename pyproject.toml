@@ -19,10 +19,16 @@ ant = ["openant>=1.3"]
 
 [project.scripts]
 home-trainer = "home_trainer.cli:main"
+
+# Sous Windows, pip en fait un home-trainer-gui.exe qui s'ouvre sans console.
+[project.gui-scripts]
 home-trainer-gui = "home_trainer.ui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"home_trainer.ui" = ["assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

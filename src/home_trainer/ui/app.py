@@ -5,7 +5,8 @@
                      [--hr sim|ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
-→ ou N = brique suivante.
+→ ou N = brique suivante, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
+Ctrl+E = modifier, Ctrl+S = enregistrer sous.
 """
 
 from __future__ import annotations
@@ -15,17 +16,19 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
+from PySide6.QtCore import QElapsedTimer, Qt, QTimer
+from PySide6.QtGui import QAction, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
-                               QMessageBox, QPushButton, QSizePolicy, QSpinBox, QStackedWidget, QToolBar,
-                               QVBoxLayout, QWidget)
+                               QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
+                               QSpinBox, QStackedWidget, QToolBar, QVBoxLayout, QWidget)
 
 from ..bricks import BrickSyntaxError, parse_workout
+from ..formats import FormatError, save_workout
 from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, SimulatedHeartRate, Trainer,
                        open_heart_rate_sensor)
 from ..workout import PowerUnit, Segment, Workout
+from .chart import ACCENT, BG, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
+from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .loader import FILE_FILTER, load_workout
 from .power import PowerSource, SimulatedTrainer, open_power_source
 from .session import State, WorkoutSession
@@ -33,35 +36,7 @@ from .session import State, WorkoutSession
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
 TICK_MS = 200
-
-BG = "#16181d"
-PANEL = "#20242c"
-TEXT = "#e8eaed"
-MUTED = "#8b919c"
-ACCENT = "#ffd24a"
-POWER = "#4fc3f7"
-HEART = "#ff5c6c"
-
-# Zones de Coggan (borne haute en % FTP) et couleurs associées.
-ZONES = [(55, "#7f8c9a"), (76, "#3d8bd9"), (91, "#3fb37f"), (106, "#e7c43a"),
-         (121, "#f08a2c"), (151, "#e5484d"), (10_000, "#b84ae0")]
-
-
-def zone_color(watts: float | None, ftp: float) -> QColor:
-    if watts is None:
-        return QColor("#4a505c")
-    pct = watts / ftp * 100
-    return QColor(next(color for limit, color in ZONES if pct < limit))
-
-
-def hms(seconds: float | None) -> str:
-    if seconds is None:
-        return "—"
-    s = int(round(seconds))
-    h, rest = divmod(s, 3600)
-    m, s = divmod(rest, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
+ICON = Path(__file__).with_name("assets") / "icon.png"
 
 def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) -> str:
     if seg is None:
@@ -80,122 +55,6 @@ def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) 
             target += f"  ({pct:.0f} % FTP)" if not seg.step.is_ramp else ""
     name = f"  ·  {seg.step.name}" if seg.step.name else ""
     return f"{duration} à {target}{name}"
-
-
-class WorkoutChart(QWidget):
-    """Profil complet de la séance, avancement et puissance réalisée."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.session: WorkoutSession | None = None
-        self.setMinimumHeight(220)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-    def set_session(self, session: WorkoutSession) -> None:
-        self.session = session
-        self.update()
-
-    def paintEvent(self, _event) -> None:  # noqa: N802 (API Qt)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(PANEL))
-        s = self.session
-        if s is None or not s.segments:
-            return
-        ftp = s.ftp or DEFAULT_FTP
-        margin_l, margin_r, margin_t, margin_b = 44, 12, 12, 26
-        area = QRectF(margin_l, margin_t, self.width() - margin_l - margin_r,
-                      self.height() - margin_t - margin_b)
-        total = max(s.total_s, 1.0)
-        peak = max([seg.high_w or 0 for seg in s.segments] + [seg.end_high_w or 0 for seg in s.segments]
-                   + [x.power_w for x in s.samples] + [ftp])
-        peak *= max(s.intensity_pct, 100) / 100 * 1.12
-
-        def x(t: float) -> float:
-            return area.left() + t / total * area.width()
-
-        def y(w: float) -> float:
-            return area.bottom() - w / peak * area.height()
-
-        # Graduations : FTP et axe du temps.
-        p.setFont(QFont(self.font().family(), 8))
-        p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
-        p.drawLine(QPointF(area.left(), y(ftp)), QPointF(area.right(), y(ftp)))
-        p.drawText(QRectF(0, y(ftp) - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, "FTP")
-        step = next(v for v in (60, 300, 600, 900, 1800, 3600, 7200) if total / v <= 12)
-        p.setPen(QColor(MUTED))
-        t = 0
-        while t <= total:
-            p.drawText(QRectF(x(t) - 30, area.bottom() + 4, 60, 18), Qt.AlignHCenter, hms(t))
-            t += step
-
-        # Briques (rampes = trapèzes), passées assombries, en cours mise en avant.
-        position = s.position_s
-        for i, seg in enumerate(s.segments):
-            if not seg.duration_s:
-                continue
-            x0, x1 = x(seg.start_s), x(seg.start_s + seg.duration_s)
-            w0 = seg.target_w(0) or 0
-            w1 = seg.target_w(seg.duration_s) or 0
-            path = QPainterPath(QPointF(x0, area.bottom()))
-            path.lineTo(x0, y(max(w0, peak * 0.03)))
-            path.lineTo(x1, y(max(w1, peak * 0.03)))
-            path.lineTo(x1, area.bottom())
-            path.closeSubpath()
-            color = zone_color(seg.target_w(seg.duration_s / 2), ftp)
-            if i < s.index:
-                color.setAlpha(90)
-            elif i > s.index:
-                color.setAlpha(190)
-            p.fillPath(path, color)
-            if i == s.index:
-                p.setPen(QPen(QColor(TEXT), 2))
-                p.drawPath(path)
-
-        # Consigne ajustée pour la suite de la séance (si l'intensité n'est pas 100 %).
-        if s.intensity_pct != 100:
-            k = s.intensity_pct / 100
-            p.setPen(QPen(QColor(ACCENT), 2, Qt.DashLine))
-            for seg in s.segments[s.index:]:
-                if not seg.duration_s or seg.low_w is None:
-                    continue
-                start = max(seg.start_s, position)
-                if start >= seg.start_s + seg.duration_s:
-                    continue
-                a = seg.target_w(start - seg.start_s) * k
-                b = seg.target_w(seg.duration_s) * k
-                p.drawLine(QPointF(x(start), y(a)), QPointF(x(seg.start_s + seg.duration_s), y(b)))
-
-        # Puissance réalisée.
-        if len(s.samples) > 1:
-            path = QPainterPath(QPointF(x(s.samples[0].t), y(s.samples[0].power_w)))
-            for sample in s.samples[1:]:
-                path.lineTo(x(sample.t), y(sample.power_w))
-            p.setPen(QPen(QColor(POWER), 1.6))
-            p.drawPath(path)
-
-        # Fréquence cardiaque, sur sa propre échelle (graduée à droite).
-        heart = [(x_.t, x_.heart_rate_bpm) for x_ in s.samples if x_.heart_rate_bpm]
-        if len(heart) > 1:
-            lo = min(60, min(b for _, b in heart) - 5)
-            hi = max(200, max(b for _, b in heart) + 5)
-
-            def yh(bpm: float) -> float:
-                return area.bottom() - (bpm - lo) / (hi - lo) * area.height()
-
-            p.setPen(QColor(HEART))
-            for bpm in range(int(lo // 20 + 1) * 20, int(hi), 40):
-                p.drawText(QRectF(area.right() - 40, yh(bpm) - 8, 38, 16), Qt.AlignRight | Qt.AlignVCenter,
-                           f"{bpm}")
-            path = QPainterPath(QPointF(x(heart[0][0]), yh(heart[0][1])))
-            for t_, bpm in heart[1:]:
-                path.lineTo(x(t_), yh(bpm))
-            p.setPen(QPen(QColor(HEART), 1.4))
-            p.drawPath(path)
-
-        # Curseur de position.
-        p.setPen(QPen(QColor(TEXT), 2))
-        p.drawLine(QPointF(x(position), area.top()), QPointF(x(position), area.bottom()))
 
 
 class Metric(QFrame):
@@ -231,6 +90,7 @@ class MainWindow(QMainWindow):
                  heart_rate: BackgroundSensor[HeartRateReading] | None = None) -> None:
         super().__init__()
         self.ftp = ftp
+        self.directory = str(Path.home())  # dernier dossier ouvert ou enregistré
         self.source: PowerSource = source or SimulatedTrainer()
         self.session = WorkoutSession(workout, ftp)
         self._since_sample = 0.0
@@ -256,13 +116,19 @@ class MainWindow(QMainWindow):
         bar = QToolBar("Séance")
         bar.setMovable(False)
         self.addToolBar(bar)
-        open_action = QAction("Ouvrir…", self)
-        open_action.setShortcut(QKeySequence.Open)
-        open_action.triggered.connect(self._open_file)
-        bar.addAction(open_action)
-        bricks_action = QAction("Briques…", self)
-        bricks_action.triggered.connect(self._enter_bricks)
-        bar.addAction(bricks_action)
+        for text, shortcut, slot, tip in (
+            ("Nouvelle…", QKeySequence.New, self._new_workout, "Composer une séance en briques"),
+            ("Ouvrir…", QKeySequence.Open, self._open_file, "Ouvrir une séance .zwo, .mrc, .erg ou .fit"),
+            ("Modifier…", QKeySequence("Ctrl+E"), self._edit_workout, "Modifier la séance affichée"),
+            ("Enregistrer sous…", QKeySequence.Save, self._save_as,
+             "Enregistrer la séance affichée en .zwo, .mrc, .erg ou .fit"),
+        ):
+            action = QAction(text, self)
+            action.setShortcut(shortcut)
+            action.setToolTip(tip)
+            action.triggered.connect(slot)
+            bar.addAction(action)
+        bar.addSeparator()
         trainer_action = QAction("Home trainer…", self)
         trainer_action.triggered.connect(self._choose_trainer)
         bar.addAction(trainer_action)
@@ -471,29 +337,60 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Ouvrir une séance", str(Path.home()), FILE_FILTER)
-        if not path:
-            return
+        path, _ = QFileDialog.getOpenFileName(self, "Ouvrir une séance", self.directory, FILE_FILTER)
+        if path:
+            self.open_path(path)
+
+    def open_path(self, path: str) -> bool:
         warnings: list[str] = []
         try:
             workout = load_workout(path, warnings)
         except Exception as e:  # noqa: BLE001 (tout échec de lecture est montré à l'utilisateur)
             QMessageBox.warning(self, "Lecture impossible", f"{Path(path).name} : {e}")
-            return
+            return False
+        self.directory = str(Path(path).parent)
         if warnings:
             QMessageBox.information(self, "À savoir", "\n".join(warnings))
         self.load(workout)
+        return True
 
-    def _enter_bricks(self) -> None:
-        text, ok = QInputDialog.getText(self, "Composer une séance",
-                                        "Briques (ex. 10m@150 3x(4m@105% 2m@55%) 10m@110) :",
-                                        text=DEFAULT_BRICKS)
-        if not ok or not text.strip():
+    def _new_workout(self) -> None:
+        self._open_editor(None)
+
+    def _edit_workout(self) -> None:
+        self._open_editor(self.session.workout)
+
+    def _open_editor(self, workout: Workout | None) -> None:
+        if self.session.state is State.RUNNING:
+            self.session.pause()
+            self._push_target()
+            self._refresh()
+        editor = WorkoutEditor(workout, self.ftp, self, directory=self.directory)
+        accepted = editor.exec() == QDialog.Accepted
+        self.directory = editor.directory
+        if editor.ftp != self.ftp:
+            self.ftp_box.setValue(int(editor.ftp))
+            self._ftp_changed()
+        result = editor.workout()
+        if accepted and result is not None:
+            self.load(result)
+
+    def _save_as(self) -> None:
+        workout = self.session.workout
+        default = Path(self.directory) / _file_name(workout.name)
+        path, chosen = QFileDialog.getSaveFileName(self, "Enregistrer la séance", str(default.with_suffix("")),
+                                                   ";;".join(SAVE_FILTERS), _filter_for(".zwo"))
+        if not path:
             return
+        if Path(path).suffix.lower() not in SAVE_FILTERS.values():
+            path += SAVE_FILTERS.get(chosen, ".zwo")
         try:
-            self.load(parse_workout(text, name="Séance en briques"))
-        except BrickSyntaxError as e:
-            QMessageBox.warning(self, "Briques invalides", str(e))
+            save_workout(workout, path, ftp=self.ftp)
+        except (FormatError, ValueError, OSError) as e:
+            QMessageBox.warning(self, "Enregistrement impossible", f"{Path(path).name} : {e}")
+            return
+        self.directory = str(Path(path).parent)
+        self.statusBar().showMessage(f"Enregistrée : {path}", 8000)
 
     # --- boucle ----------------------------------------------------------
 
@@ -718,7 +615,13 @@ QPushButton {{ background: #2d323c; border: none; border-radius: 6px; padding: 8
 QPushButton:hover {{ background: #3a404c; }}
 QPushButton#play {{ background: {ACCENT}; color: #1a1a1a; font-weight: bold; min-width: 110px; }}
 QPushButton#adjust {{ font-size: 18px; font-weight: bold; min-width: 70px; min-height: 44px; }}
-QSpinBox {{ background: #2d323c; border: none; padding: 3px 6px; }}
+QSpinBox, QLineEdit, QComboBox {{ background: #2d323c; border: none; padding: 3px 6px; }}
+QPushButton:disabled {{ color: {MUTED}; }}
+QTreeWidget {{ background: {PANEL}; border: none; font-size: 14px; }}
+QTreeWidget::item {{ padding: 3px; }}
+QTreeWidget::item:selected {{ background: #3a404c; }}
+QHeaderView::section {{ background: {BG}; color: {MUTED}; border: none; padding: 4px; }}
+QStatusBar {{ color: {MUTED}; }}
 """
 
 
@@ -740,25 +643,38 @@ def main(argv: list[str] | None = None) -> int:
                         help="numéro ANT+ de la ceinture (sinon la première trouvée)")
     args = parser.parse_args(argv)
 
+    _set_windows_app_id()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Home trainer")
     app.setStyleSheet(STYLE)
-    try:
-        if args.file:
-            workout = load_workout(args.file)
-        else:
-            workout = parse_workout(args.bricks or DEFAULT_BRICKS,
-                                    name="Séance en briques" if args.bricks else "Sweet spot (démo)")
-    except Exception as e:  # noqa: BLE001
-        print(f"erreur : {e}", file=sys.stderr)
-        return 1
+    if ICON.exists():
+        app.setWindowIcon(QIcon(str(ICON)))
     heart_rate = (None if args.hr == "aucun"
                   else open_heart_rate_sensor(args.hr, address=args.hr_address, device_number=args.hr_ant_id))
     source = open_power_source(args.trainer, address=args.trainer_address, device_number=args.trainer_ant_id)
+    try:
+        workout = parse_workout(args.bricks or DEFAULT_BRICKS,
+                                name="Séance en briques" if args.bricks else "Sweet spot (démo)")
+    except BrickSyntaxError as e:
+        # Lancée depuis une icône, l'appli n'a pas de console : les erreurs s'affichent dans une fenêtre.
+        QMessageBox.warning(None, "Briques invalides", str(e))
+        workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
     window = MainWindow(workout, args.ftp, source=source, heart_rate=heart_rate)
     window.resize(1100, 760)
     window.show()
+    if args.file:  # fichier passé en argument, ou glissé sur l'icône
+        window.open_path(args.file)
     return app.exec()
+
+
+def _set_windows_app_id() -> None:
+    """Sous Windows, montre l'icône de l'appli dans la barre des tâches (et non celle de Python)."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("HomeTrainer.App")
+        except (AttributeError, OSError):
+            pass
 
 
 if __name__ == "__main__":
