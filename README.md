@@ -98,10 +98,13 @@ ces formats (choisi dans la liste « Type »).
 L'éditeur liste les briques : double-clic sur une case pour changer la
 durée (`10:00`, `10`, `30s`, `1:30:00`, `tour`), la puissance (`150` ou une
 plage `200-220`, vide = libre), la fin de rampe et l'unité (W ou % FTP ;
-changer l'unité convertit la valeur avec la FTP). **+ Répétition** répète la
-brique choisie (nombre de fois modifiable), **Monter** / **Descendre**
-déplacent une brique, y compris pour la faire entrer dans une répétition ou
-en sortir. La notation texte (`3x(4m@105% 2m@55%)`) reste disponible et
+changer l'unité convertit la valeur avec la FTP). Pour répéter, choisir les
+briques (Ctrl + clic ou Maj + clic, au même niveau) puis **Répéter**
+(Ctrl+R) et taper le nombre de fois ; choisir des répétitions avec d'autres
+briques et **Répéter** à nouveau crée des répétitions de répétitions.
+**Dégrouper** défait une répétition. **Monter** / **Descendre** déplacent une
+brique ou une répétition, y compris pour la faire entrer dans une répétition
+voisine ou en sortir. La notation texte (`3x(4m@105% 2m@55%)`) reste disponible et
 synchronisée, et le profil se redessine à chaque modification, brique
 choisie entourée. **Rouler cette séance** la charge dans l'écran de séance.
 
