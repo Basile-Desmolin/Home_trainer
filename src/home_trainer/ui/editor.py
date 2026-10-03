@@ -90,7 +90,7 @@ class WorkoutEditor(QDialog):
         self.tree.setColumnCount(len(HEADERS))
         self.tree.setHeaderLabels(HEADERS)
         self.tree.setRootIsDecorated(True)
-        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Ctrl / Maj + clic
         self.tree.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
                                   | QAbstractItemView.AnyKeyPressed)
         self.tree.setItemDelegateForColumn(COL_UNIT, UnitDelegate(self.tree))
@@ -106,11 +106,13 @@ class WorkoutEditor(QDialog):
         buttons = QHBoxLayout()
         for text, slot, tip in (
             ("+ Brique", self._add_step, "Ajoute une brique après la sélection (copie de la brique choisie)"),
-            ("+ Répétition", self._add_repeat, "Répète la brique choisie (ou ajoute un bloc 3 × 2 briques)"),
-            ("Dupliquer", self._duplicate, "Copie la brique ou la répétition choisie"),
+            ("Répéter", self._add_repeat, "Met les briques choisies (Ctrl / Maj + clic) dans une répétition, "
+             "y compris des répétitions pour en imbriquer · Ctrl+R"),
+            ("Dégrouper", self._ungroup, "Retire la répétition choisie et garde ses briques"),
+            ("Dupliquer", self._duplicate, "Copie les briques ou répétitions choisies"),
             ("Monter", lambda: self._move(-1), "Monte la brique (entre ou sort d'une répétition)"),
             ("Descendre", lambda: self._move(+1), "Descend la brique (entre ou sort d'une répétition)"),
-            ("Supprimer", self._delete, "Supprime la brique ou la répétition choisie"),
+            ("Supprimer", self._delete, "Supprime les briques ou répétitions choisies"),
         ):
             b = QPushButton(text)
             b.setToolTip(tip)
@@ -119,6 +121,7 @@ class WorkoutEditor(QDialog):
         buttons.addStretch(1)
         layout.addLayout(buttons)
         QShortcut(QKeySequence.Delete, self.tree, activated=self._delete)
+        QShortcut(QKeySequence("Ctrl+R"), self, activated=self._add_repeat)
 
         notation = QHBoxLayout()
         notation.addWidget(QLabel("Notation"))
@@ -218,6 +221,7 @@ class WorkoutEditor(QDialog):
                 self._mark(node, str(e))
                 errors.append(str(e))
                 return None
+            node.setText(COL_DURATION, format_count(count))
             if not children:
                 return None
             total = sum(s.duration_s or 0 for s in Workout(steps=children).flatten()) * count
@@ -292,7 +296,6 @@ class WorkoutEditor(QDialog):
         self._rebuild()
 
     def _selection_changed(self) -> None:
-        node = self._selected()
         steps: list[Step] = []
 
         def collect(n: QTreeWidgetItem) -> None:
@@ -301,7 +304,7 @@ class WorkoutEditor(QDialog):
             for i in range(n.childCount()):
                 collect(n.child(i))
 
-        if node is not None:
+        for node in self._selection():
             collect(node)
         self.chart.highlight = steps
         self.chart.update()
@@ -324,8 +327,53 @@ class WorkoutEditor(QDialog):
     # --- boutons ---------------------------------------------------------
 
     def _selected(self) -> QTreeWidgetItem | None:
+        """Élément courant s'il fait partie de la sélection, sinon le premier choisi."""
         items = self.tree.selectedItems()
-        return items[0] if items else None
+        current = self.tree.currentItem()
+        return current if current in items else (items[0] if items else None)
+
+    def _selection(self) -> list[QTreeWidgetItem]:
+        """Éléments choisis, sans ceux déjà inclus dans une répétition choisie, dans l'ordre du tableau."""
+        chosen = self.tree.selectedItems()
+        ids = {id(n) for n in chosen}
+
+        def inside_chosen(n: QTreeWidgetItem) -> bool:
+            p = n.parent()
+            while p is not None:
+                if id(p) in ids:
+                    return True
+                p = p.parent()
+            return False
+
+        def path(n: QTreeWidgetItem) -> list[int]:
+            out = []
+            while n is not None:
+                out.insert(0, self._siblings(n)[1])
+                n = n.parent()
+            return out
+
+        return sorted((n for n in chosen if not inside_chosen(n)), key=path)
+
+    def _group(self) -> list[QTreeWidgetItem] | None:
+        """Briques voisines à regrouper : de la première à la dernière choisie, au même niveau."""
+        nodes = self._selection()
+        if not nodes:
+            return None
+        parent = nodes[0].parent()
+        if any(n.parent() is not parent for n in nodes):
+            self.status.setStyleSheet(f"color: {ERROR};")
+            self.status.setText("Pour répéter plusieurs briques, choisissez-les au même niveau "
+                                "(toutes dans la même répétition, ou toutes hors répétition).")
+            return []
+        first, last = self._siblings(nodes[0])[1], self._siblings(nodes[-1])[1]
+        return [parent.child(i) if parent else self.tree.topLevelItem(i) for i in range(first, last + 1)]
+
+    def _select(self, nodes: list[QTreeWidgetItem]) -> None:
+        self.tree.clearSelection()
+        if nodes:
+            self.tree.setCurrentItem(nodes[0])
+        for n in nodes:
+            n.setSelected(True)
 
     def _siblings(self, node: QTreeWidgetItem) -> tuple[QTreeWidgetItem | None, int]:
         parent = node.parent()
@@ -354,7 +402,8 @@ class WorkoutEditor(QDialog):
 
     def _place(self, node: QTreeWidgetItem) -> None:
         """Insère après la sélection (dans la répétition si une répétition est choisie), puis sélectionne."""
-        selected = self._selected()
+        selection = self._selection()
+        selected = selection[-1] if selection else None
         self._updating = True
         if selected is None:
             self.tree.addTopLevelItem(node)
@@ -382,48 +431,78 @@ class WorkoutEditor(QDialog):
         self.tree.editItem(node, COL_DURATION)
 
     def _add_repeat(self) -> None:
-        selected = self._selected()
-        if selected is not None and not self._is_repeat(selected):
-            # La brique choisie devient le contenu d'une répétition 3 ×.
+        """Met les briques choisies (et répétitions, pour imbriquer) dans une nouvelle répétition."""
+        group = self._group()
+        if group == []:
+            return
+        if group:
             self._updating = True
-            parent, index = self._siblings(selected)
-            self._take(selected)
-            repeat = self._make_item(Repeat(3, [Step(60)]))
+            parent, index = self._siblings(group[0])
+            for node in group:
+                self._take(node)
+            repeat = self._make_item(Repeat(2, [Step(60)]))
             repeat.takeChild(0)
-            repeat.addChild(selected)
+            for node in group:
+                repeat.addChild(node)
             self._insert(parent, index, repeat)
             self._expand(repeat)
             self._updating = False
-            self.tree.setCurrentItem(repeat)
+            self._select([repeat])
             self._rebuild()
+            self.tree.editItem(repeat, COL_DURATION)  # tout de suite le nombre de fois
             return
         unit = self.unit_box.currentData()
         text = "3x(4m@105% 2m@55%)" if unit is PowerUnit.FTP_PERCENT else "3x(4m@260 2m@140)"
         self._place(self._make_item(parse_bricks(text)[0]))
 
-    def _duplicate(self) -> None:
+    def _ungroup(self) -> None:
         node = self._selected()
-        if node is not None:
-            self._place(node.clone())
+        if not self._is_repeat(node):
+            return
+        self._updating = True
+        parent, index = self._siblings(node)
+        self._take(node)
+        children = [node.takeChild(0) for _ in range(node.childCount())]
+        for i, child in enumerate(children):
+            self._insert(parent, index + i, child)
+            self._expand(child)
+        self._updating = False
+        self._select(children)
+        self._rebuild()
+
+    def _duplicate(self) -> None:
+        group = self._group()
+        if not group:
+            return
+        self._updating = True
+        parent, index = self._siblings(group[-1])
+        clones = [n.clone() for n in group]
+        for i, clone in enumerate(clones):
+            self._insert(parent, index + 1 + i, clone)
+            self._expand(clone)
+        self._updating = False
+        self._select(clones)
+        self._rebuild()
 
     def _delete(self) -> None:
-        node = self._selected()
-        if node is None:
+        nodes = self._selection()
+        if not nodes:
             return
-        parent, index = self._siblings(node)
+        parent, index = self._siblings(nodes[0])
         self._updating = True
-        self._take(node)
+        for node in nodes:
+            self._take(node)
         self._updating = False
         count = parent.childCount() if parent else self.tree.topLevelItemCount()
         if count:
             nxt = parent.child(min(index, count - 1)) if parent else self.tree.topLevelItem(min(index, count - 1))
-            self.tree.setCurrentItem(nxt)
+            self._select([nxt])
         elif parent is not None:
-            self.tree.setCurrentItem(parent)
+            self._select([parent])
         self._rebuild()
 
     def _move(self, direction: int) -> None:
-        """Monte ou descend ; une brique entre dans la répétition voisine ou en sort au bord."""
+        """Monte ou descend ; entre dans la répétition voisine (imbrication) ou en sort au bord."""
         node = self._selected()
         if node is None:
             return
@@ -435,7 +514,7 @@ class WorkoutEditor(QDialog):
         if 0 <= neighbour_index < count:
             neighbour = parent.child(neighbour_index - (direction > 0)) if parent else \
                 self.tree.topLevelItem(neighbour_index - (direction > 0))
-            if self._is_repeat(neighbour) and not self._is_repeat(node):
+            if self._is_repeat(neighbour):
                 neighbour.insertChild(neighbour.childCount() if direction < 0 else 0, node)
                 neighbour.setExpanded(True)
             else:
@@ -447,7 +526,7 @@ class WorkoutEditor(QDialog):
             self._insert(None, index, node)
         self._expand(node)
         self._updating = False
-        self.tree.setCurrentItem(node)
+        self._select([node])
         self._rebuild()
 
     # --- sorties ---------------------------------------------------------
