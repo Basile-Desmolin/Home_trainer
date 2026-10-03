@@ -33,6 +33,7 @@ from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Simulate
 from ..workout import PowerUnit, Segment, Workout
 from .calibration import CalibrationDialog, can_calibrate
 from .chart import ACCENT, BG, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
+from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
 from .loader import FILE_FILTER, load_workout
@@ -75,6 +76,7 @@ class MainWindow(QMainWindow):
         self.book = book if book is not None else DeviceBook()  # sans fichier : rien n'est mémorisé
         self._remembered: dict[str, tuple] = {}
         self.directory = str(Path.home())  # dernier dossier ouvert ou enregistré
+        self.library = Library()  # sans fichier : dossier non mémorisé (voir set_library)
         self.source: PowerSource = source or SimulatedTrainer()
         self.session = WorkoutSession(workout, ftp)
         self.free = FreeRideSession(ftp)
@@ -107,6 +109,8 @@ class MainWindow(QMainWindow):
             ("Modifier…", QKeySequence("Ctrl+E"), self._edit_workout, "Modifier la séance affichée"),
             ("Enregistrer sous…", QKeySequence.Save, self._save_as,
              "Enregistrer la séance affichée en .zwo, .mrc, .erg ou .fit"),
+            ("Bibliothèque…", QKeySequence("Ctrl+B"), self._open_library,
+             "Séances du dossier de la bibliothèque : recherche, aperçu, double-clic pour rouler"),
         ):
             action = QAction(text, self)
             action.setShortcut(shortcut)
@@ -429,6 +433,20 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self.set_heart_rate_sensor(dialog.sensor())
 
+    def set_library(self, library: Library) -> None:
+        """Bibliothèque des séances : ouvertures et enregistrements partent de son dossier."""
+        self.library = library
+        if library.ensure_folder():
+            self.directory = str(library.folder)
+
+    def _open_library(self) -> None:
+        dialog = LibraryDialog(self.library, self.ftp, self)
+        accepted = dialog.exec() == QDialog.Accepted
+        if self.library.folder.is_dir():
+            self.directory = str(self.library.folder)
+        if accepted and dialog.chosen_path() is not None:
+            self.open_path(str(dialog.chosen_path()))
+
     def _remember(self, role: str, sensor) -> None:
         """Mémorise l'appareil dès qu'il est connecté (adresse ou numéro découverts à la connexion)."""
         if not isinstance(sensor, BackgroundSensor) or sensor.state is not SensorState.CONNECTED:
@@ -475,6 +493,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _new_workout(self) -> None:
+        # Une nouvelle séance s'enregistre par défaut dans la bibliothèque.
+        if self.library.folder.is_dir():
+            self.directory = str(self.library.folder)
         self._open_editor(None)
 
     def _edit_workout(self) -> None:
@@ -950,6 +971,7 @@ def main(argv: list[str] | None = None) -> int:
     window.resize(1100, 760)
     if args.weight:
         window.weight_box.setValue(args.weight)
+    window.set_library(Library.load(documents=documents_folder()))
     window.show()
     if args.file:  # fichier passé en argument, ou glissé sur l'icône
         window.open_path(args.file)
