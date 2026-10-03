@@ -1,7 +1,8 @@
 """Encodeur FIT minimal (protocole 2.0), suffisant pour les fichiers de séance.
 
 Le SDK Python officiel de Garmin ne sait que décoder ; on écrit donc les
-quelques messages nécessaires à la main (file_id, workout, workout_step).
+quelques messages nécessaires à la main (file_id, workout, workout_step pour
+les séances ; record, event, lap, session, activity pour les sorties).
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ class BaseType:
 
 ENUM = BaseType(0x00, "B", 0xFF)
 UINT8 = BaseType(0x02, "B", 0xFF)
+SINT16 = BaseType(0x83, "h", 0x7FFF)
 UINT16 = BaseType(0x84, "H", 0xFFFF)
 UINT32 = BaseType(0x86, "I", 0xFFFFFFFF)
 UINT32Z = BaseType(0x8C, "I", 0)

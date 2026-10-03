@@ -10,9 +10,11 @@ toutes les consignes : c'est le réglage « +1 % / −1 % » de l'interface.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import Enum
 
+from ..formats.fit_activity import ActivityPoint
 from ..sensors.trainer import DEFAULT_BIKE_KG, DEFAULT_WEIGHT_KG, Slope
 from ..workout import Segment, Workout
 
@@ -37,6 +39,9 @@ class Sample:
     cadence_rpm: float | None = None
     heart_rate_bpm: float | None = None
     grade_pct: float | None = None  # pente simulée (mode libre en pente)
+    speed_kmh: float | None = None
+    at: float | None = None  # heure de la mesure (secondes depuis 1970), pour le .fit de la sortie
+    lap: int = 0  # brique de la séance : un tour par brique dans le .fit
 
 
 class WorkoutSession:
@@ -50,6 +55,7 @@ class WorkoutSession:
         self.intensity_pct = 100
         self.state = State.READY if self.segments else State.FINISHED
         self.samples: list[Sample] = []
+        self.exported = False  # sortie déjà enregistrée en .fit (et envoyée)
 
     # --- commandes -------------------------------------------------------
 
@@ -92,8 +98,10 @@ class WorkoutSession:
             self.next_step()
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
-               heart_rate_bpm: float | None = None) -> None:
-        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm, heart_rate_bpm))
+               heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
+               at: float | None = None) -> None:
+        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm, heart_rate_bpm,
+                                   None, speed_kmh, time.time() if at is None else at, self.index))
 
     # --- lecture ---------------------------------------------------------
 
@@ -194,6 +202,7 @@ class FreeRideSession:
         self.state = State.READY
         self.elapsed_s = 0.0
         self.samples: list[Sample] = []
+        self.exported = False
 
     def start(self) -> None:
         if self.state in (State.READY, State.PAUSED):
@@ -231,10 +240,12 @@ class FreeRideSession:
             self.elapsed_s += dt
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
-               heart_rate_bpm: float | None = None) -> None:
+               heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
+               at: float | None = None) -> None:
         erg = self.mode is FreeMode.ERG
         self.samples.append(Sample(self.elapsed_s, power_w, self.target_w if erg else None, cadence_rpm,
-                                   heart_rate_bpm, None if erg else self.grade_pct))
+                                   heart_rate_bpm, None if erg else self.grade_pct, speed_kmh,
+                                   time.time() if at is None else at))
 
     @property
     def target_pct(self) -> float | None:
@@ -246,3 +257,31 @@ class FreeRideSession:
     def average_heart_rate(self) -> float | None:
         values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
         return sum(values) / len(values) if values else None
+
+
+# --- sortie enregistrée ------------------------------------------------------
+
+MIN_RIDE_SAMPLES = 60  # moins d'une minute de pédalage : rien à enregistrer
+
+
+def ride_points(samples: list[Sample]) -> list[ActivityPoint]:
+    """Mesures de la séance ou du mode libre, prêtes pour le .fit d'activité."""
+    return [ActivityPoint(x.at, x.power_w, x.cadence_rpm, x.heart_rate_bpm, x.speed_kmh, x.grade_pct, x.lap,
+                          x.t) for x in samples if x.at is not None]
+
+
+def ride_title(session: WorkoutSession | FreeRideSession) -> tuple[str, str]:
+    """Titre et description de la sortie pour Strava / Nolio."""
+    if isinstance(session, WorkoutSession):
+        title = session.workout.name or "Séance"
+        done = session.state is State.FINISHED
+        text = f"« {title} » sur home trainer" + ("" if done else " (arrêtée avant la fin)")
+        if session.intensity_pct != 100:
+            text += f", intensité {session.intensity_pct} %"
+        if session.ftp:
+            text += f", FTP {session.ftp:.0f} W"
+        return title, text + "."
+    slope = any(x.grade_pct is not None for x in session.samples)
+    erg = any(x.grade_pct is None for x in session.samples)
+    kind = "ERG et pente simulée" if slope and erg else "pente simulée" if slope else "ERG"
+    return "Mode libre", f"Mode libre sur home trainer ({kind})."

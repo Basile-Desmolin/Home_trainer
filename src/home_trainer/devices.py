@@ -17,9 +17,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from .config import config_dir
 
 log = logging.getLogger(__name__)
 
@@ -32,11 +33,7 @@ def default_path() -> Path:
     override = os.environ.get("HOME_TRAINER_DEVICES")
     if override:
         return Path(override)
-    if sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "HomeTrainer"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "home-trainer"
-    return base / FILE_NAME
+    return config_dir() / FILE_NAME
 
 
 @dataclass

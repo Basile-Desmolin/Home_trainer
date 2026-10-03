@@ -187,8 +187,9 @@ class FreeRidePanel(QWidget):
         self.play_button = QPushButton("Démarrer")
         self.play_button.setObjectName("play")
         self.reset_button = QPushButton("Remettre à zéro")
+        self.finish_button = QPushButton("Terminer")
         self.back_button = QPushButton("Retour à la séance")
-        for b in (self.play_button, self.reset_button, self.back_button):
+        for b in (self.play_button, self.reset_button, self.finish_button, self.back_button):
             b.setFocusPolicy(Qt.NoFocus)
             buttons.addWidget(b)
         buttons.addStretch(1)

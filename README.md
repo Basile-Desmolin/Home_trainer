@@ -18,6 +18,7 @@ en composer en briques « x min à y watts ».
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 | Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
+| Chaque sortie enregistrée en `.fit` d'activité, envoi automatique vers Strava et Nolio | ✅ `formats/fit_activity.py`, `sync/` |
 
 ## Lancer l'appli sous Windows (icône)
 
@@ -206,6 +207,75 @@ La liste est enregistrée dans `%APPDATA%\HomeTrainer\appareils.json` sous
 Windows, `~/.config/home-trainer/appareils.json` ailleurs (variable
 `HOME_TRAINER_DEVICES` pour un autre fichier).
 
+## Sorties enregistrées, envoi vers Strava et Nolio
+
+À la fin de chaque sortie (séance, mode libre en ERG ou en pente), l'appli
+écrit un **`.fit` d'activité** : une mesure par seconde (puissance, cadence,
+cardio, vitesse, distance, pente), les pauses, un tour par brique de séance,
+et le résumé (moyennes, puissance normalisée, travail). Puis elle l'**envoie
+d'elle-même** vers les comptes Strava et Nolio connectés.
+
+Une sortie se termine :
+
+- en fin de séance, d'elle-même ;
+- avec le bouton **Terminer** (ou Ctrl+T), en séance comme en mode libre ;
+- en changeant de séance, avec **Recommencer** / **Remettre à zéro**, ou en
+  fermant l'appli (la sortie en cours n'est jamais perdue).
+
+Moins d'une minute de pédalage n'est pas enregistré. Sans vitesse donnée par
+le home trainer, elle est calculée comme sur la route (poids saisi, plat ou
+pente simulée), ce qui donne aussi la distance.
+
+Les fichiers vont dans `%APPDATA%\HomeTrainer\sorties` sous Windows
+(`~/.config/home-trainer/sorties` ailleurs, ou la variable
+`HOME_TRAINER_RIDES`) ; bouton **Ouvrir le dossier des sorties** dans la
+fenêtre **Strava / Nolio…**. Un envoi raté (pas de réseau, appli fermée
+pendant l'envoi) est retenté au lancement suivant, ou avec **Envoyer les
+sorties en attente**.
+
+![Strava et Nolio](docs/strava-nolio.png)
+
+### Connecter Strava (une fois)
+
+Strava n'accepte les envois que d'une appli API déclarée : chacun crée la
+sienne, gratuitement, en deux minutes.
+
+1. Connecté à Strava, ouvrir <https://www.strava.com/settings/api>.
+2. Remplir le formulaire : nom (« Home trainer de Basile »), catégorie
+   (« Training »), site web (par exemple l'adresse de ce dépôt) et surtout
+   **Domaine du rappel d'autorisation : `localhost`**. Strava demande ensuite
+   une icône (n'importe quelle image).
+3. Copier le **Client ID** et le **Client Secret** affichés dans la fenêtre
+   **Strava / Nolio…** de l'appli, puis **Se connecter** : le navigateur
+   s'ouvre sur Strava, accepter « Importer des activités ». C'est fini, la
+   page indique « Connexion réussie ».
+
+Les sorties arrivent sur Strava en « vélo », marquées *home trainer*.
+
+### Connecter Nolio (une fois)
+
+Même principe, avec l'API officielle de Nolio
+(<https://github.com/NolioApp/NolioAPI-Documentation/wiki>).
+
+1. Ouvrir <https://www.nolio.io/api/> et remplir le formulaire du portail
+   développeur (nom, e-mail, logo, usage : « logiciel de home trainer
+   personnel »).
+2. Créer une appli **personnelle** (jusqu'à 5 comptes, il n'en faut qu'un)
+   avec l'**URL de rappel `http://localhost:8765/nolio`**, exactement.
+3. Copier l'identifiant (client ID) et le secret dans **Strava / Nolio…**,
+   puis **Se connecter** et accepter dans le navigateur.
+
+Nolio met les fichiers reçus dans une file de traitement : la sortie
+apparaît dans le calendrier au bout de quelques instants.
+
+### Sécurité
+
+Identifiants et jetons d'accès restent sur l'ordinateur, dans
+`comptes.json` du dossier de configuration (variable
+`HOME_TRAINER_ACCOUNTS` pour un autre fichier), jamais dans le dépôt. La
+connexion passe par le navigateur (OAuth 2) : l'appli ne voit jamais le mot
+de passe Strava ou Nolio. **Déconnecter** oublie les jetons.
+
 ## Capteur cardiaque
 
 ```bash
@@ -264,6 +334,12 @@ sans matériel (`tests/test_sensors.py`).
   (convention FIT). Les cibles en zones, durées en distance et répétitions
   conditionnelles d'autres plateformes sont approximées, avec un
   avertissement.
+- **`.fit` d'activité** : même encodeur maison (`formats/fit_activity.py`),
+  fichiers validés par le décodeur officiel dans les tests.
+- **Strava et Nolio** : API officielles en OAuth 2, avec la seule
+  bibliothèque standard (`urllib`, petit serveur `http.server` sur
+  `localhost:8765` pour recevoir le code de connexion) ; envoi `multipart`
+  vers Strava, JSON (fichier en base64) vers Nolio (`sync/`).
 - Interface **PySide6 (Qt)**, Bluetooth via **bleak** (FTMS, et le service
   Wahoo propriétaire en repli), ANT+ via **openant** (profil FE-C) avec une
   clé USB ANT+.
