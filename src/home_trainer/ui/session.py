@@ -4,6 +4,7 @@
 trouve, combien de temps il reste, et calcule la consigne ERG à envoyer au
 home trainer. L'intensité (`intensity_pct`, 100 % par défaut) multiplie
 toutes les consignes : c'est le réglage « +1 % / −1 % » de l'interface.
+`FreeRideSession` est le mode libre : pas de séance, consigne réglée à la main.
 """
 
 from __future__ import annotations
@@ -146,3 +147,66 @@ class WorkoutSession:
         self.index = len(self.segments)
         self.step_elapsed_s = 0.0
         self.state = State.FINISHED
+
+
+MIN_FREE_TARGET_W = 25
+MAX_FREE_TARGET_W = 1500
+FREE_STEP_W = 5
+
+
+def _snap(watts: float) -> int:
+    """Consigne du mode libre : multiple de 5 W, dans les bornes."""
+    w = round(watts / FREE_STEP_W) * FREE_STEP_W
+    return int(max(MIN_FREE_TARGET_W, min(MAX_FREE_TARGET_W, w)))
+
+
+class FreeRideSession:
+    """Mode libre : pas de séance, on règle la consigne ERG à la main, en direct.
+
+    Même interface de déroulé que `WorkoutSession` (état, `tick`, `record`,
+    `samples`, `target_w`) pour que la fenêtre les pilote de la même façon.
+    """
+
+    def __init__(self, ftp: float | None = None, target_w: float | None = None) -> None:
+        self.ftp = ftp
+        self.target_w: int = _snap(target_w if target_w is not None else (ftp or 250) * 0.6)
+        self.state = State.READY
+        self.elapsed_s = 0.0
+        self.samples: list[Sample] = []
+
+    def start(self) -> None:
+        if self.state in (State.READY, State.PAUSED):
+            self.state = State.RUNNING
+
+    def pause(self) -> None:
+        if self.state is State.RUNNING:
+            self.state = State.PAUSED
+
+    def toggle(self) -> None:
+        self.pause() if self.state is State.RUNNING else self.start()
+
+    def set_target(self, watts: float) -> int:
+        self.target_w = _snap(watts)
+        return self.target_w
+
+    def adjust_target(self, delta_w: float) -> int:
+        return self.set_target(self.target_w + delta_w)
+
+    def tick(self, dt: float) -> None:
+        if self.state is State.RUNNING:
+            self.elapsed_s += dt
+
+    def record(self, power_w: float, cadence_rpm: float | None = None,
+               heart_rate_bpm: float | None = None) -> None:
+        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm, heart_rate_bpm))
+
+    @property
+    def target_pct(self) -> float | None:
+        return self.target_w / self.ftp * 100 if self.ftp else None
+
+    def average_power(self) -> float | None:
+        return sum(x.power_w for x in self.samples) / len(self.samples) if self.samples else None
+
+    def average_heart_rate(self) -> float | None:
+        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
+        return sum(values) / len(values) if values else None

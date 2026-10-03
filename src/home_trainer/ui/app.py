@@ -1,4 +1,5 @@
-"""Fenêtre principale : séance complète, temps restant, puissance, cardio, réglage ±1 %.
+"""Fenêtre principale : séance complète, temps restant, puissance, cardio, réglage ±1 %,
+et mode libre (sans séance, consigne ERG réglée à la main par pas de 5 W).
 
     home-trainer-gui [seance.erg] [--ftp 250] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
                      [--trainer sim|ble|ant] [--trainer-address AA:BB:…] [--trainer-ant-id 12345]
@@ -6,7 +7,8 @@
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 → ou N = brique suivante, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
-Ctrl+E = modifier, Ctrl+S = enregistrer sous.
+Ctrl+E = modifier, Ctrl+S = enregistrer sous, Ctrl+L = mode libre / séance.
+En mode libre : ↑ ↓ = ±5 W, Page↑ Page↓ = ±25 W.
 """
 
 from __future__ import annotations
@@ -30,9 +32,11 @@ from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Simulate
 from ..workout import PowerUnit, Segment, Workout
 from .chart import ACCENT, BG, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
+from .free_ride import BIG_STEP_W, FreeRidePanel
 from .loader import FILE_FILTER, load_workout
+from .metric import Metric
 from .power import PowerSource, SimulatedTrainer, open_power_source
-from .session import State, WorkoutSession
+from .session import FREE_STEP_W, FreeRideSession, State, WorkoutSession
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
@@ -58,33 +62,6 @@ def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) 
     return f"{duration} à {target}{name}"
 
 
-class Metric(QFrame):
-    """Une grande valeur avec son libellé."""
-
-    def __init__(self, title: str, size: int = 34, color: str = TEXT) -> None:
-        super().__init__()
-        self.setObjectName("metric")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 8, 14, 10)
-        layout.setSpacing(0)
-        self.title = QLabel(title)
-        self.title.setObjectName("metricTitle")
-        self.value = QLabel("—")
-        font = QFont()
-        font.setPointSize(size)
-        font.setBold(True)
-        self.value.setFont(font)
-        self.value.setStyleSheet(f"color: {color};")
-        self.sub = QLabel("")
-        self.sub.setObjectName("metricSub")
-        for w in (self.title, self.value, self.sub):
-            layout.addWidget(w)
-
-    def set(self, value: str, sub: str = "") -> None:
-        self.value.setText(value)
-        self.sub.setText(sub)
-
-
 class MainWindow(QMainWindow):
     def __init__(self, workout: Workout, ftp: float = DEFAULT_FTP,
                  source: PowerSource | None = None,
@@ -97,6 +74,7 @@ class MainWindow(QMainWindow):
         self.directory = str(Path.home())  # dernier dossier ouvert ou enregistré
         self.source: PowerSource = source or SimulatedTrainer()
         self.session = WorkoutSession(workout, ftp)
+        self.free = FreeRideSession(ftp)
         self._since_sample = 0.0
         self._last_reading = None
         self.heart_rate: BackgroundSensor[HeartRateReading] | None = None
@@ -153,8 +131,10 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.source_label)
 
     def _build_body(self) -> None:
+        self.pages = QStackedWidget()
+        self.setCentralWidget(self.pages)
         root = QWidget()
-        self.setCentralWidget(root)
+        self.pages.addWidget(root)
         layout = QVBoxLayout(root)
         layout.setContentsMargins(14, 10, 14, 14)
         layout.setSpacing(10)
@@ -200,7 +180,10 @@ class MainWindow(QMainWindow):
         self.next_button.clicked.connect(self._next_step)
         self.reset_button = QPushButton("Recommencer")
         self.reset_button.clicked.connect(self._reset)
-        for b in (self.play_button, self.next_button, self.reset_button):
+        self.free_button = QPushButton("Mode libre")
+        self.free_button.setToolTip("Rouler sans séance en réglant la puissance à la main (Ctrl+L)")
+        self.free_button.clicked.connect(self.enter_free_ride)
+        for b in (self.play_button, self.next_button, self.reset_button, self.free_button):
             b.setFocusPolicy(Qt.NoFocus)
             buttons.addWidget(b)
         buttons.addStretch(1)
@@ -208,6 +191,15 @@ class MainWindow(QMainWindow):
         hint.setObjectName("metricSub")
         buttons.addWidget(hint)
         layout.addLayout(buttons)
+
+        self.free_panel = FreeRidePanel()
+        self.free_panel.chart.set_session(self.free)
+        self.free_panel.play_button.clicked.connect(self._toggle)
+        self.free_panel.reset_button.clicked.connect(self._reset_free_ride)
+        self.free_panel.back_button.clicked.connect(self.leave_free_ride)
+        for b, delta in self.free_panel.adjust_buttons:
+            b.clicked.connect(lambda _=False, d=delta: self.adjust_free(d))
+        self.pages.addWidget(self.free_panel)
 
     def _build_intensity(self) -> QWidget:
         box = QFrame()
@@ -241,14 +233,27 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_shortcuts(self) -> None:
+        # ↑ ↓ : ±1 % sur une séance, ±5 W en mode libre ; Page↑ Page↓ : ±5 % ou ±25 W.
         for keys, slot in (((Qt.Key_Space,), self._toggle),
-                           ((Qt.Key_Up, Qt.Key_Plus, Qt.Key_Equal), lambda: self.adjust(+1)),
-                           ((Qt.Key_Down, Qt.Key_Minus), lambda: self.adjust(-1)),
+                           ((Qt.Key_Up, Qt.Key_Plus, Qt.Key_Equal), lambda: self._step(+1)),
+                           ((Qt.Key_Down, Qt.Key_Minus), lambda: self._step(-1)),
+                           ((Qt.Key_PageUp,), lambda: self._step(+5)),
+                           ((Qt.Key_PageDown,), lambda: self._step(-5)),
                            ((Qt.Key_Right, Qt.Key_N), self._next_step)):
             for key in keys:
                 QShortcut(QKeySequence(key), self, activated=slot)
+        QShortcut(QKeySequence("Ctrl+L"), self, activated=self._toggle_free_ride)
 
     # --- actions ---------------------------------------------------------
+
+    @property
+    def free_ride(self) -> bool:
+        """Vrai quand le mode libre est affiché (et c'est lui qui pilote le home trainer)."""
+        return self.pages.currentWidget() is self.free_panel
+
+    @property
+    def active(self) -> WorkoutSession | FreeRideSession:
+        return self.free if self.free_ride else self.session
 
     def load(self, workout: Workout) -> None:
         intensity = self.session.intensity_pct
@@ -257,7 +262,8 @@ class MainWindow(QMainWindow):
         self._since_sample = 0.0
         self.chart.set_session(self.session)
         self.title.setText(f"{workout.name}  ·  {hms(self.session.total_s)}")
-        self.setWindowTitle(f"{workout.name} — Home trainer")
+        if not self.free_ride:
+            self.setWindowTitle(f"{workout.name} — Home trainer")
         self._refresh()
 
     def adjust(self, delta: int) -> None:
@@ -265,7 +271,54 @@ class MainWindow(QMainWindow):
         self._push_target()
         self._refresh()
 
+    def adjust_free(self, delta_w: float) -> None:
+        self.free.adjust_target(delta_w)
+        self._push_target()
+        self._refresh()
+
+    def _step(self, notches: int) -> None:
+        if self.free_ride:
+            self.adjust_free(notches * FREE_STEP_W if abs(notches) == 1 else notches // 5 * BIG_STEP_W)
+        else:
+            self.adjust(notches)
+
+    def enter_free_ride(self) -> None:
+        """Passe en mode libre ; la séance est mise en pause là où elle en est."""
+        if self.free_ride:
+            return
+        self.session.pause()
+        self.pages.setCurrentWidget(self.free_panel)
+        self.setWindowTitle("Mode libre — Home trainer")
+        self._push_target()
+        self._refresh()
+
+    def leave_free_ride(self) -> None:
+        """Revient à la séance ; le mode libre est mis en pause (sa consigne et son temps sont gardés)."""
+        if not self.free_ride:
+            return
+        self.free.pause()
+        self.pages.setCurrentIndex(0)
+        self.setWindowTitle(f"{self.session.workout.name} — Home trainer")
+        self._push_target()
+        self._refresh()
+
+    def _toggle_free_ride(self) -> None:
+        self.leave_free_ride() if self.free_ride else self.enter_free_ride()
+
+    def _reset_free_ride(self) -> None:
+        self.free = FreeRideSession(self.ftp, self.free.target_w)
+        self.free_panel.chart.set_session(self.free)
+        self._since_sample = 0.0
+        self._push_target()
+        self._refresh()
+
     def _toggle(self) -> None:
+        if self.free_ride:
+            self.free.toggle()
+            self.clock.restart()
+            self._push_target()
+            self._refresh()
+            return
         if self.session.state is State.FINISHED:
             self._reset()
         self.session.toggle()
@@ -273,6 +326,8 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _next_step(self) -> None:
+        if self.free_ride:
+            return
         self.session.next_step()
         self._push_target()
         self._refresh()
@@ -284,6 +339,7 @@ class MainWindow(QMainWindow):
         if self.ftp_box.value() == self.ftp:
             return
         self.ftp = self.ftp_box.value()
+        self.free.ftp = self.ftp
         if isinstance(self.heart_rate, SimulatedHeartRate):
             self.heart_rate.ftp = self.ftp
         s = self.session
@@ -326,7 +382,7 @@ class MainWindow(QMainWindow):
     def _simulated_effort(self) -> float | None:
         """Ce que « ressent » le cardio simulé : la puissance pédalée en ce moment."""
         r = self._last_reading
-        return r.power_w if r is not None and self.session.state is State.RUNNING else None
+        return r.power_w if r is not None and self.active.state is State.RUNNING else None
 
     def _choose_heart_rate(self) -> None:
         dialog = HeartRateDialog(self.book, self)
@@ -374,6 +430,7 @@ class MainWindow(QMainWindow):
         self.directory = str(Path(path).parent)
         if warnings:
             QMessageBox.information(self, "À savoir", "\n".join(warnings))
+        self.leave_free_ride()
         self.load(workout)
         return True
 
@@ -384,8 +441,8 @@ class MainWindow(QMainWindow):
         self._open_editor(self.session.workout)
 
     def _open_editor(self, workout: Workout | None) -> None:
-        if self.session.state is State.RUNNING:
-            self.session.pause()
+        if self.active.state is State.RUNNING:
+            self.active.pause()
             self._push_target()
             self._refresh()
         editor = WorkoutEditor(workout, self.ftp, self, directory=self.directory)
@@ -396,6 +453,7 @@ class MainWindow(QMainWindow):
             self._ftp_changed()
         result = editor.workout()
         if accepted and result is not None:
+            self.leave_free_ride()
             self.load(result)
 
     def _save_as(self) -> None:
@@ -419,9 +477,10 @@ class MainWindow(QMainWindow):
 
     def _on_tick(self) -> None:
         dt = self.clock.restart() / 1000
-        self.session.tick(dt)
+        active = self.active
+        active.tick(dt)
         self._push_target()
-        running = self.session.state is State.RUNNING
+        running = active.state is State.RUNNING
         # Un vrai home trainer est lu en permanence (échauffement, pause) ; le simulateur seulement en séance.
         reading = self.source.read(dt) if running or isinstance(self.source, Trainer) else None
         self._last_reading = reading
@@ -430,15 +489,21 @@ class MainWindow(QMainWindow):
             if self._since_sample >= 1.0:
                 self._since_sample -= 1.0
                 heart = self.heart_rate.latest() if self.heart_rate is not None else None
-                self.session.record(reading.power_w, reading.cadence_rpm, heart.bpm if heart else None)
+                active.record(reading.power_w, reading.cadence_rpm, heart.bpm if heart else None)
         self._refresh()
 
     def _push_target(self) -> None:
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
-        running = self.session.state is State.RUNNING
-        self.source.set_target(self.session.target_w if running else None)
+        active = self.active
+        running = active.state is State.RUNNING
+        self.source.set_target(active.target_w if running else None)
 
     def _refresh(self) -> None:
+        if self.free_ride:
+            self.free_panel.refresh(self.free, self._last_reading)
+            self._refresh_heart_rate(self.free_panel.m_heart, self.free)
+            self._refresh_source()
+            return
         s = self.session
         r = self._last_reading
         self.m_power.set(f"{r.power_w:.0f} W" if r else "—", f"{r.power_w / self.ftp * 100:.0f} % FTP" if r else "")
@@ -452,7 +517,7 @@ class MainWindow(QMainWindow):
                         f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}")
         self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
-        self._refresh_heart_rate()
+        self._refresh_heart_rate(self.m_heart, s)
         self._refresh_source()
         self.intensity_label.setText(f"{s.intensity_pct} %")
         self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
@@ -475,24 +540,24 @@ class MainWindow(QMainWindow):
             text += f" : {source.status if source.state is not SensorState.CONNECTED else 'signal perdu'}"
         self.source_label.setText(f"  {text}")
 
-    def _refresh_heart_rate(self) -> None:
+    def _refresh_heart_rate(self, metric: Metric, session: WorkoutSession | FreeRideSession) -> None:
         sensor = self.heart_rate
         if sensor is None:
-            self.m_heart.set("—", "aucun capteur · menu Cardio…")
+            metric.set("—", "aucun capteur · menu Cardio…")
             return
         self._remember("hr", sensor)
         heart = sensor.latest()
-        average = self.session.average_heart_rate()
+        average = session.average_heart_rate()
         if heart is not None:
             sub = f"bpm · moy. {average:.0f}" if average else "bpm"
             if heart.battery_pct is not None and heart.battery_pct <= 20:
                 sub += f" · batterie {heart.battery_pct} %"
             if heart.contact is False:
                 sub += " · mauvais contact"
-            self.m_heart.set(f"{heart.bpm}", sub)
+            metric.set(f"{heart.bpm}", sub)
         else:
             state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
-            self.m_heart.set("—", f"{self._display_name('hr', sensor)} : {state}")
+            metric.set("—", f"{self._display_name('hr', sensor)} : {state}")
 
 
 class SensorDialog(QDialog):
