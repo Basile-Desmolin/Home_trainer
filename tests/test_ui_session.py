@@ -137,3 +137,15 @@ def test_simulated_rider_slows_down_uphill():
     assert b.speed_kmh < a.speed_kmh * 0.7  # … et on va bien moins vite
     assert 20 < a.speed_kmh < 35
     assert road_speed_kmh(200, Slope(-5, 70)) > road_speed_kmh(200, Slope(0, 70))
+
+
+def test_erg_off_sends_free_resistance_while_workout_keeps_running():
+    s = WorkoutSession(parse_workout("1m@100 1m@200"), 200, rider_kg=65)
+    s.start()
+    assert s.erg and s.command == 100
+    assert s.toggle_erg() is False
+    assert s.command == Slope(0.0, 65)  # route plate : résistance libre
+    s.tick(70)
+    assert s.index == 1 and s.target_w == 200  # la séance déroule, la cible reste affichée
+    s.toggle_erg()
+    assert s.command == 200  # ERG réactivé : consigne de la brique en cours

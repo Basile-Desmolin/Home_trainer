@@ -142,6 +142,11 @@ puissance réalisée ; temps restant sur la brique et au total ; puissance,
 cible et cadence ; intensité réglable par pas de 1 % (boutons, ou ↑ ↓,
 appui long pour défiler). Espace = démarrer / pause, → = brique suivante.
 
+Bouton **ERG on / off** (ou E) : ERG off, le home trainer passe en
+résistance libre (route plate, selon le poids) ; la séance continue de
+dérouler et la cible reste affichée pour la suivre à la main avec les
+vitesses. ERG on reprend la consigne de la brique en cours.
+
 Le home trainer réel et le simulateur (`ui/power.py`) offrent la même
 interface `PowerSource` (`set_target`, `read`), voir ci-dessous.
 La logique de déroulé (`ui/session.py`) ne dépend pas de Qt et est testée.
