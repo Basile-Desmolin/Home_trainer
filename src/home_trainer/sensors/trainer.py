@@ -23,9 +23,10 @@ sur la route) ou None : « résistance libre », c'est-à-dire du plat.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from enum import Enum
 
-from .base import BackgroundSensor
+from .base import BackgroundSensor, SensorState
 
 
 def _uuid16(short: int) -> str:
@@ -193,6 +194,7 @@ def ftms_grade(slope: Slope) -> float:
 class FtmsResponse:
     request: int
     result: int
+    params: bytes = b""
 
     @property
     def ok(self) -> bool:
@@ -206,7 +208,7 @@ class FtmsResponse:
 def parse_ftms_response(data: bytes | bytearray) -> FtmsResponse | None:
     """Réponse du Control Point (indication 0x80, commande, résultat), sinon None."""
     if len(data) >= 3 and data[0] == FTMS_RESPONSE:
-        return FtmsResponse(data[1], data[2])
+        return FtmsResponse(data[1], data[2], bytes(data[3:]))
     return None
 
 
@@ -243,14 +245,25 @@ def wahoo_commands_for(target_w: float | Slope | None) -> list[bytes]:
     return [wahoo_set_erg(target_w)]
 
 
+WHEEL_CIRCUMFERENCE_M = 2.096  # roue de 700×25, celle que simule un home trainer à transmission directe
+
+
 @dataclass
 class CyclingPowerDecoder:
-    """Décode « Cycling Power Measurement » (0x2A63) ; la cadence vient des tours de pédalier."""
+    """Décode « Cycling Power Measurement » (0x2A63).
+
+    La cadence vient des tours de pédalier, la vitesse des tours de roue
+    (virtuelle sur un home trainer à transmission directe), quand ils sont transmis.
+    """
 
     _revs: int | None = None
     _event: int | None = None
     _cadence: float | None = None
     _idle: int = 0
+    _wheel: int | None = None
+    _wheel_event: int | None = None
+    _speed: float | None = None
+    _wheel_idle: int = 0
 
     def feed(self, data: bytes | bytearray) -> TrainerReading:
         if len(data) < 4:
@@ -262,8 +275,9 @@ class CyclingPowerDecoder:
             i += 1  # équilibre gauche / droite
         if flags & 0x0004:
             i += 2  # couple cumulé
-        if flags & 0x0010:
-            i += 6  # tours de roue
+        if flags & 0x0010 and i + 6 <= len(data):
+            self._feed_wheel(int.from_bytes(data[i:i + 4], "little"), int.from_bytes(data[i + 4:i + 6], "little"))
+            i += 6
         if flags & 0x0020 and i + 4 <= len(data):
             revs = int.from_bytes(data[i:i + 2], "little")
             event = int.from_bytes(data[i + 2:i + 4], "little")  # 1/1024 s
@@ -278,7 +292,21 @@ class CyclingPowerDecoder:
                     if self._idle >= 4:  # plus de tour de pédalier depuis ~2 s
                         self._cadence = 0.0
             self._revs, self._event = revs, event
-        return TrainerReading(float(power), self._cadence)
+        return TrainerReading(float(power), self._cadence, self._speed)
+
+    def _feed_wheel(self, revs: int, event: int) -> None:
+        """Tours de roue cumulés (32 bits) et instant du dernier tour (1/2048 s)."""
+        if self._wheel is not None:
+            d_revs = (revs - self._wheel) % 2**32
+            d_time = (event - self._wheel_event) % 65536
+            if d_revs and d_time:
+                self._speed = round(d_revs * WHEEL_CIRCUMFERENCE_M * 2048 / d_time * 3.6, 2)
+                self._wheel_idle = 0
+            else:
+                self._wheel_idle += 1
+                if self._wheel_idle >= 4:  # roue arrêtée depuis ~2 s
+                    self._speed = 0.0
+        self._wheel, self._wheel_event = revs, event
 
 
 # --- ANT+ FE-C -----------------------------------------------------------------
@@ -344,6 +372,221 @@ def fec_pages_for(target_w: float | Slope | None) -> list[list[int]]:
     if isinstance(target_w, Slope):
         return [fec_user_configuration(target_w.rider_kg, target_w.bike_kg), fec_page_for(target_w)]
     return [fec_page_for(target_w)]
+
+
+# --- calibration (spindown) ----------------------------------------------------
+#
+# Le home trainer mesure combien de temps son volant met à s'arrêter, roue
+# libre, depuis une vitesse donnée : il en déduit ses propres frottements et
+# corrige ses mesures de puissance. Le déroulé est le même partout : on
+# demande la calibration, le cycliste accélère jusqu'à la vitesse indiquée,
+# arrête de pédaler, et le home trainer donne le résultat une fois arrêté.
+
+FTMS_SPIN_DOWN_CONTROL = 0x13
+FTMS_SPIN_DOWN_START = 0x01
+FTMS_STATUS_SPIN_DOWN = 0x14
+FTMS_SPIN_DOWN_STATES = {0x01: "requested", 0x02: "success", 0x03: "error", 0x04: "stop pedaling"}
+
+WAHOO_INIT_SPINDOWN = 0x49
+WAHOO_SPINDOWN_KMH = 35.0  # vitesse à dépasser, celle que demande l'appli Wahoo
+
+FEC_CALIBRATION_PAGE = 0x01  # demande, puis résultat
+FEC_CALIBRATION_PROGRESS_PAGE = 0x02
+FEC_CAL_ZERO_OFFSET = 0x40
+FEC_CAL_SPINDOWN = 0x80
+
+SIMULATED_SPINDOWN_KMH = 30.0
+
+
+def ftms_spin_down() -> bytes:
+    """« Spin Down Control » : le home trainer répond par la plage de vitesse à atteindre."""
+    return bytes([FTMS_SPIN_DOWN_CONTROL, FTMS_SPIN_DOWN_START])
+
+
+def wahoo_init_spindown() -> bytes:
+    return bytes([WAHOO_INIT_SPINDOWN])
+
+
+def fec_calibration_request() -> list[int]:
+    """Page 0x01 : demande de calibration par roue libre (température, décalage et temps inconnus)."""
+    return [FEC_CALIBRATION_PAGE, FEC_CAL_SPINDOWN, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
+
+
+class CalibrationPhase(str, Enum):
+    IDLE = "aucune"
+    REQUESTED = "demandée"  # par l'interface, pas encore transmise
+    STARTING = "en attente du home trainer"
+    SPEED_UP = "accélérez"
+    COAST = "arrêtez de pédaler"
+    DONE = "réussie"
+    FAILED = "échec"
+
+
+ACTIVE_PHASES = (CalibrationPhase.REQUESTED, CalibrationPhase.STARTING, CalibrationPhase.SPEED_UP,
+                 CalibrationPhase.COAST)
+
+
+@dataclass(frozen=True)
+class CalibrationStatus:
+    """Où en est la calibration, ce que l'interface affiche."""
+
+    phase: CalibrationPhase = CalibrationPhase.IDLE
+    message: str = ""
+    target_kmh: float | None = None  # vitesse à atteindre
+    target_high_kmh: float | None = None  # sans la dépasser (FTMS)
+    speed_kmh: float | None = None  # vitesse actuelle
+    spindown_ms: int | None = None  # temps de roue libre mesuré, une fois réussie
+    temperature_c: float | None = None
+    unsupported: bool = False  # le home trainer ne connaît pas cette commande
+
+    @property
+    def active(self) -> bool:
+        return self.phase in ACTIVE_PHASES
+
+    @property
+    def finished(self) -> bool:
+        return self.phase in (CalibrationPhase.DONE, CalibrationPhase.FAILED)
+
+
+class Calibration:
+    """Suit une calibration à partir des trames reçues du home trainer.
+
+    Les pilotes radio lui passent ce qu'ils reçoivent (`on_ftms_response`,
+    `on_ftms_status`, `on_fec_page`, `on_speed`) ; l'interface lit `status`.
+    `protocol` dit qui mène : « FTMS » et « FE-C » annoncent eux-mêmes les
+    étapes, « Wahoo » et « simulé » sont suivis à la vitesse de la roue.
+    """
+
+    reply_timeout_s = 10.0  # sans réponse à la demande : commande sans doute ignorée
+    timeout_s = 120.0
+    stopped_kmh = 2.0
+
+    def __init__(self) -> None:
+        self.status = CalibrationStatus()
+        self.protocol: str | None = None
+        self._since = 0.0
+        self._coast_at: float | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.status.active
+
+    def _set(self, phase: CalibrationPhase | None = None, **changes) -> None:
+        if phase is not None:
+            changes["phase"] = phase
+        self.status = replace(self.status, **changes)
+
+    # --- côté interface ------------------------------------------------
+
+    def request(self) -> None:
+        self.status = CalibrationStatus(CalibrationPhase.REQUESTED, "demande de calibration…",
+                                        speed_kmh=self.status.speed_kmh)
+
+    def cancel(self) -> None:
+        if self.active:
+            self._set(CalibrationPhase.FAILED, message="calibration annulée")
+
+    def fail(self, message: str, unsupported: bool = False) -> None:
+        self._set(CalibrationPhase.FAILED, message=message, unsupported=unsupported)
+
+    # --- côté radio ----------------------------------------------------
+
+    def begin(self, protocol: str, now: float) -> None:
+        """La demande vient de partir vers le home trainer."""
+        self.protocol = protocol
+        self._since = now
+        self._coast_at = None
+        if protocol in ("Wahoo", "simulé"):
+            target = WAHOO_SPINDOWN_KMH if protocol == "Wahoo" else SIMULATED_SPINDOWN_KMH
+            self._set(CalibrationPhase.SPEED_UP, message=f"accélérez au-delà de {target:.0f} km/h",
+                      target_kmh=target, unsupported=False)
+        else:
+            self._set(CalibrationPhase.STARTING, message="en attente du home trainer…", unsupported=False)
+
+    def tick(self, now: float) -> None:
+        phase = self.status.phase
+        if phase is CalibrationPhase.STARTING and now - self._since > self.reply_timeout_s:
+            self.fail("le home trainer ne répond pas : il ne propose sans doute pas la calibration", True)
+        elif self.active and phase is not CalibrationPhase.REQUESTED and now - self._since > self.timeout_s:
+            self.fail("calibration interrompue : trop longue")
+
+    def on_speed(self, kmh: float, now: float) -> None:
+        self._set(speed_kmh=kmh)
+        if self.protocol not in ("Wahoo", "simulé"):
+            return
+        phase = self.status.phase
+        if phase is CalibrationPhase.SPEED_UP and kmh >= (self.status.target_kmh or 0):
+            self._coast_at = now
+            self._set(CalibrationPhase.COAST, message="arrêtez de pédaler, laissez la roue s'arrêter")
+        elif phase is CalibrationPhase.COAST and kmh <= self.stopped_kmh:
+            spindown = round((now - (self._coast_at or now)) * 1000)
+            self._set(CalibrationPhase.DONE, message="calibration terminée", spindown_ms=spindown)
+
+    def on_ftms_response(self, response: FtmsResponse) -> None:
+        """Réponse du Control Point à « Spin Down Control » : plage de vitesse, ou refus."""
+        if response.request != FTMS_SPIN_DOWN_CONTROL or not self.active:
+            return
+        if not response.ok:
+            unsupported = response.result == 0x02
+            self.fail("ce home trainer ne propose pas la calibration en FTMS" if unsupported
+                      else f"calibration refusée : {response.message}", unsupported)
+            return
+        low = high = None
+        if len(response.params) >= 4:
+            low = int.from_bytes(response.params[0:2], "little") / 100
+            high = int.from_bytes(response.params[2:4], "little") / 100
+        message = (f"accélérez entre {low:.0f} et {high:.0f} km/h" if low is not None
+                   else "accélérez jusqu'à ce que le home trainer vous demande d'arrêter")
+        self._set(CalibrationPhase.SPEED_UP, message=message, target_kmh=low, target_high_kmh=high)
+
+    def on_ftms_status(self, data: bytes | bytearray) -> None:
+        """Notification « Fitness Machine Status » (0x2ADA), code 0x14 = état de la calibration."""
+        if len(data) < 2 or data[0] != FTMS_STATUS_SPIN_DOWN or not self.active:
+            return
+        state = FTMS_SPIN_DOWN_STATES.get(data[1])
+        if state == "requested":
+            self._set(CalibrationPhase.SPEED_UP)
+        elif state == "stop pedaling":
+            self._set(CalibrationPhase.COAST, message="arrêtez de pédaler, laissez la roue s'arrêter")
+        elif state == "success":
+            self._set(CalibrationPhase.DONE, message="calibration terminée")
+        elif state == "error":
+            self.fail("calibration ratée : recommencez en accélérant franchement, puis sans toucher aux pédales")
+
+    def on_fec_page(self, payload: bytes | bytearray | list[int]) -> None:
+        """Pages FE-C 0x02 (calibration en cours) et 0x01 (résultat)."""
+        data = bytes(payload)
+        if len(data) != 8 or data[0] not in (FEC_CALIBRATION_PAGE, FEC_CALIBRATION_PROGRESS_PAGE):
+            return
+        if not self.active:
+            return
+        temperature = None if data[3] == 0xFF else data[3] / 2 - 25
+        if data[0] == FEC_CALIBRATION_PROGRESS_PAGE:
+            raw_speed = int.from_bytes(data[4:6], "little")
+            target = None if raw_speed == 0xFFFF else round(raw_speed * 0.0036, 1)
+            speed = data[2] & 0xC0
+            temp = data[2] & 0x30
+            if speed == 0x80:  # vitesse atteinte
+                phase, message = CalibrationPhase.COAST, "arrêtez de pédaler, laissez la roue s'arrêter"
+            elif self.status.phase is CalibrationPhase.COAST:
+                phase, message = CalibrationPhase.COAST, self.status.message
+            else:
+                phase = CalibrationPhase.SPEED_UP
+                message = (f"accélérez jusqu'à {target:.0f} km/h" if target
+                           else "accélérez jusqu'à ce que le home trainer vous demande d'arrêter")
+                if temp == 0x10:
+                    message += " (home trainer encore froid : échauffez-vous quelques minutes)"
+            self._set(phase, message=message, target_kmh=target or self.status.target_kmh,
+                      temperature_c=temperature)
+            return
+        if self.status.phase is CalibrationPhase.STARTING:
+            return  # simple écho de notre demande, avant que la calibration ne commence
+        raw_time = int.from_bytes(data[6:8], "little")
+        if data[1] & FEC_CAL_SPINDOWN:
+            self._set(CalibrationPhase.DONE, message="calibration terminée",
+                      spindown_ms=None if raw_time == 0xFFFF else raw_time, temperature_c=temperature)
+        else:
+            self.fail("calibration ratée : recommencez en accélérant franchement, puis sans toucher aux pédales")
 
 
 # --- consignes : quand les renvoyer --------------------------------------------
@@ -414,6 +657,8 @@ class Trainer(BackgroundSensor[TrainerReading]):
         super().__init__()
         self.throttle = throttle or TargetThrottle()
         self._target: float | Slope | None = None
+        self.calibration = Calibration()
+        self._calibrating = False
 
     @property
     def target_w(self) -> float | Slope | None:
@@ -425,10 +670,47 @@ class Trainer(BackgroundSensor[TrainerReading]):
     def read(self, dt: float = 0.0) -> TrainerReading | None:
         return self.latest()
 
+    # --- calibration ---------------------------------------------------
+
+    def start_calibration(self) -> None:
+        """Demande une calibration (spindown) ; le fil radio la transmet. Suivre `calibration_status()`."""
+        if self.state is not SensorState.CONNECTED:
+            self.calibration.request()
+            self.calibration.fail("home trainer pas encore connecté : pédalez pour le réveiller")
+            return
+        self.calibration.request()
+
+    def cancel_calibration(self) -> None:
+        self.calibration.cancel()
+
+    def calibration_status(self) -> CalibrationStatus:
+        return self.calibration.status
+
+    def _publish(self, reading: TrainerReading) -> None:
+        if self.calibration.active and reading.speed_kmh is not None:
+            self.calibration.on_speed(reading.speed_kmh, time.monotonic())
+        super()._publish(reading)
+
+    def _calibration_due(self) -> bool:
+        """Vrai si une calibration vient d'être demandée et doit partir (à appeler par le fil radio)."""
+        return self.calibration.status.phase is CalibrationPhase.REQUESTED
+
     def _pending_target(self) -> tuple[bool, float | Slope | None]:
-        """(à envoyer ?, consigne) : à appeler régulièrement par le fil radio."""
+        """(à envoyer ?, consigne) : à appeler régulièrement par le fil radio.
+
+        Pendant une calibration, rien ne part : c'est le home trainer qui mène.
+        Après, la consigne en cours repart aussitôt."""
         target = self._target
-        return self.throttle.due(target, time.monotonic()), target
+        now = time.monotonic()
+        if self.calibration.active:
+            self.calibration.tick(now)
+        if self.calibration.active:
+            self._calibrating = True
+            return False, target
+        if self._calibrating:
+            self._calibrating = False
+            self.throttle.reset()
+        return self.throttle.due(target, now), target
 
     def _target_sent(self, target: float | Slope | None) -> None:
         self.throttle.mark_sent(target, time.monotonic())

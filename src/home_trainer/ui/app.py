@@ -31,6 +31,7 @@ from ..formats import FormatError, save_workout
 from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, SimulatedHeartRate, Trainer,
                        open_heart_rate_sensor)
 from ..workout import PowerUnit, Segment, Workout
+from .calibration import CalibrationDialog, can_calibrate
 from .chart import ACCENT, BG, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
@@ -393,9 +394,18 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _choose_trainer(self) -> None:
-        dialog = TrainerDialog(self.book, self)
+        dialog = TrainerDialog(self.book, self, current=self.source,
+                               current_name=self._display_name("trainer", self.source),
+                               before_calibration=self._pause_for_calibration)
         if dialog.exec() == QDialog.Accepted:
             self.set_power_source(dialog.sensor())
+
+    def _pause_for_calibration(self) -> None:
+        """La séance se met en pause : pendant la calibration, c'est le home trainer qui mène."""
+        if self.active.state is State.RUNNING:
+            self.active.pause()
+            self._push_target()
+            self._refresh()
 
     def set_heart_rate_sensor(self, sensor: BackgroundSensor[HeartRateReading] | None) -> None:
         """Remplace le capteur cardio (None = aucun) et le démarre."""
@@ -624,6 +634,7 @@ class SensorDialog(QDialog):
         self.message.setObjectName("metricSub")
         self.message.setWordWrap(True)
         form.addRow("", self.message)
+        self._extra_rows(form)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -635,6 +646,9 @@ class SensorDialog(QDialog):
         self._scan_result: list | Exception | None = None
         self._scan_timer = QTimer(self)
         self._scan_timer.timeout.connect(self._scan_done)
+
+    def _extra_rows(self, form: QFormLayout) -> None:
+        """Lignes propres à un type d'appareil, avant les boutons OK / Annuler."""
 
     def _initial_index(self) -> int:
         """Le dernier appareil choisi, sinon l'appareil simulé."""
@@ -819,6 +833,35 @@ class TrainerDialog(SensorDialog):
     SCAN_TEXT = ("Recherche des home trainers Bluetooth (5 s)… Pédalez pour réveiller le Wahoo, "
                  "et fermez les autres applis qui pourraient s'y connecter (Wahoo, Zwift…).")
     ANY_DEVICE = "Premier home trainer trouvé"
+
+    def __init__(self, book: DeviceBook, parent: QWidget | None = None, *, current: PowerSource | None = None,
+                 current_name: str = "", before_calibration=None) -> None:
+        self.current = current
+        self.current_name = current_name or getattr(current, "name", "")
+        self.before_calibration = before_calibration
+        super().__init__(book, parent)
+
+    def _extra_rows(self, form: QFormLayout) -> None:
+        self.calibrate_button = QPushButton("Calibrer…")
+        self.calibrate_button.setToolTip("Calibration (spindown) du home trainer en service, pas à pas")
+        self.calibrate_button.clicked.connect(self.calibrate)
+        usable = self.current is not None and can_calibrate(self.current)
+        self.calibrate_button.setEnabled(usable)
+        row = QWidget()
+        line = QHBoxLayout(row)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.addWidget(self.calibrate_button)
+        hint = QLabel(f"{self.current_name}" if usable else "")
+        hint.setObjectName("metricSub")
+        line.addWidget(hint, 1)
+        form.addRow("Calibration", row)
+
+    def calibrate(self) -> None:
+        if self.current is None:
+            return
+        if self.before_calibration is not None:
+            self.before_calibration()
+        CalibrationDialog(self.current, self.current_name, self).exec()
 
     def scan_devices(self) -> list:
         from ..sensors.trainer_ble import scan_trainers
