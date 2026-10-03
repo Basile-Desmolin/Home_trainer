@@ -12,6 +12,7 @@ en composer en briques « x min à y watts ».
 | Lecture / écriture `.zwo`, `.erg`, `.mrc`, `.fit` | ✅ `src/home_trainer/formats/` |
 | Notation texte des briques + ligne de commande | ✅ `bricks.py`, `cli.py` |
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
+| Capteur cardiaque Bluetooth et ANT+ (+ simulé), affiché et enregistré | ✅ `src/home_trainer/sensors/` |
 | Éditeur graphique de briques | à venir |
 | Pilotage Wahoo (Bluetooth FTMS, ANT+ FE-C), mode ERG | à venir |
 
@@ -84,6 +85,35 @@ appui long pour défiler). Espace = démarrer / pause, → = brique suivante.
 Le home trainer est pour l'instant **simulé** (`ui/power.py`) : le pilote
 Wahoo implémentera la même interface `PowerSource` (`set_target`, `read`).
 La logique de déroulé (`ui/session.py`) ne dépend pas de Qt et est testée.
+
+## Capteur cardiaque
+
+```bash
+pip install -e ".[gui,ble]"            # Bluetooth (bleak)
+pip install -e ".[gui,ant]"            # ANT+ (openant) avec une clé USB ANT+
+home-trainer-gui --hr ble              # première ceinture Bluetooth à portée
+home-trainer-gui --hr ble --hr-address AA:BB:CC:DD:EE:FF
+home-trainer-gui --hr ant              # première ceinture ANT+ (ou --hr-ant-id 12345)
+home-trainer-gui --hr sim              # cardio simulé (défaut), --hr aucun pour le masquer
+```
+
+Le capteur se choisit aussi en cours de route avec le bouton **Cardio…**
+(recherche des ceintures Bluetooth à portée). La fréquence s'affiche en
+grand avec la moyenne de la séance, et sa courbe se superpose au profil
+(échelle en bpm à droite). En cas de perte du signal, l'interface l'indique
+et la connexion est retentée automatiquement.
+
+- Bluetooth : service standard Heart Rate (0x180D), compatible avec les
+  ceintures Polar, Garmin, Wahoo TICKR, montres en mode diffusion…
+- ANT+ : profil HRM (type 120) ; ANT+ nécessite une clé USB (Garmin, CycPlus…)
+  et, sous Linux, une règle udev pour y accéder sans être root.
+- Le cardio simulé suit la puissance pédalée, avec l'inertie d'un vrai cœur.
+
+`home_trainer.sensors.BackgroundSensor` est le socle commun : connexion
+dans un fil dédié, reconnexion, état lisible, dernière mesure (`latest()`)
+et péremption d'une mesure trop ancienne. Le pilote Wahoo pourra s'en servir.
+Les trames Bluetooth et ANT+ sont décodées par des fonctions pures, testées
+sans matériel (`tests/test_sensors.py`).
 
 ## Formats
 

@@ -1,6 +1,7 @@
-"""Fenêtre principale : séance complète, temps restant, puissance, réglage ±1 %.
+"""Fenêtre principale : séance complète, temps restant, puissance, cardio, réglage ±1 %.
 
     home-trainer-gui [seance.erg] [--ftp 250] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
+                     [--hr sim|ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 → ou N = brique suivante.
@@ -10,15 +11,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
-from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QInputDialog,
-                               QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSpinBox,
-                               QToolBar, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+                               QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QMainWindow,
+                               QMessageBox, QPushButton, QSizePolicy, QSpinBox, QStackedWidget, QToolBar,
+                               QVBoxLayout, QWidget)
 
 from ..bricks import BrickSyntaxError, parse_workout
+from ..sensors import BackgroundSensor, HeartRateReading, SensorState, SimulatedHeartRate, open_heart_rate_sensor
 from ..workout import PowerUnit, Segment, Workout
 from .loader import FILE_FILTER, load_workout
 from .power import PowerSource, SimulatedTrainer
@@ -34,6 +38,7 @@ TEXT = "#e8eaed"
 MUTED = "#8b919c"
 ACCENT = "#ffd24a"
 POWER = "#4fc3f7"
+HEART = "#ff5c6c"
 
 # Zones de Coggan (borne haute en % FTP) et couleurs associées.
 ZONES = [(55, "#7f8c9a"), (76, "#3d8bd9"), (91, "#3fb37f"), (106, "#e7c43a"),
@@ -167,6 +172,25 @@ class WorkoutChart(QWidget):
             p.setPen(QPen(QColor(POWER), 1.6))
             p.drawPath(path)
 
+        # Fréquence cardiaque, sur sa propre échelle (graduée à droite).
+        heart = [(x_.t, x_.heart_rate_bpm) for x_ in s.samples if x_.heart_rate_bpm]
+        if len(heart) > 1:
+            lo = min(60, min(b for _, b in heart) - 5)
+            hi = max(200, max(b for _, b in heart) + 5)
+
+            def yh(bpm: float) -> float:
+                return area.bottom() - (bpm - lo) / (hi - lo) * area.height()
+
+            p.setPen(QColor(HEART))
+            for bpm in range(int(lo // 20 + 1) * 20, int(hi), 40):
+                p.drawText(QRectF(area.right() - 40, yh(bpm) - 8, 38, 16), Qt.AlignRight | Qt.AlignVCenter,
+                           f"{bpm}")
+            path = QPainterPath(QPointF(x(heart[0][0]), yh(heart[0][1])))
+            for t_, bpm in heart[1:]:
+                path.lineTo(x(t_), yh(bpm))
+            p.setPen(QPen(QColor(HEART), 1.4))
+            p.drawPath(path)
+
         # Curseur de position.
         p.setPen(QPen(QColor(TEXT), 2))
         p.drawLine(QPointF(x(position), area.top()), QPointF(x(position), area.bottom()))
@@ -201,13 +225,15 @@ class Metric(QFrame):
 
 class MainWindow(QMainWindow):
     def __init__(self, workout: Workout, ftp: float = DEFAULT_FTP,
-                 source: PowerSource | None = None) -> None:
+                 source: PowerSource | None = None,
+                 heart_rate: BackgroundSensor[HeartRateReading] | None = None) -> None:
         super().__init__()
         self.ftp = ftp
         self.source: PowerSource = source or SimulatedTrainer()
         self.session = WorkoutSession(workout, ftp)
         self._since_sample = 0.0
         self._last_reading = None
+        self.heart_rate: BackgroundSensor[HeartRateReading] | None = None
 
         self._build_toolbar()
         self._build_body()
@@ -219,6 +245,7 @@ class MainWindow(QMainWindow):
         self.timer.start(TICK_MS)
         self.clock.start()
         self.load(workout)
+        self.set_heart_rate_sensor(heart_rate)
 
     # --- construction ----------------------------------------------------
 
@@ -233,6 +260,9 @@ class MainWindow(QMainWindow):
         bricks_action = QAction("Briques…", self)
         bricks_action.triggered.connect(self._enter_bricks)
         bar.addAction(bricks_action)
+        heart_action = QAction("Cardio…", self)
+        heart_action.triggered.connect(self._choose_heart_rate)
+        bar.addAction(heart_action)
         bar.addSeparator()
         bar.addWidget(QLabel(" FTP "))
         self.ftp_box = QSpinBox()
@@ -264,13 +294,15 @@ class MainWindow(QMainWindow):
         self.m_step = Metric("RESTE SUR LA BRIQUE", 52)
         self.m_total = Metric("RESTE AU TOTAL", 30)
         self.m_cadence = Metric("CADENCE", 30)
+        self.m_heart = Metric("CARDIO", 52, HEART)
         grid.addWidget(self.m_power, 0, 0)
         grid.addWidget(self.m_target, 0, 1)
-        grid.addWidget(self.m_step, 0, 2)
-        grid.addWidget(self.m_total, 1, 2)
+        grid.addWidget(self.m_heart, 0, 2)
+        grid.addWidget(self.m_step, 0, 3)
         grid.addWidget(self.m_cadence, 1, 0)
-        grid.addWidget(self._build_intensity(), 1, 1)
-        for c in range(3):
+        grid.addWidget(self._build_intensity(), 1, 1, 1, 2)
+        grid.addWidget(self.m_total, 1, 3)
+        for c in range(4):
             grid.setColumnStretch(c, 1)
         layout.addLayout(grid)
 
@@ -376,6 +408,8 @@ class MainWindow(QMainWindow):
         if self.ftp_box.value() == self.ftp:
             return
         self.ftp = self.ftp_box.value()
+        if isinstance(self.heart_rate, SimulatedHeartRate):
+            self.heart_rate.ftp = self.ftp
         s = self.session
         index, step_elapsed, elapsed, state, samples = (s.index, s.step_elapsed_s, s.elapsed_s,
                                                          s.state, s.samples)
@@ -384,6 +418,33 @@ class MainWindow(QMainWindow):
         self.session.index, self.session.step_elapsed_s, self.session.elapsed_s = index, step_elapsed, elapsed
         self.session.state, self.session.samples = state, samples
         self._refresh()
+
+    def set_heart_rate_sensor(self, sensor: BackgroundSensor[HeartRateReading] | None) -> None:
+        """Remplace le capteur cardio (None = aucun) et le démarre."""
+        if self.heart_rate is not None:
+            self.heart_rate.stop()
+        if isinstance(sensor, SimulatedHeartRate):
+            sensor.ftp = self.ftp
+            sensor.effort_w = self._simulated_effort
+        self.heart_rate = sensor
+        if sensor is not None:
+            sensor.start()
+        self._refresh()
+
+    def _simulated_effort(self) -> float | None:
+        """Ce que « ressent » le cardio simulé : la puissance pédalée en ce moment."""
+        r = self._last_reading
+        return r.power_w if r is not None and self.session.state is State.RUNNING else None
+
+    def _choose_heart_rate(self) -> None:
+        dialog = HeartRateDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            self.set_heart_rate_sensor(dialog.sensor())
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        if self.heart_rate is not None:
+            self.heart_rate.stop()
+        super().closeEvent(event)
 
     def _open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Ouvrir une séance", str(Path.home()), FILE_FILTER)
@@ -423,7 +484,8 @@ class MainWindow(QMainWindow):
             self._since_sample += dt
             if self._since_sample >= 1.0:
                 self._since_sample -= 1.0
-                self.session.record(reading.power_w, reading.cadence_rpm)
+                heart = self.heart_rate.latest() if self.heart_rate is not None else None
+                self.session.record(reading.power_w, reading.cadence_rpm, heart.bpm if heart else None)
         self._refresh()
 
     def _push_target(self) -> None:
@@ -443,6 +505,7 @@ class MainWindow(QMainWindow):
                         f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}")
         self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
+        self._refresh_heart_rate()
         self.intensity_label.setText(f"{s.intensity_pct} %")
         self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
         if s.state is State.FINISHED:
@@ -455,6 +518,112 @@ class MainWindow(QMainWindow):
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
         self.chart.update()
+
+    def _refresh_heart_rate(self) -> None:
+        sensor = self.heart_rate
+        if sensor is None:
+            self.m_heart.set("—", "aucun capteur · menu Cardio…")
+            return
+        heart = sensor.latest()
+        average = self.session.average_heart_rate()
+        if heart is not None:
+            sub = f"bpm · moy. {average:.0f}" if average else "bpm"
+            if heart.battery_pct is not None and heart.battery_pct <= 20:
+                sub += f" · batterie {heart.battery_pct} %"
+            if heart.contact is False:
+                sub += " · mauvais contact"
+            self.m_heart.set(f"{heart.bpm}", sub)
+        else:
+            state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
+            self.m_heart.set("—", f"{sensor.name} : {state}")
+
+
+class HeartRateDialog(QDialog):
+    """Choix du capteur cardio : aucun, simulé, Bluetooth (avec recherche) ou ANT+."""
+
+    KINDS = [("Aucun", None), ("Simulé", "sim"), ("Bluetooth", "ble"), ("ANT+ (clé USB)", "ant")]
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Capteur cardiaque")
+        self.setMinimumWidth(440)
+        form = QFormLayout(self)
+        self.kind = QComboBox()
+        for label, kind in self.KINDS:
+            self.kind.addItem(label, kind)
+        form.addRow("Capteur", self.kind)
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(QWidget())  # aucun
+        self.pages.addWidget(QLabel("Fréquence calculée à partir de la puissance pédalée."))
+        ble = QWidget()
+        row = QHBoxLayout(ble)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.ble_devices = QComboBox()
+        self.ble_devices.addItem("Premier capteur trouvé", None)
+        self.scan_button = QPushButton("Rechercher")
+        self.scan_button.clicked.connect(self._scan)
+        row.addWidget(self.ble_devices, 1)
+        row.addWidget(self.scan_button)
+        self.pages.addWidget(ble)
+        self.ant_number = QSpinBox()
+        self.ant_number.setRange(0, 65535)
+        self.ant_number.setSpecialValueText("Première ceinture trouvée")
+        self.pages.addWidget(self.ant_number)
+        form.addRow("", self.pages)
+        self.message = QLabel("")
+        self.message.setObjectName("metricSub")
+        self.message.setWordWrap(True)
+        form.addRow("", self.message)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.kind.currentIndexChanged.connect(self.pages.setCurrentIndex)
+        self.kind.setCurrentIndex(1)
+
+        self._scan_result: list | Exception | None = None
+        self._scan_timer = QTimer(self)
+        self._scan_timer.timeout.connect(self._scan_done)
+
+    def _scan(self) -> None:
+        from ..sensors.ble import scan_heart_rate_monitors
+
+        def work() -> None:
+            try:
+                self._scan_result = scan_heart_rate_monitors(timeout=5)
+            except Exception as e:  # noqa: BLE001 (affiché à l'utilisateur)
+                self._scan_result = e
+
+        self._scan_result = None
+        self.scan_button.setEnabled(False)
+        self.message.setText("Recherche des ceintures Bluetooth (5 s)… Mouillez la sangle pour la réveiller.")
+        threading.Thread(target=work, daemon=True).start()
+        self._scan_timer.start(200)
+
+    def _scan_done(self) -> None:
+        result = self._scan_result
+        if result is None:
+            return
+        self._scan_timer.stop()
+        self.scan_button.setEnabled(True)
+        if isinstance(result, Exception):
+            self.message.setText(f"Recherche impossible : {result}")
+            return
+        while self.ble_devices.count() > 1:
+            self.ble_devices.removeItem(1)
+        for device in result:
+            self.ble_devices.addItem(str(device), device.address)
+        if result:
+            self.ble_devices.setCurrentIndex(1)
+        self.message.setText(f"{len(result)} capteur(s) trouvé(s)." if result else "Aucun capteur trouvé.")
+
+    def sensor(self) -> BackgroundSensor[HeartRateReading] | None:
+        kind = self.kind.currentData()
+        if kind is None:
+            return None
+        return open_heart_rate_sensor(kind, address=self.ble_devices.currentData(),
+                                      device_number=self.ant_number.value())
 
 
 STYLE = f"""
@@ -481,6 +650,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("file", nargs="?", help="séance .erg, .mrc, .zwo ou .fit")
     parser.add_argument("--ftp", type=float, default=DEFAULT_FTP)
     parser.add_argument("--bricks", help="séance en notation briques")
+    parser.add_argument("--hr", choices=["sim", "ble", "ant", "aucun"], default="sim",
+                        help="capteur cardio : simulé (défaut), Bluetooth, ANT+ ou aucun")
+    parser.add_argument("--hr-address", help="adresse Bluetooth de la ceinture (sinon la première trouvée)")
+    parser.add_argument("--hr-ant-id", type=int, default=0,
+                        help="numéro ANT+ de la ceinture (sinon la première trouvée)")
     args = parser.parse_args(argv)
 
     app = QApplication(sys.argv[:1])
@@ -495,7 +669,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:  # noqa: BLE001
         print(f"erreur : {e}", file=sys.stderr)
         return 1
-    window = MainWindow(workout, args.ftp)
+    heart_rate = (None if args.hr == "aucun"
+                  else open_heart_rate_sensor(args.hr, address=args.hr_address, device_number=args.hr_ant_id))
+    window = MainWindow(workout, args.ftp, heart_rate=heart_rate)
     window.resize(1100, 760)
     window.show()
     return app.exec()
