@@ -4,7 +4,8 @@
 trouve, combien de temps il reste, et calcule la consigne ERG à envoyer au
 home trainer. L'intensité (`intensity_pct`, 100 % par défaut) multiplie
 toutes les consignes : c'est le réglage « +1 % / −1 % » de l'interface.
-`FreeRideSession` est le mode libre : pas de séance, consigne réglée à la main.
+`FreeRideSession` est le mode libre : pas de séance, consigne réglée à la main
+(puissance ERG, ou pente simulée qui tient compte du poids).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+from ..sensors.trainer import DEFAULT_BIKE_KG, DEFAULT_WEIGHT_KG, Slope
 from ..workout import Segment, Workout
 
 MIN_INTENSITY = 1
@@ -34,6 +36,7 @@ class Sample:
     target_w: float | None
     cadence_rpm: float | None = None
     heart_rate_bpm: float | None = None
+    grade_pct: float | None = None  # pente simulée (mode libre en pente)
 
 
 class WorkoutSession:
@@ -152,6 +155,15 @@ class WorkoutSession:
 MIN_FREE_TARGET_W = 25
 MAX_FREE_TARGET_W = 1500
 FREE_STEP_W = 5
+GRADE_STEP_PCT = 0.5
+MIN_GRADE_PCT = -10.0
+MAX_GRADE_PCT = 20.0
+DEFAULT_RIDER_KG = DEFAULT_WEIGHT_KG - DEFAULT_BIKE_KG
+
+
+class FreeMode(str, Enum):
+    ERG = "ERG"  # puissance imposée, quelle que soit la vitesse
+    SLOPE = "pente"  # résistance d'une route en pente, selon le poids et la vitesse
 
 
 def _snap(watts: float) -> int:
@@ -161,15 +173,24 @@ def _snap(watts: float) -> int:
 
 
 class FreeRideSession:
-    """Mode libre : pas de séance, on règle la consigne ERG à la main, en direct.
+    """Mode libre : pas de séance, on règle la consigne à la main, en direct.
 
+    En ERG, une puissance (`target_w`, par pas de 5 W) ; en pente, une pente
+    (`grade_pct`, par pas de 0,5 %) que le home trainer simule avec le poids
+    du cycliste (`rider_kg`). `command` est la consigne à lui envoyer.
     Même interface de déroulé que `WorkoutSession` (état, `tick`, `record`,
-    `samples`, `target_w`) pour que la fenêtre les pilote de la même façon.
+    `samples`) pour que la fenêtre les pilote de la même façon.
     """
 
-    def __init__(self, ftp: float | None = None, target_w: float | None = None) -> None:
+    def __init__(self, ftp: float | None = None, target_w: float | None = None,
+                 rider_kg: float = DEFAULT_RIDER_KG, mode: FreeMode = FreeMode.ERG,
+                 grade_pct: float = 0.0) -> None:
         self.ftp = ftp
         self.target_w: int = _snap(target_w if target_w is not None else (ftp or 250) * 0.6)
+        self.rider_kg = rider_kg
+        self.mode = mode
+        self.grade_pct = 0.0
+        self.set_grade(grade_pct)
         self.state = State.READY
         self.elapsed_s = 0.0
         self.samples: list[Sample] = []
@@ -192,13 +213,28 @@ class FreeRideSession:
     def adjust_target(self, delta_w: float) -> int:
         return self.set_target(self.target_w + delta_w)
 
+    def set_grade(self, grade_pct: float) -> float:
+        g = round(grade_pct / GRADE_STEP_PCT) * GRADE_STEP_PCT
+        self.grade_pct = max(MIN_GRADE_PCT, min(MAX_GRADE_PCT, g)) + 0.0  # pas de « −0,0 % »
+        return self.grade_pct
+
+    def adjust_grade(self, delta_pct: float) -> float:
+        return self.set_grade(self.grade_pct + delta_pct)
+
+    @property
+    def command(self) -> float | Slope:
+        """Consigne pour le home trainer : des watts en ERG, une `Slope` en pente."""
+        return self.target_w if self.mode is FreeMode.ERG else Slope(self.grade_pct, self.rider_kg)
+
     def tick(self, dt: float) -> None:
         if self.state is State.RUNNING:
             self.elapsed_s += dt
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None) -> None:
-        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm, heart_rate_bpm))
+        erg = self.mode is FreeMode.ERG
+        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w if erg else None, cadence_rpm,
+                                   heart_rate_bpm, None if erg else self.grade_pct))
 
     @property
     def target_pct(self) -> float | None:

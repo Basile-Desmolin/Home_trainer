@@ -4,8 +4,8 @@ import threading
 import pytest
 
 from home_trainer.sensors import SensorState, TrainerReading, open_trainer
-from home_trainer.sensors.trainer import (AntFecDecoder, CyclingPowerDecoder, TargetThrottle, Trainer,
-                                          WAHOO_UNLOCK, fec_page_for, fec_target_power, fec_track_resistance,
+from home_trainer.sensors.trainer import (AntFecDecoder, CyclingPowerDecoder, Slope, TargetThrottle, Trainer,
+                                          WAHOO_UNLOCK, fec_page_for, fec_pages_for, fec_target_power, fec_track_resistance,
                                           ftms_command_for, ftms_request_control, ftms_set_simulation,
                                           ftms_set_target_power, ftms_start, parse_ftms_response,
                                           parse_indoor_bike_data, wahoo_commands_for, wahoo_set_erg,
@@ -255,3 +255,28 @@ def test_trainer_read_is_none_until_data():
     assert t.target_w == 150
     t._publish(TrainerReading(148.0, 90.0))
     assert t.read(0.2).power_w == 148
+
+
+# --- pente simulée -------------------------------------------------------------------
+
+def test_slope_commands_carry_grade_and_weight():
+    slope = Slope(5.0, rider_kg=66.0)  # 66 + 9 = 75 kg : la masse de référence FTMS
+    assert ftms_command_for(slope) == ftms_set_simulation(5.0)
+    assert ftms_command_for(Slope(5.0, rider_kg=96.0)) == ftms_set_simulation(7.0)  # (96 + 9) / 75 × 5 %
+    assert wahoo_commands_for(slope) == [wahoo_set_sim(75.0), wahoo_set_grade(5.0)]
+    assert fec_page_for(slope) == fec_track_resistance(5.0)
+    config, track = fec_pages_for(Slope(-2.5, rider_kg=70.0, bike_kg=8.0))
+    assert config == [0x37, 0x58, 0x1B, 0xFF, 0x0F, 0x0A, 70, 0x00]  # 7000 × 0,01 kg ; 160 × 0,05 kg
+    assert track == fec_track_resistance(-2.5)
+    assert fec_pages_for(200) == [fec_target_power(200)]
+
+
+def test_throttle_sends_slope_changes_at_once():
+    t = TargetThrottle(min_interval_s=1.0)
+    t.mark_sent(200, 0)
+    assert t.due(Slope(3.0), 0.1)  # ERG → pente : tout de suite
+    t.mark_sent(Slope(3.0), 0.1)
+    assert not t.due(Slope(3.0), 0.2)
+    assert t.due(Slope(3.5), 0.2)  # nouvelle pente
+    assert t.due(Slope(3.0, rider_kg=80), 0.2)  # nouveau poids
+    assert t.due(None, 0.2)

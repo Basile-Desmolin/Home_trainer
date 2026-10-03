@@ -1,14 +1,15 @@
 """Fenêtre principale : séance complète, temps restant, puissance, cardio, réglage ±1 %,
-et mode libre (sans séance, consigne ERG réglée à la main par pas de 5 W).
+et mode libre (sans séance : puissance ERG réglée à la main par pas de 5 W,
+ou pente simulée par pas de 0,5 % selon le poids saisi à côté de la FTP).
 
-    home-trainer-gui [seance.erg] [--ftp 250] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
+    home-trainer-gui [seance.erg] [--ftp 250] [--weight 70] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
                      [--trainer sim|ble|ant] [--trainer-address AA:BB:…] [--trainer-ant-id 12345]
                      [--hr sim|ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 → ou N = brique suivante, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
 Ctrl+E = modifier, Ctrl+S = enregistrer sous, Ctrl+L = mode libre / séance.
-En mode libre : ↑ ↓ = ±5 W, Page↑ Page↓ = ±25 W.
+En mode libre : ↑ ↓ = ±5 W ou ±0,5 %, Page↑ Page↓ = ±25 W ou ±2 %.
 """
 
 from __future__ import annotations
@@ -18,11 +19,11 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QElapsedTimer, Qt, QTimer
+from PySide6.QtCore import QElapsedTimer, QLocale, Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-                               QSpinBox, QStackedWidget, QToolBar, QVBoxLayout, QWidget)
+                               QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+                               QMessageBox, QPushButton, QSpinBox, QStackedWidget, QToolBar, QVBoxLayout, QWidget)
 
 from ..bricks import BrickSyntaxError, parse_workout
 from ..devices import DeviceBook, SavedDevice, ant_ident
@@ -32,11 +33,12 @@ from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Simulate
 from ..workout import PowerUnit, Segment, Workout
 from .chart import ACCENT, BG, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
-from .free_ride import BIG_STEP_W, FreeRidePanel
+from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
 from .loader import FILE_FILTER, load_workout
 from .metric import Metric
 from .power import PowerSource, SimulatedTrainer, open_power_source
-from .session import FREE_STEP_W, FreeRideSession, State, WorkoutSession
+from .session import (FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, State,
+                      WorkoutSession)
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
@@ -125,6 +127,17 @@ class MainWindow(QMainWindow):
         self.ftp_box.setValue(int(self.ftp))
         self.ftp_box.editingFinished.connect(self._ftp_changed)
         bar.addWidget(self.ftp_box)
+        bar.addWidget(QLabel(" Poids "))
+        self.weight_box = QDoubleSpinBox()
+        self.weight_box.setRange(30, 200)
+        self.weight_box.setDecimals(1)
+        self.weight_box.setSingleStep(0.5)
+        self.weight_box.setSuffix(" kg")
+        self.weight_box.setLocale(QLocale(QLocale.French))  # « 68,5 kg »
+        self.weight_box.setToolTip("Poids du cycliste, pour la pente simulée du mode libre (vélo : 9 kg en plus)")
+        self.weight_box.setValue(self.free.rider_kg)
+        self.weight_box.valueChanged.connect(self._weight_changed)
+        bar.addWidget(self.weight_box)
         bar.addSeparator()
         self.source_label = QLabel(f"  {self.source.name}")
         self.source_label.setObjectName("metricSub")
@@ -197,8 +210,10 @@ class MainWindow(QMainWindow):
         self.free_panel.play_button.clicked.connect(self._toggle)
         self.free_panel.reset_button.clicked.connect(self._reset_free_ride)
         self.free_panel.back_button.clicked.connect(self.leave_free_ride)
-        for b, delta in self.free_panel.adjust_buttons:
-            b.clicked.connect(lambda _=False, d=delta: self.adjust_free(d))
+        for b, direction, big in self.free_panel.adjust_buttons:
+            b.clicked.connect(lambda _=False, d=direction, big=big: self.nudge_free(d, big))
+        for mode, b in self.free_panel.mode_buttons.items():
+            b.clicked.connect(lambda _=False, m=mode: self.set_free_mode(m))
         self.pages.addWidget(self.free_panel)
 
     def _build_intensity(self) -> QWidget:
@@ -271,14 +286,28 @@ class MainWindow(QMainWindow):
         self._push_target()
         self._refresh()
 
-    def adjust_free(self, delta_w: float) -> None:
-        self.free.adjust_target(delta_w)
+    def nudge_free(self, direction: int, big: bool = False) -> None:
+        """Mode libre : un cran de plus (+1) ou de moins (−1), petit ou grand selon le réglage."""
+        if self.free.mode is FreeMode.ERG:
+            self.free.adjust_target(direction * (BIG_STEP_W if big else FREE_STEP_W))
+        else:
+            self.free.adjust_grade(direction * (BIG_STEP_PCT if big else GRADE_STEP_PCT))
+        self._push_target()
+        self._refresh()
+
+    def set_free_mode(self, mode: FreeMode) -> None:
+        self.free.mode = mode
+        self._push_target()
+        self._refresh()
+
+    def _weight_changed(self, kg: float) -> None:
+        self.free.rider_kg = kg
         self._push_target()
         self._refresh()
 
     def _step(self, notches: int) -> None:
         if self.free_ride:
-            self.adjust_free(notches * FREE_STEP_W if abs(notches) == 1 else notches // 5 * BIG_STEP_W)
+            self.nudge_free(1 if notches > 0 else -1, big=abs(notches) > 1)
         else:
             self.adjust(notches)
 
@@ -306,7 +335,8 @@ class MainWindow(QMainWindow):
         self.leave_free_ride() if self.free_ride else self.enter_free_ride()
 
     def _reset_free_ride(self) -> None:
-        self.free = FreeRideSession(self.ftp, self.free.target_w)
+        old = self.free
+        self.free = FreeRideSession(self.ftp, old.target_w, old.rider_kg, old.mode, old.grade_pct)
         self.free_panel.chart.set_session(self.free)
         self._since_sample = 0.0
         self._push_target()
@@ -496,7 +526,8 @@ class MainWindow(QMainWindow):
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
         active = self.active
         running = active.state is State.RUNNING
-        self.source.set_target(active.target_w if running else None)
+        command = self.free.command if active is self.free else self.session.target_w
+        self.source.set_target(command if running else None)
 
     def _refresh(self) -> None:
         if self.free_ride:
@@ -811,8 +842,10 @@ QLabel#current {{ font-size: 16px; }}
 QPushButton {{ background: #2d323c; border: none; border-radius: 6px; padding: 8px 16px; font-size: 14px; }}
 QPushButton:hover {{ background: #3a404c; }}
 QPushButton#play {{ background: {ACCENT}; color: #1a1a1a; font-weight: bold; min-width: 110px; }}
+QPushButton#mode {{ padding: 3px 10px; font-size: 12px; min-width: 52px; }}
+QPushButton#mode:checked {{ background: {ACCENT}; color: #1a1a1a; font-weight: bold; }}
 QPushButton#adjust {{ font-size: 18px; font-weight: bold; min-width: 70px; min-height: 44px; }}
-QSpinBox, QLineEdit, QComboBox {{ background: #2d323c; border: none; padding: 3px 6px; }}
+QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {{ background: #2d323c; border: none; padding: 3px 6px; }}
 QPushButton:disabled {{ color: {MUTED}; }}
 QTreeWidget {{ background: {PANEL}; border: none; font-size: 14px; }}
 QTreeWidget::item {{ padding: 3px; }}
@@ -827,6 +860,7 @@ def main(argv: list[str] | None = None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("file", nargs="?", help="séance .erg, .mrc, .zwo ou .fit")
     parser.add_argument("--ftp", type=float, default=DEFAULT_FTP)
+    parser.add_argument("--weight", type=float, help="poids du cycliste en kg, pour la pente simulée")
     parser.add_argument("--bricks", help="séance en notation briques")
     parser.add_argument("--trainer", choices=["sim", "ble", "ant"],
                         help="home trainer : simulé, Wahoo Bluetooth ou Wahoo ANT+ "
@@ -871,6 +905,8 @@ def main(argv: list[str] | None = None) -> int:
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
     window = MainWindow(workout, args.ftp, source=source, heart_rate=heart_rate, book=book)
     window.resize(1100, 760)
+    if args.weight:
+        window.weight_box.setValue(args.weight)
     window.show()
     if args.file:  # fichier passé en argument, ou glissé sur l'icône
         window.open_path(args.file)

@@ -15,8 +15,9 @@ testables sans matériel. Les pilotes radio (`trainer_ble.py`,
   pour les mesures, pages 0x31 (puissance cible) et 0x33 (pente) pour les
   consignes.
 
-Sans consigne (« résistance libre »), le home trainer est mis en mode
-simulation sur du plat : la résistance suit la vitesse comme sur la route.
+Une consigne est une puissance en watts (mode ERG), une pente (`Slope`,
+mode simulation : la résistance suit la pente, le poids et la vitesse comme
+sur la route) ou None : « résistance libre », c'est-à-dire du plat.
 """
 
 from __future__ import annotations
@@ -55,7 +56,30 @@ ANT_FEC_PERIOD = 8192  # 4 Hz
 DEFAULT_CRR = 0.004  # coefficient de roulement
 DEFAULT_CW = 0.51  # coefficient de traînée × surface frontale (kg/m)
 DEFAULT_WEIGHT_KG = 75.0  # cycliste + vélo, pour le mode simulation Wahoo
+DEFAULT_BIKE_KG = 9.0
 MAX_TARGET_W = 2000
+# FTMS ne transmet pas le poids : le home trainer simule une masse fixe, qu'on
+# suppose de cet ordre. Pour que le poids compte quand même, la pente envoyée
+# est mise à l'échelle (la force due à la pente est proportionnelle à la masse).
+FTMS_REFERENCE_KG = DEFAULT_WEIGHT_KG
+
+
+@dataclass(frozen=True)
+class Slope:
+    """Consigne du mode simulation : pente (%) et poids du cycliste (kg)."""
+
+    grade_pct: float
+    rider_kg: float = DEFAULT_WEIGHT_KG - DEFAULT_BIKE_KG
+    bike_kg: float = DEFAULT_BIKE_KG
+
+    @property
+    def total_kg(self) -> float:
+        return self.rider_kg + self.bike_kg
+
+    def rounded(self) -> Slope:
+        """Ce qui compte pour le home trainer : pente au 0,01 %, poids aux 100 g."""
+        return Slope(round(self.grade_pct, 2), round(self.rider_kg, 1), round(self.bike_kg, 1))
+
 
 
 @dataclass(frozen=True)
@@ -151,9 +175,18 @@ def ftms_set_simulation(grade_pct: float = 0.0, wind_mps: float = 0.0,
             + bytes([round(crr * 10_000), round(cw * 100)]))
 
 
-def ftms_command_for(target_w: float | None) -> bytes:
-    """Commande FTMS pour une consigne : puissance cible, ou plat si None."""
-    return ftms_set_simulation() if target_w is None else ftms_set_target_power(target_w)
+def ftms_command_for(target_w: float | Slope | None) -> bytes:
+    """Commande FTMS pour une consigne : puissance cible, pente, ou plat si None."""
+    if target_w is None:
+        return ftms_set_simulation()
+    if isinstance(target_w, Slope):
+        return ftms_set_simulation(ftms_grade(target_w))
+    return ftms_set_target_power(target_w)
+
+
+def ftms_grade(slope: Slope) -> float:
+    """Pente à envoyer en FTMS, ajustée au poids réel (voir `FTMS_REFERENCE_KG`)."""
+    return max(-327.0, min(327.0, slope.grade_pct * slope.total_kg / FTMS_REFERENCE_KG))
 
 
 @dataclass(frozen=True)
@@ -202,9 +235,11 @@ def wahoo_set_grade(grade_pct: float = 0.0) -> bytes:
     return bytes([WAHOO_SET_GRADE]) + _u16(min(65535, round((grade + 1) * 32768)))
 
 
-def wahoo_commands_for(target_w: float | None) -> list[bytes]:
+def wahoo_commands_for(target_w: float | Slope | None) -> list[bytes]:
     if target_w is None:
         return [wahoo_set_sim(), wahoo_set_grade(0.0)]
+    if isinstance(target_w, Slope):
+        return [wahoo_set_sim(target_w.total_kg), wahoo_set_grade(target_w.grade_pct)]
     return [wahoo_set_erg(target_w)]
 
 
@@ -287,8 +322,28 @@ def fec_track_resistance(grade_pct: float = 0.0, crr: float = DEFAULT_CRR) -> li
     return [0x33, 0xFF, 0xFF, 0xFF, 0xFF, raw & 0xFF, raw >> 8, min(254, round(crr / 5e-5))]
 
 
-def fec_page_for(target_w: float | None) -> list[int]:
-    return fec_track_resistance() if target_w is None else fec_target_power(target_w)
+def fec_user_configuration(rider_kg: float, bike_kg: float = DEFAULT_BIKE_KG,
+                           wheel_m: float = 0.70) -> list[int]:
+    """Page 0x37 : poids du cycliste (0,01 kg), du vélo (0,05 kg sur 12 bits), diamètre de roue (cm)."""
+    rider = max(0, min(65534, round(rider_kg * 100)))
+    bike = max(0, min(0xFFE, round(bike_kg / 0.05)))
+    return [0x37, rider & 0xFF, rider >> 8, 0xFF, 0x0F | (bike & 0x0F) << 4, bike >> 4,
+            max(0, min(254, round(wheel_m * 100))), 0x00]
+
+
+def fec_page_for(target_w: float | Slope | None) -> list[int]:
+    if target_w is None:
+        return fec_track_resistance()
+    if isinstance(target_w, Slope):
+        return fec_track_resistance(target_w.grade_pct)
+    return fec_target_power(target_w)
+
+
+def fec_pages_for(target_w: float | Slope | None) -> list[list[int]]:
+    """Pages à envoyer : en pente, le poids (page 0x37) part avant la pente."""
+    if isinstance(target_w, Slope):
+        return [fec_user_configuration(target_w.rider_kg, target_w.bike_kg), fec_page_for(target_w)]
+    return [fec_page_for(target_w)]
 
 
 # --- consignes : quand les renvoyer --------------------------------------------
@@ -315,20 +370,29 @@ class TargetThrottle:
         """À appeler après une reconnexion : la prochaine consigne repart."""
         self._sent = _NOTHING
 
-    def due(self, target_w: float | None, now: float) -> bool:
-        target = None if target_w is None else _clamp_target(target_w)
+    def due(self, target_w: float | Slope | None, now: float) -> bool:
+        target = _key(target_w)
         sent = self._sent
-        if sent is _NOTHING or (sent is None) != (target is None):
+        if sent is _NOTHING or type(sent) is not type(target):  # passage ERG / pente / libre
             return True
         elapsed = now - self._sent_at
-        if target is not None and target != sent:
+        if isinstance(target, Slope):
+            if target != sent:  # nouvelle pente ou nouveau poids : tout de suite
+                return True
+        elif target is not None and target != sent:
             if abs(target - sent) >= self.jump_w or elapsed >= self.min_interval_s:
                 return True
         return self.refresh_s is not None and elapsed >= self.refresh_s
 
-    def mark_sent(self, target_w: float | None, now: float) -> None:
-        self._sent = None if target_w is None else _clamp_target(target_w)
+    def mark_sent(self, target_w: float | Slope | None, now: float) -> None:
+        self._sent = _key(target_w)
         self._sent_at = now
+
+
+def _key(target_w: float | Slope | None) -> int | Slope | None:
+    if target_w is None:
+        return None
+    return target_w.rounded() if isinstance(target_w, Slope) else _clamp_target(target_w)
 
 
 _NOTHING = object()
@@ -349,22 +413,22 @@ class Trainer(BackgroundSensor[TrainerReading]):
     def __init__(self, throttle: TargetThrottle | None = None) -> None:
         super().__init__()
         self.throttle = throttle or TargetThrottle()
-        self._target: float | None = None
+        self._target: float | Slope | None = None
 
     @property
-    def target_w(self) -> float | None:
+    def target_w(self) -> float | Slope | None:
         return self._target
 
-    def set_target(self, watts: float | None) -> None:
+    def set_target(self, watts: float | Slope | None) -> None:
         self._target = watts
 
     def read(self, dt: float = 0.0) -> TrainerReading | None:
         return self.latest()
 
-    def _pending_target(self) -> tuple[bool, float | None]:
+    def _pending_target(self) -> tuple[bool, float | Slope | None]:
         """(à envoyer ?, consigne) : à appeler régulièrement par le fil radio."""
         target = self._target
         return self.throttle.due(target, time.monotonic()), target
 
-    def _target_sent(self, target: float | None) -> None:
+    def _target_sent(self, target: float | Slope | None) -> None:
         self.throttle.mark_sent(target, time.monotonic())

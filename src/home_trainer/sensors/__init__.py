@@ -21,7 +21,7 @@ from __future__ import annotations
 from .base import BackgroundSensor, SensorState, SensorUnavailable
 from .heart_rate import AntHeartRateDecoder, HeartRateReading, parse_ble_measurement
 from .simulated import SimulatedHeartRate
-from .trainer import Trainer, TrainerReading
+from .trainer import Slope, Trainer, TrainerReading
 
 HEART_RATE_KINDS = {"sim": "simulé", "ble": "Bluetooth", "ant": "ANT+"}
 TRAINER_KINDS = {"ble": "Bluetooth", "ant": "ANT+"}
@@ -53,5 +53,5 @@ def open_trainer(kind: str, *, address: str | None = None, device_number: int = 
 
 
 __all__ = ["AntHeartRateDecoder", "BackgroundSensor", "HEART_RATE_KINDS", "HeartRateReading",
-           "SensorState", "SensorUnavailable", "SimulatedHeartRate", "TRAINER_KINDS", "Trainer",
+           "SensorState", "SensorUnavailable", "SimulatedHeartRate", "Slope", "TRAINER_KINDS", "Trainer",
            "TrainerReading", "open_heart_rate_sensor", "open_trainer", "parse_ble_measurement"]
