@@ -13,10 +13,28 @@ en composer en briques « x min à y watts ».
 | Notation texte des briques + ligne de commande | ✅ `bricks.py`, `cli.py` |
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
 | Capteur cardiaque Bluetooth et ANT+ (+ simulé), affiché et enregistré | ✅ `src/home_trainer/sensors/` |
-| Éditeur graphique de briques | à venir |
+| Éditeur graphique de briques, enregistrement .zwo/.mrc/.erg/.fit | ✅ `ui/editor.py` |
+| Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 
-## Installation
+## Lancer l'appli sous Windows (icône)
+
+**Sans rien installer** : ouvrir l'onglet
+[Actions](https://github.com/Basile-Desmolin/Home_trainer/actions/workflows/application-windows.yml)
+du dépôt, cliquer sur la dernière exécution réussie et télécharger
+**HomeTrainer-windows** en bas de page. On obtient `HomeTrainer.exe` (une
+cinquantaine de Mo) à poser sur le Bureau : double-clic pour lancer, ou glisser
+un fichier de séance dessus pour l'ouvrir directement. Au premier lancement,
+Windows peut afficher « Windows a protégé votre ordinateur » (exécutable non
+signé) : *Informations complémentaires* → *Exécuter quand même*.
+
+**Avec Python installé** (3.10 ou plus, depuis python.org) : double-clic sur
+`packaging\windows\installer-raccourci.bat`. Il installe l'appli dans un
+dossier `.venv` du dépôt et crée un raccourci **Home trainer** avec l'icône
+sur le Bureau et dans le menu Démarrer. Pour fabriquer soi-même le `.exe` :
+`packaging\windows\construire-exe.bat` (résultat dans `dist\`).
+
+## Installation (développement)
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -69,6 +87,23 @@ consigne à l'instant `t` (rampes comprises). C'est l'entrée prévue pour le
 mode ERG.
 
 ## Interface graphique
+
+Barre d'outils : **Nouvelle…** (Ctrl+N) et **Modifier…** (Ctrl+E) ouvrent
+l'éditeur de séance, **Ouvrir…** (Ctrl+O) lit un `.zwo`, `.mrc`, `.erg` ou
+`.fit`, **Enregistrer sous…** (Ctrl+S) écrit la séance affichée dans l'un de
+ces formats (choisi dans la liste « Type »).
+
+![Éditeur de séance](docs/editeur.png)
+
+L'éditeur liste les briques : double-clic sur une case pour changer la
+durée (`10:00`, `10`, `30s`, `1:30:00`, `tour`), la puissance (`150` ou une
+plage `200-220`, vide = libre), la fin de rampe et l'unité (W ou % FTP ;
+changer l'unité convertit la valeur avec la FTP). **+ Répétition** répète la
+brique choisie (nombre de fois modifiable), **Monter** / **Descendre**
+déplacent une brique, y compris pour la faire entrer dans une répétition ou
+en sortir. La notation texte (`3x(4m@105% 2m@55%)`) reste disponible et
+synchronisée, et le profil se redessine à chaque modification, brique
+choisie entourée. **Rouler cette séance** la charge dans l'écran de séance.
 
 ```bash
 pip install -e ".[gui]"
