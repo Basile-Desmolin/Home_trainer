@@ -106,17 +106,26 @@ class SimulatedTrainer:
 
 
 def road_speed_kmh(power_w: float, slope: Slope, crr: float = DEFAULT_CRR, cw: float = DEFAULT_CW) -> float:
-    """Vitesse sur la route à `power_w`, pour cette pente et ce poids (sans vent)."""
+    """Vitesse sur la route à `power_w`, pour cette pente et ce poids (sans vent).
+
+    En descente, on roule même sans pédaler : la pente tire le vélo jusqu'à la
+    vitesse où la traînée la compense.
+    """
     theta = math.atan(slope.grade_pct / 100)
     weight = slope.total_kg * G * (math.sin(theta) + crr * math.cos(theta))
+    power_w = max(power_w, 0.0)
 
     def need(v: float) -> float:  # puissance pour rouler à v m/s
         return (weight + 0.5 * cw * v * v) * v
 
-    lo, hi = 0.0, 40.0
-    if power_w <= 0 or need(hi) < power_w:
-        return 0.0 if power_w <= 0 else hi * 3.6
-    for _ in range(50):  # `need` croît avec v (en descente aussi, dès que la vitesse est positive)
+    # `need` décroît puis croît en descente (minimum en v0) ; la vitesse cherchée est au-delà.
+    lo = math.sqrt(-weight / (1.5 * cw)) if weight < 0 else 0.0
+    hi = 40.0
+    if need(hi) < power_w:
+        return hi * 3.6
+    if power_w <= 0 and weight >= 0:
+        return 0.0
+    for _ in range(50):
         mid = (lo + hi) / 2
         lo, hi = (mid, hi) if need(mid) < power_w else (lo, mid)
     return lo * 3.6

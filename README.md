@@ -16,6 +16,7 @@ en composer en briques « x min à y watts ».
 | Éditeur graphique de briques, enregistrement .zwo/.mrc/.erg/.fit | ✅ `ui/editor.py` |
 | Bibliothèque : séances d'un dossier (sous-dossiers compris), recherche, filtre de durée, aperçu | ✅ `library.py`, `ui/library.py` |
 | Mode libre : ERG réglé à la main par pas de 5 W, ou pente simulée selon le poids, courbe en direct | ✅ `ui/free_ride.py` |
+| Parcours GPX : pente de la route simulée selon la distance parcourue, profil, carte | ✅ `route.py`, `ui/route_ride.py` |
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 | Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
@@ -172,6 +173,31 @@ par une route en pente, par pas de 0,5 % (↑ ↓) et 2 % (Page↑ Page↓), de
   (× (cycliste + vélo) / 75), ce qui donne le même effort qu'avec ce poids.
 
 ![Pente simulée](docs/mode-pente.png)
+
+### Parcours GPX
+
+**Parcours GPX…** (Ctrl+G), **Ouvrir…** ou un `.gpx` glissé sur l'icône :
+on roule la trace (Strava, Komoot, Garmin… ; traces `trk` ou itinéraires
+`rte`), exemple dans `examples/col-fictif.gpx`. Au départ, le home trainer
+reçoit la pente de la route à l'endroit où l'on se trouve, avec le poids
+saisi à côté de la FTP.
+
+- **Distance** : elle avance à la vitesse qu'aurait le vélo sur la vraie
+  route, calculée depuis la puissance pédalée, la pente et le poids (comme
+  Zwift ou Rouvy), donc la même quel que soit le home trainer. En descente,
+  on roule même sans pédaler.
+- **Pente** : mesurée sur 100 m autour de la position, ce qui gomme le bruit
+  des altitudes GPS ; bornée à −10 % / +20 % pour le home trainer.
+- **Difficulté** (boutons −10 % / +10 %, ou ↑ ↓) : part de la pente envoyée
+  au home trainer, 100 % par défaut. À 50 %, un 10 % se pédale comme un 5 % ;
+  la vitesse et la distance suivent toujours la vraie pente.
+- Affichage : pente (couleur selon la raideur, descentes en bleu), altitude,
+  distance et dénivelé restants, vitesse et moyenne, profil des 2 prochains
+  kilomètres, profil complet et carte de la trace avec la position.
+- À l'arrivée, le home trainer repasse en résistance libre. **Retour à la
+  séance** met le parcours en pause, Ctrl+G ou **Ouvrir…** en lance un autre.
+
+![Parcours GPX](docs/parcours-gpx.png)
 
 ## Pilotage du home trainer Wahoo
 
