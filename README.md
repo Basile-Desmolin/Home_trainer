@@ -18,6 +18,7 @@ en composer en briques « x min à y watts ».
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 | Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
+| Calibration (spindown) guidée : *Home trainer…* → *Calibrer…* (FTMS, protocole Wahoo, ANT+ FE-C) | ✅ `ui/calibration.py`, pas encore essayée sur le vrai matériel |
 
 ## Lancer l'appli sous Windows (icône)
 

@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..sensors.trainer import DEFAULT_CRR, DEFAULT_CW, Slope
+from ..sensors.trainer import DEFAULT_CRR, DEFAULT_CW, Calibration, CalibrationPhase, CalibrationStatus, Slope
 
 G = 9.81
 
@@ -56,6 +57,33 @@ class SimulatedTrainer:
         self._target: float | Slope | None = None
         self._power = 0.0
         self._rng = random.Random(seed)
+        self.calibration = Calibration()
+        self._cal_speed = 0.0
+        self._cal_at = 0.0
+
+    # --- calibration imitée : on accélère à 5 km/h par seconde, la roue libre s'arrête en ~10 s.
+
+    def start_calibration(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        self.calibration.request()
+        self.calibration.begin("simulé", now)
+        self._cal_speed, self._cal_at = 0.0, now
+
+    def cancel_calibration(self) -> None:
+        self.calibration.cancel()
+
+    def calibration_status(self, now: float | None = None) -> CalibrationStatus:
+        now = time.monotonic() if now is None else now
+        cal = self.calibration
+        if cal.active:
+            dt, self._cal_at = now - self._cal_at, now
+            if cal.status.phase is CalibrationPhase.SPEED_UP:
+                self._cal_speed += 5.0 * dt
+            else:
+                self._cal_speed = max(0.0, self._cal_speed - 3.0 * dt)
+            cal.on_speed(round(self._cal_speed, 1), now)
+            cal.tick(now)
+        return cal.status
 
     def set_target(self, watts: float | Slope | None) -> None:
         self._target = watts

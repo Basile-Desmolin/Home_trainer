@@ -80,3 +80,34 @@ def test_connected_device_is_remembered_and_shown_with_its_name(app, tmp_path):
     window._refresh()
     assert window.source_label.text().strip().startswith("Kickr")
     window.close()
+
+
+def test_calibration_wizard_from_trainer_dialog(app, book):
+    from home_trainer.sensors.trainer import CalibrationPhase
+    from home_trainer.ui.calibration import CalibrationDialog
+    from home_trainer.ui.power import SimulatedTrainer
+
+    assert not TrainerDialog(book).calibrate_button.isEnabled()  # aucun home trainer en service
+    paused = []
+    sim = SimulatedTrainer()
+    dialog = TrainerDialog(book, current=sim, before_calibration=lambda: paused.append(True))
+    assert dialog.calibrate_button.isEnabled()
+
+    wizard = CalibrationDialog(sim, "Home trainer simulé")
+    assert "Démarrer" in wizard.instruction.text()
+    wizard.start_button.click()
+    assert sim.calibration_status().phase is CalibrationPhase.SPEED_UP
+    assert wizard.instruction.text().startswith("Accélérez au-delà de 30 km/h")
+    assert "cible 30 km/h" in wizard.speed.text() and not wizard.start_button.isEnabled()
+    assert wizard.close_button.text() == "Annuler"
+    wizard.reject()
+    assert sim.calibration_status().message == "calibration annulée"
+
+
+def test_main_window_pauses_for_calibration(app, tmp_path):
+    window = MainWindow(parse_workout("1m@100"), book=DeviceBook(tmp_path / "a.json"))
+    window._toggle()
+    assert window.session.state.name == "RUNNING"
+    window._pause_for_calibration()
+    assert window.session.state.name == "PAUSED"
+    window.close()

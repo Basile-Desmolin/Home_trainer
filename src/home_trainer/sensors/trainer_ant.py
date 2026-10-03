@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from .ant import DeviceNumberProbe, open_ant_node
 from .base import SensorState
 from .heart_rate import ANT_RF_FREQUENCY
-from .trainer import (ANT_FEC_DEVICE_TYPE, ANT_FEC_PERIOD, AntFecDecoder, TargetThrottle, Trainer,
-                      fec_page_for, fec_pages_for)
+from .trainer import (ANT_FEC_DEVICE_TYPE, ANT_FEC_PERIOD, AntFecDecoder, CalibrationPhase, TargetThrottle,
+                      Trainer, fec_calibration_request, fec_page_for, fec_pages_for)
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class AntTrainer(Trainer):
 
         def on_data(data) -> None:
             probe.seen(self._channel)
+            self.calibration.on_fec_page(data)
             reading = decoder.feed(data)
             if reading is not None:
                 self._publish(reading)
@@ -72,10 +74,28 @@ class AntTrainer(Trainer):
         self.device_id = str(number)
         self.name = f"Wahoo ANT+ n°{number}"
 
+    # Sans réponse, la demande de calibration est renvoyée (un message ANT+ peut se perdre).
+    calibration_resend_s = 2.0
+
     def _send_targets(self, channel, stop: threading.Event, done: threading.Event) -> None:
+        requested_at = None
         while not stop.is_set() and not done.is_set():
+            connected = self.state is SensorState.CONNECTED
+            now = time.monotonic()
+            calibration = self.calibration
+            resend = (calibration.status.phase is CalibrationPhase.STARTING and requested_at is not None
+                      and now - requested_at >= self.calibration_resend_s)
+            if connected and (self._calibration_due() or resend):
+                try:
+                    if not resend:
+                        channel.send_acknowledged_data(fec_page_for(None))
+                        calibration.begin("FE-C", now)
+                    requested_at = now
+                    channel.send_acknowledged_data(fec_calibration_request())
+                except Exception as e:  # noqa: BLE001 (message perdu : on retentera)
+                    log.debug("%s : demande de calibration non transmise (%s)", self.name, e)
             due, target = self._pending_target()
-            if due and self.state is SensorState.CONNECTED:
+            if due and connected:
                 try:
                     for page in fec_pages_for(target):
                         channel.send_acknowledged_data(page)
