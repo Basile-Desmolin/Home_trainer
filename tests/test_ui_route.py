@@ -58,3 +58,23 @@ def test_opening_a_gpx_rides_it_and_sends_the_route_grade(app, tmp_path):
     window.leave_free_ride()
     assert window.pages.currentIndex() == 0 and window.route.state is State.PAUSED
     window.close()
+
+
+def test_erg_button_switches_the_workout_to_free_resistance(app, tmp_path):
+    source = Recorder()
+    window = MainWindow(parse_workout("10m@150"), source=source, book=DeviceBook(tmp_path / "a.json"))
+    window.weight_box.setValue(70)
+    window._toggle()
+    window._push_target()
+    assert source.targets[-1] == 150
+    window.erg_button.click()
+    assert not window.session.erg and source.targets[-1] == Slope(0.0, 70)
+    assert window.erg_button.text() == "ERG off" and "à la main" in window.m_target.sub.text()
+    assert window.session.state is State.RUNNING
+    window.load(window.session.workout, end_ride=False)  # nouvelle séance : le réglage est gardé
+    assert not window.session.erg
+    window.toggle_erg()
+    window._toggle()
+    window._push_target()
+    assert source.targets[-1] == 150 and window.erg_button.isChecked()
+    window.close()

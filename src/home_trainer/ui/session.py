@@ -4,6 +4,9 @@
 trouve, combien de temps il reste, et calcule la consigne ERG à envoyer au
 home trainer. L'intensité (`intensity_pct`, 100 % par défaut) multiplie
 toutes les consignes : c'est le réglage « +1 % / −1 % » de l'interface.
+ERG désactivé (`erg = False`), le home trainer passe en résistance libre
+(route plate) : la séance continue de dérouler et la cible s'affiche, à
+suivre à la main avec les vitesses.
 `FreeRideSession` est le mode libre : pas de séance, consigne réglée à la main
 (puissance ERG, ou pente simulée qui tient compte du poids).
 `RouteSession` roule un parcours GPX : la pente envoyée suit la route, à la
@@ -23,6 +26,7 @@ from ..sensors.trainer import DEFAULT_BIKE_KG, DEFAULT_WEIGHT_KG, Slope
 from ..workout import Segment, Workout
 from .power import road_speed_kmh
 
+DEFAULT_RIDER_KG = DEFAULT_WEIGHT_KG - DEFAULT_BIKE_KG
 MIN_INTENSITY = 1
 MAX_INTENSITY = 200
 
@@ -50,7 +54,7 @@ class Sample:
 
 
 class WorkoutSession:
-    def __init__(self, workout: Workout, ftp: float | None = None) -> None:
+    def __init__(self, workout: Workout, ftp: float | None = None, rider_kg: float = DEFAULT_RIDER_KG) -> None:
         self.workout = workout
         self.ftp = ftp
         self.segments: list[Segment] = workout.timeline(ftp)
@@ -58,6 +62,8 @@ class WorkoutSession:
         self.index = 0  # brique en cours
         self.step_elapsed_s = 0.0  # temps écoulé dans la brique en cours
         self.intensity_pct = 100
+        self.erg = True  # le home trainer impose la cible ; sinon résistance libre, cible suivie à la main
+        self.rider_kg = rider_kg  # poids pour la résistance libre
         self.state = State.READY if self.segments else State.FINISHED
         self.samples: list[Sample] = []
         self.exported = False  # sortie déjà enregistrée en .fit (et envoyée)
@@ -78,6 +84,10 @@ class WorkoutSession:
     def adjust_intensity(self, delta_pct: int) -> int:
         self.intensity_pct = max(MIN_INTENSITY, min(MAX_INTENSITY, self.intensity_pct + delta_pct))
         return self.intensity_pct
+
+    def toggle_erg(self) -> bool:
+        self.erg = not self.erg
+        return self.erg
 
     def next_step(self) -> None:
         """Passe à la brique suivante (« tour »), indispensable pour une brique ouverte."""
@@ -159,6 +169,11 @@ class WorkoutSession:
         base = self.base_target_w
         return None if base is None else base * self.intensity_pct / 100
 
+    @property
+    def command(self) -> float | Slope | None:
+        """Consigne pour le home trainer : la cible en ERG, sinon une route plate (résistance libre)."""
+        return self.target_w if self.erg else Slope(0.0, self.rider_kg)
+
     def _finish(self) -> None:
         self.index = len(self.segments)
         self.step_elapsed_s = 0.0
@@ -171,7 +186,6 @@ FREE_STEP_W = 5
 GRADE_STEP_PCT = 0.5
 MIN_GRADE_PCT = -10.0
 MAX_GRADE_PCT = 20.0
-DEFAULT_RIDER_KG = DEFAULT_WEIGHT_KG - DEFAULT_BIKE_KG
 
 
 class FreeMode(str, Enum):

@@ -8,7 +8,7 @@ et parcours GPX (la pente de la route suit la distance parcourue).
                      [--hr ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
-→ ou N = brique suivante, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
+→ ou N = brique suivante, E = ERG on / off, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
 Ctrl+E = modifier, Ctrl+S = enregistrer sous, Ctrl+L = mode libre / séance,
 Ctrl+G = rouler un parcours GPX,
 Ctrl+T = terminer la sortie (enregistrée en .fit, envoyée vers Strava / Nolio).
@@ -230,14 +230,21 @@ class MainWindow(QMainWindow):
         self.free_button = QPushButton("Mode libre")
         self.free_button.setToolTip("Rouler sans séance en réglant la puissance à la main (Ctrl+L)")
         self.free_button.clicked.connect(self.enter_free_ride)
+        self.erg_button = QPushButton("ERG on")
+        self.erg_button.setObjectName("erg")
+        self.erg_button.setCheckable(True)
+        self.erg_button.setChecked(True)
+        self.erg_button.setToolTip("ERG on : le home trainer impose la cible.\nERG off : résistance libre, "
+                                   "la séance continue et la cible est à suivre à la main (E)")
+        self.erg_button.clicked.connect(self.toggle_erg)
         self.finish_button = QPushButton("Terminer")
         self.finish_button.setToolTip(FINISH_TIP)
         self.finish_button.clicked.connect(self.finish_ride)
-        for b in (self.play_button, self.next_button, self.reset_button, self.finish_button, self.free_button):
+        for b in (self.play_button, self.erg_button, self.next_button, self.reset_button, self.finish_button, self.free_button):
             b.setFocusPolicy(Qt.NoFocus)
             buttons.addWidget(b)
         buttons.addStretch(1)
-        hint = QLabel("Espace : démarrer / pause   ↑ ↓ : ±1 %   → : brique suivante")
+        hint = QLabel("Espace : démarrer / pause   ↑ ↓ : ±1 %   → : brique suivante   E : ERG on / off")
         hint.setObjectName("metricSub")
         buttons.addWidget(hint)
         layout.addLayout(buttons)
@@ -306,6 +313,7 @@ class MainWindow(QMainWindow):
                            ((Qt.Key_Right, Qt.Key_N), self._next_step)):
             for key in keys:
                 QShortcut(QKeySequence(key), self, activated=slot)
+        QShortcut(QKeySequence(Qt.Key_E), self, activated=self.toggle_erg)
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self._toggle_free_ride)
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.finish_ride)
 
@@ -330,9 +338,10 @@ class MainWindow(QMainWindow):
     def load(self, workout: Workout, *, end_ride: bool = True) -> None:
         if end_ride:  # la séance en cours, même inachevée, est enregistrée avant d'être remplacée
             self.end_ride(self.session)
-        intensity = self.session.intensity_pct
-        self.session = WorkoutSession(workout, self.ftp)
+        intensity, erg = self.session.intensity_pct, self.session.erg
+        self.session = WorkoutSession(workout, self.ftp, self.free.rider_kg)
         self.session.intensity_pct = intensity
+        self.session.erg = erg
         self._since_sample = 0.0
         self.chart.set_session(self.session)
         self.title.setText(f"{workout.name}  ·  {hms(self.session.total_s)}")
@@ -342,6 +351,14 @@ class MainWindow(QMainWindow):
 
     def adjust(self, delta: int) -> None:
         self.session.adjust_intensity(delta)
+        self._push_target()
+        self._refresh()
+
+    def toggle_erg(self) -> None:
+        """Séance : ERG on (le home trainer impose la cible) ou off (résistance libre, cible à suivre)."""
+        if self.free_ride or self.route_ride:
+            return
+        self.session.toggle_erg()
         self._push_target()
         self._refresh()
 
@@ -367,6 +384,7 @@ class MainWindow(QMainWindow):
 
     def _weight_changed(self, kg: float) -> None:
         self.free.rider_kg = kg
+        self.session.rider_kg = kg
         if self.route is not None:
             self.route.rider_kg = kg
         self._push_target()
@@ -765,8 +783,7 @@ class MainWindow(QMainWindow):
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
         active = self.active
         running = active.state is State.RUNNING
-        command = self.session.target_w if active is self.session else active.command
-        self.source.set_target(command if running else None)
+        self.source.set_target(active.command if running else None)
 
     def _refresh(self) -> None:
         if self.route_ride:
@@ -784,9 +801,13 @@ class MainWindow(QMainWindow):
         self.m_power.set(f"{r.power_w:.0f} W" if r else "—", f"{r.power_w / self.ftp * 100:.0f} % FTP" if r else "")
         target = s.target_w
         base = s.base_target_w
-        self.m_target.set("libre" if target is None else f"{target:.0f} W",
-                          "" if base is None or s.intensity_pct == 100
-                          else f"séance : {base:.0f} W  ({s.intensity_pct} %)")
+        sub = "" if base is None or s.intensity_pct == 100 else f"séance : {base:.0f} W  ({s.intensity_pct} %)"
+        if not s.erg:
+            sub = "ERG off : à suivre à la main" + (f"  ·  {sub}" if sub else "")
+        self.m_target.set("libre" if target is None else f"{target:.0f} W", sub)
+        self.m_target.title.setText("CIBLE" if s.erg else "CIBLE (ERG OFF)")
+        self.erg_button.setChecked(s.erg)
+        self.erg_button.setText("ERG on" if s.erg else "ERG off")
         remaining = s.step_remaining_s
         self.m_step.set("tour" if remaining is None else hms(remaining),
                         f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}")
@@ -1130,6 +1151,8 @@ QPushButton:hover {{ background: #3a404c; }}
 QPushButton#play {{ background: {ACCENT}; color: #1a1a1a; font-weight: bold; min-width: 110px; }}
 QPushButton#mode {{ padding: 3px 10px; font-size: 12px; min-width: 52px; }}
 QPushButton#mode:checked {{ background: {ACCENT}; color: #1a1a1a; font-weight: bold; }}
+QPushButton#erg {{ background: #5a2f2f; color: {TEXT}; font-weight: bold; min-width: 90px; }}
+QPushButton#erg:checked {{ background: #2f5a3a; }}
 QPushButton#adjust {{ font-size: 18px; font-weight: bold; min-width: 70px; min-height: 44px; }}
 QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {{ background: #2d323c; border: none; padding: 3px 6px; }}
 QPushButton:disabled {{ color: {MUTED}; }}
