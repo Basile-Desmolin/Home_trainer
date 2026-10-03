@@ -1,16 +1,19 @@
 """Fenêtre principale : séance complète, temps restant, puissance, cardio, réglage ±1 %,
 et mode libre (sans séance : puissance ERG réglée à la main par pas de 5 W,
-ou pente simulée par pas de 0,5 % selon le poids saisi à côté de la FTP).
+ou pente simulée par pas de 0,5 % selon le poids saisi à côté de la FTP),
+et parcours GPX (la pente de la route suit la distance parcourue).
 
-    home-trainer-gui [seance.erg] [--ftp 250] [--weight 70] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
+    home-trainer-gui [seance.erg | parcours.gpx] [--ftp 250] [--weight 70] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
                      [--trainer sim|ble|ant] [--trainer-address AA:BB:…] [--trainer-ant-id 12345]
                      [--hr sim|ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 → ou N = brique suivante, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
 Ctrl+E = modifier, Ctrl+S = enregistrer sous, Ctrl+L = mode libre / séance,
+Ctrl+G = rouler un parcours GPX,
 Ctrl+T = terminer la sortie (enregistrée en .fit, envoyée vers Strava / Nolio).
 En mode libre : ↑ ↓ = ±5 W ou ±0,5 %, Page↑ Page↓ = ±25 W ou ±2 %.
+Sur un parcours : ↑ ↓ = difficulté ±10 %.
 """
 
 from __future__ import annotations
@@ -30,25 +33,31 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
 from ..bricks import BrickSyntaxError, parse_workout
 from ..devices import DeviceBook, SavedDevice, ant_ident
 from ..formats import FormatError, save_workout
+from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, SimulatedHeartRate, Slope, Trainer,
                        open_heart_rate_sensor)
 from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
+from .calibration import CalibrationDialog, can_calibrate
 from .chart import ACCENT, BG, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
+from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
-from .loader import FILE_FILTER, load_workout
+from .loader import load_workout
 from .metric import Metric
 from .power import PowerSource, SimulatedTrainer, open_power_source, road_speed_kmh
-from .session import (FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode, FreeRideSession, State,
-                      WorkoutSession, ride_points, ride_title)
+from .route_ride import RoutePanel
+from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
+                      FreeRideSession, RouteSession, State, WorkoutSession, ride_points, ride_title)
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
 TICK_MS = 200
 CLOSE_SEND_WAIT_S = 20  # à la fermeture, temps laissé à l'envoi de la dernière sortie
 ICON = Path(__file__).with_name("assets") / "icon.png"
+OPEN_FILTER = ("Séances et parcours (*.zwo *.mrc *.erg *.fit *.gpx);;Séances (*.zwo *.mrc *.erg *.fit);;"
+               "Parcours GPX (*.gpx);;Tous les fichiers (*)")
 
 def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) -> str:
     if seg is None:
@@ -87,9 +96,11 @@ class MainWindow(QMainWindow):
         self.book = book if book is not None else DeviceBook()  # sans fichier : rien n'est mémorisé
         self._remembered: dict[str, tuple] = {}
         self.directory = str(Path.home())  # dernier dossier ouvert ou enregistré
+        self.library = Library()  # sans fichier : dossier non mémorisé (voir set_library)
         self.source: PowerSource = source or SimulatedTrainer()
         self.session = WorkoutSession(workout, ftp)
         self.free = FreeRideSession(ftp)
+        self.route: RouteSession | None = None
         self._since_sample = 0.0
         self._last_reading = None
         self.heart_rate: BackgroundSensor[HeartRateReading] | None = None
@@ -116,10 +127,15 @@ class MainWindow(QMainWindow):
         self.addToolBar(bar)
         for text, shortcut, slot, tip in (
             ("Nouvelle…", QKeySequence.New, self._new_workout, "Composer une séance en briques"),
-            ("Ouvrir…", QKeySequence.Open, self._open_file, "Ouvrir une séance .zwo, .mrc, .erg ou .fit"),
+            ("Ouvrir…", QKeySequence.Open, self._open_file,
+             "Ouvrir une séance .zwo, .mrc, .erg ou .fit, ou un parcours .gpx"),
+            ("Parcours GPX…", QKeySequence("Ctrl+G"), self._open_route,
+             "Rouler un parcours .gpx : le home trainer simule la pente de la route"),
             ("Modifier…", QKeySequence("Ctrl+E"), self._edit_workout, "Modifier la séance affichée"),
             ("Enregistrer sous…", QKeySequence.Save, self._save_as,
              "Enregistrer la séance affichée en .zwo, .mrc, .erg ou .fit"),
+            ("Bibliothèque…", QKeySequence("Ctrl+B"), self._open_library,
+             "Séances du dossier de la bibliothèque : recherche, aperçu, double-clic pour rouler"),
         ):
             action = QAction(text, self)
             action.setShortcut(shortcut)
@@ -152,7 +168,7 @@ class MainWindow(QMainWindow):
         self.weight_box.setSingleStep(0.5)
         self.weight_box.setSuffix(" kg")
         self.weight_box.setLocale(QLocale(QLocale.French))  # « 68,5 kg »
-        self.weight_box.setToolTip("Poids du cycliste, pour la pente simulée du mode libre (vélo : 9 kg en plus)")
+        self.weight_box.setToolTip("Poids du cycliste, pour la pente simulée (mode libre et parcours GPX ; vélo : 9 kg en plus)")
         self.weight_box.setValue(self.free.rider_kg)
         self.weight_box.valueChanged.connect(self._weight_changed)
         bar.addWidget(self.weight_box)
@@ -239,6 +255,16 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, m=mode: self.set_free_mode(m))
         self.pages.addWidget(self.free_panel)
 
+        self.route_panel = RoutePanel()
+        self.route_panel.play_button.clicked.connect(self._toggle)
+        self.route_panel.reset_button.clicked.connect(self._reset_route)
+        self.route_panel.back_button.clicked.connect(self.leave_free_ride)
+        self.route_panel.finish_button.setToolTip(FINISH_TIP)
+        self.route_panel.finish_button.clicked.connect(self.finish_ride)
+        for b, delta in self.route_panel.difficulty_buttons:
+            b.clicked.connect(lambda _=False, d=delta: self.adjust_difficulty(d))
+        self.pages.addWidget(self.route_panel)
+
     def _build_intensity(self) -> QWidget:
         box = QFrame()
         box.setObjectName("metric")
@@ -291,7 +317,14 @@ class MainWindow(QMainWindow):
         return self.pages.currentWidget() is self.free_panel
 
     @property
-    def active(self) -> WorkoutSession | FreeRideSession:
+    def route_ride(self) -> bool:
+        """Vrai quand un parcours GPX est affiché (et c'est lui qui pilote le home trainer)."""
+        return self.route is not None and self.pages.currentWidget() is self.route_panel
+
+    @property
+    def active(self) -> WorkoutSession | FreeRideSession | RouteSession:
+        if self.route_ride:
+            return self.route
         return self.free if self.free_ride else self.session
 
     def load(self, workout: Workout, *, end_ride: bool = True) -> None:
@@ -326,13 +359,23 @@ class MainWindow(QMainWindow):
         self._push_target()
         self._refresh()
 
+    def adjust_difficulty(self, delta: int) -> None:
+        if self.route is not None:
+            self.route.adjust_difficulty(delta)
+            self._push_target()
+            self._refresh()
+
     def _weight_changed(self, kg: float) -> None:
         self.free.rider_kg = kg
+        if self.route is not None:
+            self.route.rider_kg = kg
         self._push_target()
         self._refresh()
 
     def _step(self, notches: int) -> None:
-        if self.free_ride:
+        if self.route_ride:
+            self.adjust_difficulty(DIFFICULTY_STEP if notches > 0 else -DIFFICULTY_STEP)
+        elif self.free_ride:
             self.nudge_free(1 if notches > 0 else -1, big=abs(notches) > 1)
         else:
             self.adjust(notches)
@@ -341,21 +384,41 @@ class MainWindow(QMainWindow):
         """Passe en mode libre ; la séance est mise en pause là où elle en est."""
         if self.free_ride:
             return
-        self.session.pause()
+        self.active.pause()
         self.pages.setCurrentWidget(self.free_panel)
         self.setWindowTitle("Mode libre — Home trainer")
         self._push_target()
         self._refresh()
 
     def leave_free_ride(self) -> None:
-        """Revient à la séance ; le mode libre est mis en pause (sa consigne et son temps sont gardés)."""
-        if not self.free_ride:
+        """Revient à la séance ; le mode libre ou le parcours est mis en pause (consigne, temps et distance
+        sont gardés)."""
+        if self.pages.currentIndex() == 0:
             return
-        self.free.pause()
+        self.active.pause()
         self.pages.setCurrentIndex(0)
         self.setWindowTitle(f"{self.session.workout.name} — Home trainer")
         self._push_target()
         self._refresh()
+
+    def ride_route(self, route) -> None:
+        """Affiche ce parcours, prêt à partir ; ce qui roulait est mis en pause."""
+        self.active.pause()
+        if self.route is not None:  # le parcours précédent, même inachevé, est enregistré
+            self.end_ride(self.route)
+        self.route = RouteSession(route, self.ftp, self.weight_box.value())
+        self.route_panel.set_session(self.route)
+        self._since_sample = 0.0
+        self.pages.setCurrentWidget(self.route_panel)
+        self.setWindowTitle(f"{route.name} — Home trainer")
+        self._push_target()
+        self._refresh()
+
+    def _reset_route(self) -> None:
+        if self.route is not None:
+            old = self.route
+            self.ride_route(old.route)
+            self.route.difficulty_pct = old.difficulty_pct
 
     def _toggle_free_ride(self) -> None:
         self.leave_free_ride() if self.free_ride else self.enter_free_ride()
@@ -370,6 +433,14 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _toggle(self) -> None:
+        if self.route_ride:
+            if self.route.state is State.FINISHED:
+                self._reset_route()
+            self.route.toggle()
+            self.clock.restart()
+            self._push_target()
+            self._refresh()
+            return
         if self.free_ride:
             self.free.toggle()
             self.clock.restart()
@@ -383,7 +454,7 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _next_step(self) -> None:
-        if self.free_ride:
+        if self.free_ride or self.route_ride:
             return
         self.session.next_step()
         self._push_target()
@@ -397,6 +468,8 @@ class MainWindow(QMainWindow):
             return
         self.ftp = self.ftp_box.value()
         self.free.ftp = self.ftp
+        if self.route is not None:
+            self.route.ftp = self.ftp
         if isinstance(self.heart_rate, SimulatedHeartRate):
             self.heart_rate.ftp = self.ftp
         s = self.session
@@ -421,9 +494,18 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _choose_trainer(self) -> None:
-        dialog = TrainerDialog(self.book, self)
+        dialog = TrainerDialog(self.book, self, current=self.source,
+                               current_name=self._display_name("trainer", self.source),
+                               before_calibration=self._pause_for_calibration)
         if dialog.exec() == QDialog.Accepted:
             self.set_power_source(dialog.sensor())
+
+    def _pause_for_calibration(self) -> None:
+        """La séance se met en pause : pendant la calibration, c'est le home trainer qui mène."""
+        if self.active.state is State.RUNNING:
+            self.active.pause()
+            self._push_target()
+            self._refresh()
 
     def set_heart_rate_sensor(self, sensor: BackgroundSensor[HeartRateReading] | None) -> None:
         """Remplace le capteur cardio (None = aucun) et le démarre."""
@@ -447,6 +529,20 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self.set_heart_rate_sensor(dialog.sensor())
 
+    def set_library(self, library: Library) -> None:
+        """Bibliothèque des séances : ouvertures et enregistrements partent de son dossier."""
+        self.library = library
+        if library.ensure_folder():
+            self.directory = str(library.folder)
+
+    def _open_library(self) -> None:
+        dialog = LibraryDialog(self.library, self.ftp, self)
+        accepted = dialog.exec() == QDialog.Accepted
+        if self.library.folder.is_dir():
+            self.directory = str(self.library.folder)
+        if accepted and dialog.chosen_path() is not None:
+            self.open_path(str(dialog.chosen_path()))
+
     def _remember(self, role: str, sensor) -> None:
         """Mémorise l'appareil dès qu'il est connecté (adresse ou numéro découverts à la connexion)."""
         if not isinstance(sensor, BackgroundSensor) or sensor.state is not SensorState.CONNECTED:
@@ -469,6 +565,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
         self.end_ride(self.session, send=False)
         self.end_ride(self.free, send=False)
+        if self.route is not None:
+            self.end_ride(self.route, send=False)
         self.send_rides(wait_s=CLOSE_SEND_WAIT_S)
         if self.heart_rate is not None:
             self.heart_rate.stop()
@@ -477,11 +575,19 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _open_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Ouvrir une séance", self.directory, FILE_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, "Ouvrir une séance", self.directory, OPEN_FILTER)
+        if path:
+            self.open_path(path)
+
+    def _open_route(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Rouler un parcours", self.directory,
+                                              "Parcours GPX (*.gpx);;Tous les fichiers (*)")
         if path:
             self.open_path(path)
 
     def open_path(self, path: str) -> bool:
+        if Path(path).suffix.lower() == ".gpx":
+            return self.open_route(path)
         warnings: list[str] = []
         try:
             workout = load_workout(path, warnings)
@@ -495,7 +601,20 @@ class MainWindow(QMainWindow):
         self.load(workout)
         return True
 
+    def open_route(self, path: str) -> bool:
+        try:
+            route = load_route(path)
+        except (RouteError, OSError) as e:
+            QMessageBox.warning(self, "Lecture impossible", f"{Path(path).name} : {e}")
+            return False
+        self.directory = str(Path(path).parent)
+        self.ride_route(route)
+        return True
+
     def _new_workout(self) -> None:
+        # Une nouvelle séance s'enregistre par défaut dans la bibliothèque.
+        if self.library.folder.is_dir():
+            self.directory = str(self.library.folder)
         self._open_editor(None)
 
     def _edit_workout(self) -> None:
@@ -548,10 +667,12 @@ class MainWindow(QMainWindow):
             self.end_ride(active)
         if active is self.free:
             self._reset_free_ride()
+        elif active is self.route:
+            self._reset_route()
         else:
             self._reset()
 
-    def end_ride(self, session: WorkoutSession | FreeRideSession, send: bool = True) -> None:
+    def end_ride(self, session: WorkoutSession | FreeRideSession | RouteSession, send: bool = True) -> None:
         """Enregistre la sortie en .fit (une seule fois) puis l'envoie aux comptes connectés."""
         if self.outbox is None or session.exported or len(session.samples) < MIN_RIDE_SAMPLES:
             return
@@ -631,12 +752,19 @@ class MainWindow(QMainWindow):
                 heart = self.heart_rate.latest() if self.heart_rate is not None else None
                 active.record(reading.power_w, reading.cadence_rpm, heart.bpm if heart else None,
                               self._speed(reading))
-        if self.session.state is State.FINISHED:
-            self.end_ride(self.session)  # fin de séance : enregistrée et envoyée d'elle-même
+            if active is self.route:
+                active.ride(dt, reading.power_w)
+                if active.state is State.FINISHED:
+                    self._push_target()  # arrivée : résistance libre
+        for session in (self.session, self.route):  # fin de séance ou arrivée : enregistrée et envoyée d'elle-même
+            if session is not None and session.state is State.FINISHED:
+                self.end_ride(session)
         self._refresh()
 
     def _speed(self, reading) -> float:
         """Vitesse donnée par le home trainer, sinon celle d'un cycliste de ce poids sur le plat (ou la pente)."""
+        if self.route_ride:  # sur un parcours, la distance suit la vitesse simulée de la route
+            return round(self.route.speed_kmh, 2)
         speed = getattr(reading, "speed_kmh", None)
         if speed is not None:
             return speed
@@ -647,10 +775,15 @@ class MainWindow(QMainWindow):
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
         active = self.active
         running = active.state is State.RUNNING
-        command = self.free.command if active is self.free else self.session.target_w
+        command = self.session.target_w if active is self.session else active.command
         self.source.set_target(command if running else None)
 
     def _refresh(self) -> None:
+        if self.route_ride:
+            self.route_panel.refresh(self.route, self._last_reading)
+            self._refresh_heart_rate(self.route_panel.m_heart, self.route)
+            self._refresh_source()
+            return
         if self.free_ride:
             self.free_panel.refresh(self.free, self._last_reading)
             self._refresh_heart_rate(self.free_panel.m_heart, self.free)
@@ -692,7 +825,8 @@ class MainWindow(QMainWindow):
             text += f" : {source.status if source.state is not SensorState.CONNECTED else 'signal perdu'}"
         self.source_label.setText(f"  {text}")
 
-    def _refresh_heart_rate(self, metric: Metric, session: WorkoutSession | FreeRideSession) -> None:
+    def _refresh_heart_rate(self, metric: Metric,
+                            session: WorkoutSession | FreeRideSession | RouteSession) -> None:
         sensor = self.heart_rate
         if sensor is None:
             metric.set("—", "aucun capteur · menu Cardio…")
@@ -752,6 +886,7 @@ class SensorDialog(QDialog):
         self.message.setObjectName("metricSub")
         self.message.setWordWrap(True)
         form.addRow("", self.message)
+        self._extra_rows(form)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -763,6 +898,9 @@ class SensorDialog(QDialog):
         self._scan_result: list | Exception | None = None
         self._scan_timer = QTimer(self)
         self._scan_timer.timeout.connect(self._scan_done)
+
+    def _extra_rows(self, form: QFormLayout) -> None:
+        """Lignes propres à un type d'appareil, avant les boutons OK / Annuler."""
 
     def _initial_index(self) -> int:
         """Le dernier appareil choisi, sinon l'appareil simulé."""
@@ -948,6 +1086,35 @@ class TrainerDialog(SensorDialog):
                  "et fermez les autres applis qui pourraient s'y connecter (Wahoo, Zwift…).")
     ANY_DEVICE = "Premier home trainer trouvé"
 
+    def __init__(self, book: DeviceBook, parent: QWidget | None = None, *, current: PowerSource | None = None,
+                 current_name: str = "", before_calibration=None) -> None:
+        self.current = current
+        self.current_name = current_name or getattr(current, "name", "")
+        self.before_calibration = before_calibration
+        super().__init__(book, parent)
+
+    def _extra_rows(self, form: QFormLayout) -> None:
+        self.calibrate_button = QPushButton("Calibrer…")
+        self.calibrate_button.setToolTip("Calibration (spindown) du home trainer en service, pas à pas")
+        self.calibrate_button.clicked.connect(self.calibrate)
+        usable = self.current is not None and can_calibrate(self.current)
+        self.calibrate_button.setEnabled(usable)
+        row = QWidget()
+        line = QHBoxLayout(row)
+        line.setContentsMargins(0, 0, 0, 0)
+        line.addWidget(self.calibrate_button)
+        hint = QLabel(f"{self.current_name}" if usable else "")
+        hint.setObjectName("metricSub")
+        line.addWidget(hint, 1)
+        form.addRow("Calibration", row)
+
+    def calibrate(self) -> None:
+        if self.current is None:
+            return
+        if self.before_calibration is not None:
+            self.before_calibration()
+        CalibrationDialog(self.current, self.current_name, self).exec()
+
     def scan_devices(self) -> list:
         from ..sensors.trainer_ble import scan_trainers
         return scan_trainers(timeout=5)
@@ -986,7 +1153,7 @@ QStatusBar {{ color: {MUTED}; }}
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="home-trainer-gui", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("file", nargs="?", help="séance .erg, .mrc, .zwo ou .fit")
+    parser.add_argument("file", nargs="?", help="séance .erg, .mrc, .zwo ou .fit, ou parcours .gpx")
     parser.add_argument("--ftp", type=float, default=DEFAULT_FTP)
     parser.add_argument("--weight", type=float, help="poids du cycliste en kg, pour la pente simulée")
     parser.add_argument("--bricks", help="séance en notation briques")
@@ -1037,6 +1204,7 @@ def main(argv: list[str] | None = None) -> int:
     window.resize(1240, 760)
     if args.weight:
         window.weight_box.setValue(args.weight)
+    window.set_library(Library.load(documents=documents_folder()))
     window.show()
     if args.file:  # fichier passé en argument, ou glissé sur l'icône
         window.open_path(args.file)

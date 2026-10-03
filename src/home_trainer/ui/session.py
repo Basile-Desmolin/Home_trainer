@@ -6,17 +6,22 @@ home trainer. L'intensité (`intensity_pct`, 100 % par défaut) multiplie
 toutes les consignes : c'est le réglage « +1 % / −1 % » de l'interface.
 `FreeRideSession` est le mode libre : pas de séance, consigne réglée à la main
 (puissance ERG, ou pente simulée qui tient compte du poids).
+`RouteSession` roule un parcours GPX : la pente envoyée suit la route, à la
+distance parcourue d'après la puissance pédalée.
 """
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from enum import Enum
 
 from ..formats.fit_activity import ActivityPoint
+from ..route import Route
 from ..sensors.trainer import DEFAULT_BIKE_KG, DEFAULT_WEIGHT_KG, Slope
 from ..workout import Segment, Workout
+from .power import road_speed_kmh
 
 MIN_INTENSITY = 1
 MAX_INTENSITY = 200
@@ -259,6 +264,116 @@ class FreeRideSession:
         return sum(values) / len(values) if values else None
 
 
+MIN_DIFFICULTY = 0
+MAX_DIFFICULTY = 100
+DIFFICULTY_STEP = 10
+SPEED_RESPONSE_S = 4.0  # inertie du vélo : la vitesse rejoint celle permise par la puissance
+
+
+class RouteSession:
+    """Parcours GPX : le home trainer simule la pente de la route là où l'on se trouve.
+
+    La distance avance selon la vitesse qu'aurait le vélo sur la route
+    (puissance, pente réelle, poids), comme dans les applis de route virtuelle :
+    la même pour tous les home trainers. La difficulté (100 % par défaut)
+    adoucit la pente envoyée au home trainer, pas la vitesse.
+    """
+
+    def __init__(self, route: Route, ftp: float | None = None, rider_kg: float = DEFAULT_RIDER_KG,
+                 difficulty_pct: int = 100) -> None:
+        self.route = route
+        self.ftp = ftp
+        self.rider_kg = rider_kg
+        self.difficulty_pct = difficulty_pct
+        self.state = State.READY
+        self.elapsed_s = 0.0
+        self.distance_m = 0.0
+        self.speed_kmh = 0.0
+        self.samples: list[Sample] = []
+        self.exported = False
+
+    def start(self) -> None:
+        if self.state in (State.READY, State.PAUSED):
+            self.state = State.RUNNING
+
+    def pause(self) -> None:
+        if self.state is State.RUNNING:
+            self.state = State.PAUSED
+            self.speed_kmh = 0.0
+
+    def toggle(self) -> None:
+        self.pause() if self.state is State.RUNNING else self.start()
+
+    def adjust_difficulty(self, delta_pct: int) -> int:
+        self.difficulty_pct = max(MIN_DIFFICULTY, min(MAX_DIFFICULTY, self.difficulty_pct + delta_pct))
+        return self.difficulty_pct
+
+    def tick(self, dt: float) -> None:
+        if self.state is State.RUNNING:
+            self.elapsed_s += dt
+
+    def ride(self, dt: float, power_w: float) -> None:
+        """Avance de `dt` secondes en pédalant à `power_w` (sans effet hors « en cours »)."""
+        if self.state is not State.RUNNING or dt <= 0:
+            return
+        goal = road_speed_kmh(power_w, Slope(self.grade_pct, self.rider_kg))
+        self.speed_kmh += (goal - self.speed_kmh) * (1 - math.exp(-dt / SPEED_RESPONSE_S))
+        self.distance_m = min(self.distance_m + self.speed_kmh / 3.6 * dt, self.route.total_m)
+        if self.distance_m >= self.route.total_m:
+            self.state = State.FINISHED
+            self.speed_kmh = 0.0
+
+    def record(self, power_w: float, cadence_rpm: float | None = None,
+               heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
+               at: float | None = None) -> None:
+        self.samples.append(Sample(self.elapsed_s, power_w, None, cadence_rpm, heart_rate_bpm,
+                                   self.trainer_grade_pct, self.speed_kmh if speed_kmh is None else speed_kmh,
+                                   time.time() if at is None else at))
+
+    # --- lecture ---------------------------------------------------------
+
+    @property
+    def grade_pct(self) -> float:
+        """Pente de la route ici (lissée sur 100 m), au dixième."""
+        return round(self.route.grade_at(self.distance_m), 1) + 0.0
+
+    @property
+    def trainer_grade_pct(self) -> float:
+        """Pente envoyée au home trainer : celle de la route × difficulté, dans ses bornes."""
+        g = round(self.grade_pct * self.difficulty_pct / 100, 1)
+        return max(MIN_GRADE_PCT, min(MAX_GRADE_PCT, g)) + 0.0
+
+    @property
+    def command(self) -> Slope:
+        return Slope(self.trainer_grade_pct, self.rider_kg)
+
+    @property
+    def remaining_m(self) -> float:
+        return max(self.route.total_m - self.distance_m, 0.0)
+
+    @property
+    def climb_done_m(self) -> float:
+        return self.route.climb_between(0.0, self.distance_m)
+
+    @property
+    def climb_remaining_m(self) -> float:
+        return self.route.climb_between(self.distance_m, self.route.total_m)
+
+    @property
+    def elevation_m(self) -> float:
+        return self.route.elevation_at(self.distance_m)
+
+    def average_power(self) -> float | None:
+        return sum(x.power_w for x in self.samples) / len(self.samples) if self.samples else None
+
+    def average_heart_rate(self) -> float | None:
+        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
+        return sum(values) / len(values) if values else None
+
+    def average_speed_kmh(self) -> float | None:
+        return self.distance_m / self.elapsed_s * 3.6 if self.elapsed_s > 0 else None
+
+
 # --- sortie enregistrée ------------------------------------------------------
 
 MIN_RIDE_SAMPLES = 60  # moins d'une minute de pédalage : rien à enregistrer
@@ -270,8 +385,15 @@ def ride_points(samples: list[Sample]) -> list[ActivityPoint]:
                           x.t) for x in samples if x.at is not None]
 
 
-def ride_title(session: WorkoutSession | FreeRideSession) -> tuple[str, str]:
+def ride_title(session: WorkoutSession | FreeRideSession | RouteSession) -> tuple[str, str]:
     """Titre et description de la sortie pour Strava / Nolio."""
+    if isinstance(session, RouteSession):
+        title = session.route.name or "Parcours"
+        done = session.state is State.FINISHED
+        text = f"Parcours « {title} » sur home trainer" + ("" if done else " (arrêté avant l'arrivée)")
+        if session.difficulty_pct != 100:
+            text += f", difficulté {session.difficulty_pct} %"
+        return title, text + "."
     if isinstance(session, WorkoutSession):
         title = session.workout.name or "Séance"
         done = session.state is State.FINISHED

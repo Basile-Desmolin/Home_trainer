@@ -14,11 +14,14 @@ en composer en briques « x min à y watts ».
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
 | Capteur cardiaque Bluetooth et ANT+ (+ simulé), affiché et enregistré | ✅ `src/home_trainer/sensors/` |
 | Éditeur graphique de briques, enregistrement .zwo/.mrc/.erg/.fit | ✅ `ui/editor.py` |
+| Bibliothèque : séances d'un dossier (sous-dossiers compris), recherche, filtre de durée, aperçu | ✅ `library.py`, `ui/library.py` |
 | Mode libre : ERG réglé à la main par pas de 5 W, ou pente simulée selon le poids, courbe en direct | ✅ `ui/free_ride.py` |
+| Parcours GPX : pente de la route simulée selon la distance parcourue, profil, carte | ✅ `route.py`, `ui/route_ride.py` |
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 | Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
 | Chaque sortie enregistrée en `.fit` d'activité, envoi automatique vers Strava et Nolio | ✅ `formats/fit_activity.py`, `sync/` |
+| Calibration (spindown) guidée : *Home trainer…* → *Calibrer…* (FTMS, protocole Wahoo, ANT+ FE-C) | ✅ `ui/calibration.py`, pas encore essayée sur le vrai matériel |
 
 ## Lancer l'appli sous Windows (icône)
 
@@ -36,6 +39,22 @@ signé) : *Informations complémentaires* → *Exécuter quand même*.
 dossier `.venv` du dépôt et crée un raccourci **Home trainer** avec l'icône
 sur le Bureau et dans le menu Démarrer. Pour fabriquer soi-même le `.exe` :
 `packaging\windows\construire-exe.bat` (résultat dans `dist\`).
+
+## Bibliothèque des séances
+
+Bouton **Bibliothèque…** (Ctrl+B) : toutes les séances `.zwo`, `.mrc`, `.erg`
+et `.fit` d'un dossier et de ses sous-dossiers, avec leur durée, un petit
+profil et un TSS approché. La recherche ignore majuscules et accents et porte
+sur le nom, le sous-dossier et la description ; un menu filtre par durée. Un
+double-clic (ou **Rouler cette séance**) charge la séance.
+
+Le dossier est `Documents\HomeTrainer\Séances` par défaut (créé au premier
+lancement) ; **Changer…** en choisit un autre, qui est mémorisé. Les séances
+créées dans l'éditeur s'y enregistrent par défaut, et il suffit d'y copier
+des fichiers (Zwift, TrainerRoad, intervals.icu…) pour qu'ils apparaissent ;
+les fichiers illisibles, comme les sorties `.fit` enregistrées, sont ignorés.
+
+![Bibliothèque](docs/bibliotheque.png)
 
 ## Installation (développement)
 
@@ -156,6 +175,31 @@ par une route en pente, par pas de 0,5 % (↑ ↓) et 2 % (Page↑ Page↓), de
 
 ![Pente simulée](docs/mode-pente.png)
 
+### Parcours GPX
+
+**Parcours GPX…** (Ctrl+G), **Ouvrir…** ou un `.gpx` glissé sur l'icône :
+on roule la trace (Strava, Komoot, Garmin… ; traces `trk` ou itinéraires
+`rte`), exemple dans `examples/col-fictif.gpx`. Au départ, le home trainer
+reçoit la pente de la route à l'endroit où l'on se trouve, avec le poids
+saisi à côté de la FTP.
+
+- **Distance** : elle avance à la vitesse qu'aurait le vélo sur la vraie
+  route, calculée depuis la puissance pédalée, la pente et le poids (comme
+  Zwift ou Rouvy), donc la même quel que soit le home trainer. En descente,
+  on roule même sans pédaler.
+- **Pente** : mesurée sur 100 m autour de la position, ce qui gomme le bruit
+  des altitudes GPS ; bornée à −10 % / +20 % pour le home trainer.
+- **Difficulté** (boutons −10 % / +10 %, ou ↑ ↓) : part de la pente envoyée
+  au home trainer, 100 % par défaut. À 50 %, un 10 % se pédale comme un 5 % ;
+  la vitesse et la distance suivent toujours la vraie pente.
+- Affichage : pente (couleur selon la raideur, descentes en bleu), altitude,
+  distance et dénivelé restants, vitesse et moyenne, profil des 2 prochains
+  kilomètres, profil complet et carte de la trace avec la position.
+- À l'arrivée, le home trainer repasse en résistance libre. **Retour à la
+  séance** met le parcours en pause, Ctrl+G ou **Ouvrir…** en lance un autre.
+
+![Parcours GPX](docs/parcours-gpx.png)
+
 ## Pilotage du home trainer Wahoo
 
 ```bash
@@ -209,7 +253,7 @@ Windows, `~/.config/home-trainer/appareils.json` ailleurs (variable
 
 ## Sorties enregistrées, envoi vers Strava et Nolio
 
-À la fin de chaque sortie (séance, mode libre en ERG ou en pente), l'appli
+À la fin de chaque sortie (séance, mode libre en ERG ou en pente, parcours GPX), l'appli
 écrit un **`.fit` d'activité** : une mesure par seconde (puissance, cadence,
 cardio, vitesse, distance, pente), les pauses, un tour par brique de séance,
 et le résumé (moyennes, puissance normalisée, travail). Puis elle l'**envoie
@@ -217,8 +261,8 @@ d'elle-même** vers les comptes Strava et Nolio connectés.
 
 Une sortie se termine :
 
-- en fin de séance, d'elle-même ;
-- avec le bouton **Terminer** (ou Ctrl+T), en séance comme en mode libre ;
+- en fin de séance ou à l'arrivée d'un parcours, d'elle-même ;
+- avec le bouton **Terminer** (ou Ctrl+T), en séance, en mode libre ou sur un parcours ;
 - en changeant de séance, avec **Recommencer** / **Remettre à zéro**, ou en
   fermant l'appli (la sortie en cours n'est jamais perdue).
 

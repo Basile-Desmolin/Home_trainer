@@ -77,3 +77,14 @@ def test_accounts_dialog_keeps_credentials(window):
     again = AccountBook.load(window.accounts.path)
     assert again["strava"].client_id == "12345" and not again["strava"].connected
     assert dialog.boxes["nolio"].connect_button.text() == "Se connecter"
+
+
+def test_finish_button_saves_route_ride(window):
+    from home_trainer.route import Route
+    route = Route.from_coordinates("Col test", [(45.0, 6.0, 500.0), (45.01, 6.0, 600.0), (45.02, 6.0, 650.0)])
+    window.ride_route(route)
+    pedal(window.route, 90)
+    window.route_panel.finish_button.click()
+    [entry] = window.outbox.entries().values()
+    assert entry["title"] == "Col test" and "arrêté avant l'arrivée" in entry["description"]
+    assert window.route.samples == []
