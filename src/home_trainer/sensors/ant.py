@@ -27,6 +27,9 @@ def open_ant_node():
     return node
 
 
+ANT_CHANNEL_ID_MESSAGE = 0x51  # openant : Message.ID.RESPONSE_CHANNEL_ID
+
+
 def parse_channel_id(data) -> int:
     """Numéro d'appareil dans la réponse « Channel ID » (0x51) : numéro sur 2 octets, type, transmission."""
     return data[0] | data[1] << 8
@@ -51,8 +54,7 @@ class DeviceNumberProbe:
 
     def _ask(self, channel) -> None:
         try:
-            from openant.base.message import Message
-            _channel, _event, data = channel.request_message(Message.ID.RESPONSE_CHANNEL_ID)
+            _channel, _event, data = channel.request_message(ANT_CHANNEL_ID_MESSAGE)
             number = parse_channel_id(data)
         except Exception as e:  # noqa: BLE001 (facultatif : l'appareil marche sans être mémorisé)
             log.debug("numéro ANT+ de l'appareil inconnu (%s)", e)
