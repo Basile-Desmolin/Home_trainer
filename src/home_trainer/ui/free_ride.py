@@ -1,4 +1,7 @@
-"""Mode libre : sans séance, la consigne ERG se règle à la main, en direct.
+"""Mode libre : sans séance, la consigne se règle à la main, en direct.
+
+Deux réglages : ERG (puissance imposée, par pas de 5 W) ou pente simulée
+(par pas de 0,5 % ; le home trainer en déduit la résistance avec le poids).
 
 `FreeRidePanel` est la page affichée à la place de la séance ; la fenêtre
 principale lui passe les mesures et relaie les boutons (`FreeRideSession`
@@ -9,15 +12,28 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+                               QSizePolicy, QVBoxLayout, QWidget)
 
 from .chart import ACCENT, DEFAULT_FTP, HEART, MUTED, PANEL, POWER, TEXT, hms, zone_color
 from .metric import Metric
 from .power import Reading
-from .session import FREE_STEP_W, FreeRideSession, State
+from .session import FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, State
 
 BIG_STEP_W = 25
+BIG_STEP_PCT = 2.0
+# Pente : du vert (plat) au rouge (mur).
+GRADES = [(1, "#3fb37f"), (4, "#e7c43a"), (8, "#f08a2c"), (1_000, "#e5484d")]
+
+
+def grade_text(grade_pct: float) -> str:
+    """« 4,5 % », « −2 % » : à la française."""
+    text = f"{grade_pct:.1f}".rstrip("0").rstrip(".").replace(".", ",").replace("-", "−")
+    return f"{text} %"
+
+
+def grade_color(grade_pct: float) -> QColor:
+    return QColor(next(color for limit, color in GRADES if grade_pct < limit))
 WINDOW_S = 600  # la courbe montre les 10 dernières minutes
 
 
@@ -49,13 +65,21 @@ class FreeRideChart(QWidget):
         end = max(s.elapsed_s, self.window_s)
         start = end - self.window_s
         samples = [x for x in s.samples if x.t >= start]
-        peak = max([x.power_w for x in samples] + [x.target_w or 0 for x in samples] + [s.target_w, ftp]) * 1.15
+        erg = s.mode is FreeMode.ERG
+        peak = max([x.power_w for x in samples] + [x.target_w or 0 for x in samples]
+                   + [s.target_w if erg else 0, ftp]) * 1.15
+        # La pente a sa propre échelle, sur les 60 % du bas : le terrain sous la courbe de puissance.
+        grades = [x.grade_pct for x in samples if x.grade_pct is not None] + ([] if erg else [s.grade_pct])
+        g_lo, g_hi = min(grades + [0.0]) - 2, max(grades + [10.0])
 
         def x(t: float) -> float:
             return area.left() + (t - start) / self.window_s * area.width()
 
         def y(w: float) -> float:
             return area.bottom() - w / peak * area.height()
+
+        def yg(grade: float) -> float:
+            return area.bottom() - (grade - g_lo) / (g_hi - g_lo) * area.height() * 0.6
 
         # Graduations : FTP et axe du temps (une marque par minute).
         p.setFont(QFont(self.font().family(), 8))
@@ -68,19 +92,29 @@ class FreeRideChart(QWidget):
             p.drawText(QRectF(x(t) - 30, area.bottom() + 4, 60, 18), Qt.AlignHCenter, hms(t))
             t += 120 if self.window_s > 360 else 60
 
-        # Consigne : passée en escalier sur fond coloré par zone, actuelle en pointillés jusqu'au bord.
+        # Consigne : passée en escalier sur fond coloré (zone en ERG, raideur en pente),
+        # actuelle en pointillés jusqu'au bord.
         now = s.elapsed_s
-        steps: list[tuple[float, float]] = []  # (début, consigne) à chaque changement
+        steps: list[tuple[float, float | None, float | None]] = []  # (début, watts, pente) à chaque changement
         for sample in samples:
-            if not steps or sample.target_w != steps[-1][1]:
-                steps.append((sample.t, sample.target_w or 0))
-        for i, (t0, w) in enumerate(steps):
+            key = (sample.target_w, sample.grade_pct)
+            if not steps or key != steps[-1][1:]:
+                steps.append((sample.t, *key))
+        for i, (t0, w, grade) in enumerate(steps):
             t1 = steps[i + 1][0] if i + 1 < len(steps) else now
-            color = zone_color(w, ftp)
+            if grade is not None:
+                color, top = grade_color(grade), yg(grade)
+            else:
+                color, top = zone_color(w or 0, ftp), y(w or 0)
             color.setAlpha(110)
-            p.fillRect(QRectF(QPointF(x(t0), y(w)), QPointF(x(t1), area.bottom())), color)
+            p.fillRect(QRectF(QPointF(x(t0), top), QPointF(x(t1), area.bottom())), color)
         p.setPen(QPen(QColor(ACCENT), 2, Qt.DashLine))
-        p.drawLine(QPointF(x(now), y(s.target_w)), QPointF(area.right(), y(s.target_w)))
+        level = y(s.target_w) if erg else yg(s.grade_pct)
+        p.drawLine(QPointF(x(now), level), QPointF(area.right(), level))
+        if not erg:
+            p.setPen(QColor(ACCENT))
+            p.drawText(QRectF(area.right() - 64, level - 18, 60, 16), Qt.AlignRight | Qt.AlignVCenter,
+                       grade_text(s.grade_pct))
 
         # Puissance réalisée.
         if len(samples) > 1:
@@ -123,7 +157,7 @@ class FreeRidePanel(QWidget):
         layout.setContentsMargins(14, 10, 14, 14)
         layout.setSpacing(10)
 
-        title = QLabel("Mode libre  ·  consigne ERG réglée à la main")
+        title = QLabel("Mode libre  ·  consigne réglée à la main")
         title.setObjectName("title")
         layout.addWidget(title)
 
@@ -158,10 +192,11 @@ class FreeRidePanel(QWidget):
             b.setFocusPolicy(Qt.NoFocus)
             buttons.addWidget(b)
         buttons.addStretch(1)
-        hint = QLabel("Espace : démarrer / pause   ↑ ↓ : ±5 W   Pg↑ Pg↓ : ±25 W")
-        hint.setObjectName("metricSub")
-        buttons.addWidget(hint)
+        self.hint = QLabel()
+        self.hint.setObjectName("metricSub")
+        buttons.addWidget(self.hint)
         layout.addLayout(buttons)
+        self._set_mode_labels(FreeMode.ERG)
 
     def _build_target(self) -> QWidget:
         box = QFrame()
@@ -169,9 +204,25 @@ class FreeRidePanel(QWidget):
         layout = QVBoxLayout(box)
         layout.setContentsMargins(14, 8, 14, 10)
         layout.setSpacing(4)
-        title = QLabel("CIBLE ERG")
-        title.setObjectName("metricTitle")
-        layout.addWidget(title)
+        top = QHBoxLayout()
+        self.target_title = QLabel("CIBLE ERG")
+        self.target_title.setObjectName("metricTitle")
+        top.addWidget(self.target_title, 1)
+        self.mode_buttons: dict[FreeMode, QPushButton] = {}
+        group = QButtonGroup(self)
+        for mode, text, tip in ((FreeMode.ERG, "ERG", "Puissance imposée, quelle que soit la vitesse"),
+                                (FreeMode.SLOPE, "Pente", "Pente simulée : la résistance dépend de la pente, "
+                                                          "du poids et de la vitesse, comme sur la route")):
+            b = QPushButton(text)
+            b.setObjectName("mode")
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.setFocusPolicy(Qt.NoFocus)
+            group.addButton(b)
+            top.addWidget(b)
+            self.mode_buttons[mode] = b
+        self.mode_buttons[FreeMode.ERG].setChecked(True)
+        layout.addLayout(top)
         self.target_label = QLabel("—")
         font = QFont()
         font.setPointSize(64)
@@ -185,21 +236,36 @@ class FreeRidePanel(QWidget):
         self.target_sub.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.target_sub)
         row = QHBoxLayout()
-        self.adjust_buttons: list[tuple[QPushButton, int]] = []
-        for delta in (-BIG_STEP_W, -FREE_STEP_W, FREE_STEP_W, BIG_STEP_W):
-            row.addWidget(self._adjust_button(delta))
+        # (bouton, sens, grand pas ?) : le libellé suit le réglage (watts ou pente).
+        self.adjust_buttons: list[tuple[QPushButton, int, bool]] = []
+        for direction, big in ((-1, True), (-1, False), (+1, False), (+1, True)):
+            row.addWidget(self._adjust_button(direction, big))
         layout.addLayout(row)
         return box
 
-    def _adjust_button(self, delta: int) -> QPushButton:
-        b = QPushButton(f"{delta:+d}".replace("-", "−"))
+    def _adjust_button(self, direction: int, big: bool) -> QPushButton:
+        b = QPushButton()
         b.setObjectName("adjust")
         b.setFocusPolicy(Qt.NoFocus)
-        b.setAutoRepeat(True)  # rester appuyé fait défiler les watts
+        b.setAutoRepeat(True)  # rester appuyé fait défiler les valeurs
         b.setAutoRepeatDelay(400)
         b.setAutoRepeatInterval(150)
-        self.adjust_buttons.append((b, delta))
+        self.adjust_buttons.append((b, direction, big))
         return b
+
+    def _set_mode_labels(self, mode: FreeMode) -> None:
+        erg = mode is FreeMode.ERG
+        self.mode_buttons[mode].setChecked(True)
+        self.target_title.setText("CIBLE ERG" if erg else "PENTE SIMULÉE")
+        for b, direction, big in self.adjust_buttons:
+            if erg:
+                text = f"{direction * (BIG_STEP_W if big else FREE_STEP_W):+d}"
+            else:
+                step = BIG_STEP_PCT if big else GRADE_STEP_PCT
+                text = ("+" if direction > 0 else "−") + grade_text(step).replace(" ", "\u202f")
+            b.setText(text.replace("-", "−"))
+        self.hint.setText("Espace : pause   ↑ ↓ : ±5 W   Pg↑ Pg↓ : ±25 W" if erg
+                          else "Espace : pause   ↑ ↓ : ±0,5 %   Pg↑ Pg↓ : ±2 %")
 
     def refresh(self, session: FreeRideSession, reading: Reading | None) -> None:
         ftp = session.ftp or DEFAULT_FTP
@@ -209,13 +275,23 @@ class FreeRidePanel(QWidget):
         if average is not None:
             sub += f"{' · ' if sub else ''}moy. {average:.0f} W"
         self.m_power.set(f"{r.power_w:.0f} W" if r else "—", sub)
-        self.target_label.setText(f"{session.target_w} W")
-        self.target_sub.setText(f"{session.target_w / ftp * 100:.0f} % FTP")
-        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
+        erg = session.mode is FreeMode.ERG
+        self._set_mode_labels(session.mode)
+        if erg:
+            self.target_label.setText(f"{session.target_w} W")
+            self.target_sub.setText(f"{session.target_w / ftp * 100:.0f} % FTP")
+        else:
+            self.target_label.setText(grade_text(session.grade_pct))
+            self.target_sub.setText(f"cycliste {session.rider_kg:g} kg".replace(".", ","))
+        speed = getattr(r, "speed_kmh", None)
+        sub = "tr/min" if speed is None else f"tr/min · {speed:.1f} km/h".replace(".", ",")
+        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
         self.m_time.set(hms(session.elapsed_s), "")
+        running = f"ERG à {session.target_w} W" if erg else f"Pente simulée à {grade_text(session.grade_pct)}"
         self.status_label.setText({
-            State.READY: "Réglez la cible puis démarrez : le home trainer passe en ERG.",
-            State.RUNNING: f"ERG à {session.target_w} W",
+            State.READY: "Réglez la cible puis démarrez : le home trainer passe "
+                         + ("en ERG." if erg else "en simulation de pente."),
+            State.RUNNING: running,
             State.PAUSED: "En pause : résistance libre",
         }.get(session.state, ""))
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre"}.get(session.state,
