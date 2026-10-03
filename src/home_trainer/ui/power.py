@@ -1,9 +1,9 @@
 """Sources de puissance : ce que l'interface attend d'un home trainer.
 
-Le pilotage réel (Wahoo en Bluetooth FTMS ou ANT+ FE-C) implémentera la même
-interface que `SimulatedTrainer`. En attendant, le simulateur imite un home
-trainer en mode ERG : la puissance mesurée rejoint la consigne en quelques
-secondes, avec un peu de bruit de pédalage.
+Le pilotage réel (`home_trainer.sensors.open_trainer`, Wahoo en Bluetooth
+FTMS ou ANT+ FE-C) et `SimulatedTrainer` offrent la même interface. Le
+simulateur imite un home trainer en mode ERG : la puissance mesurée rejoint
+la consigne en quelques secondes, avec un peu de bruit de pédalage.
 """
 
 from __future__ import annotations
@@ -26,8 +26,16 @@ class PowerSource(Protocol):
     def set_target(self, watts: float | None) -> None:
         """Consigne ERG en watts ; None = résistance libre."""
 
-    def read(self, dt: float) -> Reading:
-        """Dernière mesure, `dt` secondes après la précédente."""
+    def read(self, dt: float) -> Reading | None:
+        """Dernière mesure, `dt` secondes après la précédente (None : home trainer muet)."""
+
+
+def open_power_source(kind: str, *, address: str | None = None, device_number: int = 0) -> PowerSource:
+    """Home trainer simulé ("sim"), Bluetooth ("ble") ou ANT+ ("ant"), pas encore démarré."""
+    if kind == "sim":
+        return SimulatedTrainer()
+    from ..sensors import open_trainer
+    return open_trainer(kind, address=address, device_number=device_number)
 
 
 class SimulatedTrainer:

@@ -14,7 +14,7 @@ en composer en briques « x min à y watts ».
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
 | Capteur cardiaque Bluetooth et ANT+ (+ simulé), affiché et enregistré | ✅ `src/home_trainer/sensors/` |
 | Éditeur graphique de briques | à venir |
-| Pilotage Wahoo (Bluetooth FTMS, ANT+ FE-C), mode ERG | à venir |
+| Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 
 ## Installation
 
@@ -82,9 +82,42 @@ puissance réalisée ; temps restant sur la brique et au total ; puissance,
 cible et cadence ; intensité réglable par pas de 1 % (boutons, ou ↑ ↓,
 appui long pour défiler). Espace = démarrer / pause, → = brique suivante.
 
-Le home trainer est pour l'instant **simulé** (`ui/power.py`) : le pilote
-Wahoo implémentera la même interface `PowerSource` (`set_target`, `read`).
+Le home trainer réel et le simulateur (`ui/power.py`) offrent la même
+interface `PowerSource` (`set_target`, `read`), voir ci-dessous.
 La logique de déroulé (`ui/session.py`) ne dépend pas de Qt et est testée.
+
+## Pilotage du home trainer Wahoo
+
+```bash
+pip install -e ".[gui,ble]"            # Bluetooth (bleak)
+pip install -e ".[gui,ant]"            # ANT+ (openant) avec une clé USB ANT+
+home-trainer-gui --trainer ble         # premier home trainer Bluetooth à portée
+home-trainer-gui --trainer ble --trainer-address AA:BB:CC:DD:EE:FF
+home-trainer-gui --trainer ant         # premier home trainer ANT+ (ou --trainer-ant-id 12345)
+home-trainer-gui --trainer sim         # home trainer simulé (défaut)
+```
+
+Il se choisit aussi avec le bouton **Home trainer…** (recherche Bluetooth).
+Pédalez pour réveiller le Wahoo et fermez les autres applis qui pourraient
+le piloter (Wahoo, Zwift…) : un seul logiciel à la fois peut en prendre le
+contrôle. L'état de la connexion s'affiche à droite de la barre d'outils.
+
+- En séance, chaque brique est envoyée en **mode ERG** : le home trainer
+  règle la résistance pour tenir la cible, quelle que soit la cadence. Les
+  rampes sont suivies watt par watt (au plus une consigne par seconde), un
+  changement de brique ou un réglage ±1 % part immédiatement.
+- Avant le départ, en pause et en fin de séance, le home trainer passe en
+  **résistance libre** (simulation d'une route plate) ; de même quand on
+  quitte l'appli, pour ne pas rester bloqué sur la dernière consigne.
+- Bluetooth : protocole standard **FTMS** (KICKR, KICKR CORE, SNAP… à jour),
+  et en repli le protocole **Wahoo** des anciens firmwares (puissance par le
+  service Cycling Power). ANT+ : profil **FE-C**, consigne renvoyée toutes
+  les 5 s au cas où un message se perdrait.
+- La puissance, la cadence (et la vitesse) mesurées par le home trainer sont
+  affichées en permanence, y compris pendant l'échauffement.
+
+Les trames sont encodées et décodées par des fonctions pures
+(`sensors/trainer.py`), testées sans matériel (`tests/test_trainer.py`).
 
 ## Capteur cardiaque
 
@@ -111,7 +144,7 @@ et la connexion est retentée automatiquement.
 
 `home_trainer.sensors.BackgroundSensor` est le socle commun : connexion
 dans un fil dédié, reconnexion, état lisible, dernière mesure (`latest()`)
-et péremption d'une mesure trop ancienne. Le pilote Wahoo pourra s'en servir.
+et péremption d'une mesure trop ancienne. Le pilote Wahoo s'en sert aussi.
 Les trames Bluetooth et ANT+ sont décodées par des fonctions pures, testées
 sans matériel (`tests/test_sensors.py`).
 
@@ -143,6 +176,6 @@ sans matériel (`tests/test_sensors.py`).
   (convention FIT). Les cibles en zones, durées en distance et répétitions
   conditionnelles d'autres plateformes sont approximées, avec un
   avertissement.
-- Prévu pour la suite : interface **PySide6 (Qt)**, Bluetooth via **bleak**
-  (FTMS, et le service Wahoo propriétaire en repli), ANT+ via **openant**
-  (profil FE-C) avec une clé USB ANT+.
+- Interface **PySide6 (Qt)**, Bluetooth via **bleak** (FTMS, et le service
+  Wahoo propriétaire en repli), ANT+ via **openant** (profil FE-C) avec une
+  clé USB ANT+.
