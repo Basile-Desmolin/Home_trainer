@@ -29,12 +29,17 @@ class BleDevice:
         return f"{self.name}  ({self.address})"
 
 
-async def scan_async(service_uuid: str, timeout: float = 5.0) -> list[BleDevice]:
+def advertises(adv, service_uuids: str | tuple[str, ...]) -> bool:
+    """L'annonce Bluetooth `adv` mentionne-t-elle l'un de ces services ?"""
+    wanted = (service_uuids,) if isinstance(service_uuids, str) else service_uuids
+    return any(u.lower() in wanted for u in adv.service_uuids)
+
+
+async def scan_async(service_uuids: str | tuple[str, ...], timeout: float = 5.0) -> list[BleDevice]:
     bleak = _bleak()
     found = await bleak.BleakScanner.discover(timeout=timeout, return_adv=True)
     devices = [BleDevice(d.address, d.name or adv.local_name or "sans nom", adv.rssi)
-               for d, adv in found.values()
-               if service_uuid in [u.lower() for u in adv.service_uuids]]
+               for d, adv in found.values() if advertises(adv, service_uuids)]
     return sorted(devices, key=lambda d: -(d.rssi or -999))
 
 
@@ -65,7 +70,7 @@ class BleHeartRateSensor(BackgroundSensor[HeartRateReading]):
             device = await bleak.BleakScanner.find_device_by_address(self.address, timeout=10)
         else:
             device = await bleak.BleakScanner.find_device_by_filter(
-                lambda _d, adv: BLE_HEART_RATE_SERVICE in [u.lower() for u in adv.service_uuids], timeout=10)
+                lambda _d, adv: advertises(adv, BLE_HEART_RATE_SERVICE), timeout=10)
         if device is None:
             self._set_state(SensorState.SEARCHING, "aucun capteur à portée")
             return

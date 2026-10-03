@@ -1,6 +1,7 @@
 """Fenêtre principale : séance complète, temps restant, puissance, cardio, réglage ±1 %.
 
     home-trainer-gui [seance.erg] [--ftp 250] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
+                     [--trainer sim|ble|ant] [--trainer-address AA:BB:…] [--trainer-ant-id 12345]
                      [--hr sim|ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
@@ -22,10 +23,11 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
                                QVBoxLayout, QWidget)
 
 from ..bricks import BrickSyntaxError, parse_workout
-from ..sensors import BackgroundSensor, HeartRateReading, SensorState, SimulatedHeartRate, open_heart_rate_sensor
+from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, SimulatedHeartRate, Trainer,
+                       open_heart_rate_sensor)
 from ..workout import PowerUnit, Segment, Workout
 from .loader import FILE_FILTER, load_workout
-from .power import PowerSource, SimulatedTrainer
+from .power import PowerSource, SimulatedTrainer, open_power_source
 from .session import State, WorkoutSession
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
@@ -245,6 +247,7 @@ class MainWindow(QMainWindow):
         self.timer.start(TICK_MS)
         self.clock.start()
         self.load(workout)
+        self.set_power_source(self.source)
         self.set_heart_rate_sensor(heart_rate)
 
     # --- construction ----------------------------------------------------
@@ -260,6 +263,9 @@ class MainWindow(QMainWindow):
         bricks_action = QAction("Briques…", self)
         bricks_action.triggered.connect(self._enter_bricks)
         bar.addAction(bricks_action)
+        trainer_action = QAction("Home trainer…", self)
+        trainer_action.triggered.connect(self._choose_trainer)
+        bar.addAction(trainer_action)
         heart_action = QAction("Cardio…", self)
         heart_action.triggered.connect(self._choose_heart_rate)
         bar.addAction(heart_action)
@@ -419,6 +425,22 @@ class MainWindow(QMainWindow):
         self.session.state, self.session.samples = state, samples
         self._refresh()
 
+    def set_power_source(self, source: PowerSource) -> None:
+        """Remplace le home trainer (simulé ou réel) et le démarre."""
+        if source is not self.source and isinstance(self.source, Trainer):
+            self.source.stop()
+        self.source = source
+        self._last_reading = None
+        if isinstance(source, Trainer):
+            source.start()
+        self._push_target()
+        self._refresh()
+
+    def _choose_trainer(self) -> None:
+        dialog = TrainerDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            self.set_power_source(dialog.sensor())
+
     def set_heart_rate_sensor(self, sensor: BackgroundSensor[HeartRateReading] | None) -> None:
         """Remplace le capteur cardio (None = aucun) et le démarre."""
         if self.heart_rate is not None:
@@ -444,6 +466,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
         if self.heart_rate is not None:
             self.heart_rate.stop()
+        if isinstance(self.source, Trainer):
+            self.source.stop()
         super().closeEvent(event)
 
     def _open_file(self) -> None:
@@ -478,9 +502,10 @@ class MainWindow(QMainWindow):
         self.session.tick(dt)
         self._push_target()
         running = self.session.state is State.RUNNING
-        reading = self.source.read(dt) if running else None
+        # Un vrai home trainer est lu en permanence (échauffement, pause) ; le simulateur seulement en séance.
+        reading = self.source.read(dt) if running or isinstance(self.source, Trainer) else None
         self._last_reading = reading
-        if reading is not None:
+        if reading is not None and running:
             self._since_sample += dt
             if self._since_sample >= 1.0:
                 self._since_sample -= 1.0
@@ -489,7 +514,9 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _push_target(self) -> None:
-        self.source.set_target(self.session.target_w)
+        # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
+        running = self.session.state is State.RUNNING
+        self.source.set_target(self.session.target_w if running else None)
 
     def _refresh(self) -> None:
         s = self.session
@@ -506,6 +533,7 @@ class MainWindow(QMainWindow):
         self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
         self._refresh_heart_rate()
+        self._refresh_source()
         self.intensity_label.setText(f"{s.intensity_pct} %")
         self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
         if s.state is State.FINISHED:
@@ -518,6 +546,13 @@ class MainWindow(QMainWindow):
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
         self.chart.update()
+
+    def _refresh_source(self) -> None:
+        source = self.source
+        text = source.name
+        if isinstance(source, Trainer) and (source.state is not SensorState.CONNECTED or source.latest() is None):
+            text += f" : {source.status if source.state is not SensorState.CONNECTED else 'signal perdu'}"
+        self.source_label.setText(f"  {text}")
 
     def _refresh_heart_rate(self) -> None:
         sensor = self.heart_rate
@@ -538,38 +573,26 @@ class MainWindow(QMainWindow):
             self.m_heart.set("—", f"{sensor.name} : {state}")
 
 
-class HeartRateDialog(QDialog):
-    """Choix du capteur cardio : aucun, simulé, Bluetooth (avec recherche) ou ANT+."""
+class SensorDialog(QDialog):
+    """Choix d'un appareil : simulé, Bluetooth (avec recherche) ou ANT+ (numéro, 0 = premier trouvé)."""
 
-    KINDS = [("Aucun", None), ("Simulé", "sim"), ("Bluetooth", "ble"), ("ANT+ (clé USB)", "ant")]
+    TITLE = ""
+    KINDS: list[tuple[str, str | None]] = []
+    SIMULATED_TEXT = ""
+    SCAN_TEXT = ""
+    ANY_DEVICE = ""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Capteur cardiaque")
+        self.setWindowTitle(self.TITLE)
         self.setMinimumWidth(440)
         form = QFormLayout(self)
         self.kind = QComboBox()
+        self.pages = QStackedWidget()
         for label, kind in self.KINDS:
             self.kind.addItem(label, kind)
-        form.addRow("Capteur", self.kind)
-
-        self.pages = QStackedWidget()
-        self.pages.addWidget(QWidget())  # aucun
-        self.pages.addWidget(QLabel("Fréquence calculée à partir de la puissance pédalée."))
-        ble = QWidget()
-        row = QHBoxLayout(ble)
-        row.setContentsMargins(0, 0, 0, 0)
-        self.ble_devices = QComboBox()
-        self.ble_devices.addItem("Premier capteur trouvé", None)
-        self.scan_button = QPushButton("Rechercher")
-        self.scan_button.clicked.connect(self._scan)
-        row.addWidget(self.ble_devices, 1)
-        row.addWidget(self.scan_button)
-        self.pages.addWidget(ble)
-        self.ant_number = QSpinBox()
-        self.ant_number.setRange(0, 65535)
-        self.ant_number.setSpecialValueText("Première ceinture trouvée")
-        self.pages.addWidget(self.ant_number)
+            self.pages.addWidget(self._page(kind))
+        form.addRow("Appareil", self.kind)
         form.addRow("", self.pages)
         self.message = QLabel("")
         self.message.setObjectName("metricSub")
@@ -580,24 +603,46 @@ class HeartRateDialog(QDialog):
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
         self.kind.currentIndexChanged.connect(self.pages.setCurrentIndex)
-        self.kind.setCurrentIndex(1)
+        self.kind.setCurrentIndex([k for _, k in self.KINDS].index("sim"))
 
         self._scan_result: list | Exception | None = None
         self._scan_timer = QTimer(self)
         self._scan_timer.timeout.connect(self._scan_done)
 
-    def _scan(self) -> None:
-        from ..sensors.ble import scan_heart_rate_monitors
+    def _page(self, kind: str | None) -> QWidget:
+        if kind == "sim":
+            return QLabel(self.SIMULATED_TEXT)
+        if kind == "ble":
+            page = QWidget()
+            row = QHBoxLayout(page)
+            row.setContentsMargins(0, 0, 0, 0)
+            self.ble_devices = QComboBox()
+            self.ble_devices.addItem(self.ANY_DEVICE, None)
+            self.scan_button = QPushButton("Rechercher")
+            self.scan_button.clicked.connect(self._scan)
+            row.addWidget(self.ble_devices, 1)
+            row.addWidget(self.scan_button)
+            return page
+        if kind == "ant":
+            self.ant_number = QSpinBox()
+            self.ant_number.setRange(0, 65535)
+            self.ant_number.setSpecialValueText(self.ANY_DEVICE)
+            return self.ant_number
+        return QWidget()
 
+    def scan_devices(self) -> list:
+        raise NotImplementedError
+
+    def _scan(self) -> None:
         def work() -> None:
             try:
-                self._scan_result = scan_heart_rate_monitors(timeout=5)
+                self._scan_result = self.scan_devices()
             except Exception as e:  # noqa: BLE001 (affiché à l'utilisateur)
                 self._scan_result = e
 
         self._scan_result = None
         self.scan_button.setEnabled(False)
-        self.message.setText("Recherche des ceintures Bluetooth (5 s)… Mouillez la sangle pour la réveiller.")
+        self.message.setText(self.SCAN_TEXT)
         threading.Thread(target=work, daemon=True).start()
         self._scan_timer.start(200)
 
@@ -616,7 +661,21 @@ class HeartRateDialog(QDialog):
             self.ble_devices.addItem(str(device), device.address)
         if result:
             self.ble_devices.setCurrentIndex(1)
-        self.message.setText(f"{len(result)} capteur(s) trouvé(s)." if result else "Aucun capteur trouvé.")
+        self.message.setText(f"{len(result)} appareil(s) trouvé(s)." if result else "Aucun appareil trouvé.")
+
+
+class HeartRateDialog(SensorDialog):
+    """Choix du capteur cardio : aucun, simulé, Bluetooth ou ANT+."""
+
+    TITLE = "Capteur cardiaque"
+    KINDS = [("Aucun", None), ("Simulé", "sim"), ("Bluetooth", "ble"), ("ANT+ (clé USB)", "ant")]
+    SIMULATED_TEXT = "Fréquence calculée à partir de la puissance pédalée."
+    SCAN_TEXT = "Recherche des ceintures Bluetooth (5 s)… Mouillez la sangle pour la réveiller."
+    ANY_DEVICE = "Première ceinture trouvée"
+
+    def scan_devices(self) -> list:
+        from ..sensors.ble import scan_heart_rate_monitors
+        return scan_heart_rate_monitors(timeout=5)
 
     def sensor(self) -> BackgroundSensor[HeartRateReading] | None:
         kind = self.kind.currentData()
@@ -624,6 +683,25 @@ class HeartRateDialog(QDialog):
             return None
         return open_heart_rate_sensor(kind, address=self.ble_devices.currentData(),
                                       device_number=self.ant_number.value())
+
+
+class TrainerDialog(SensorDialog):
+    """Choix du home trainer : simulé, Wahoo en Bluetooth ou en ANT+."""
+
+    TITLE = "Home trainer"
+    KINDS = [("Simulé", "sim"), ("Wahoo Bluetooth", "ble"), ("Wahoo ANT+ (clé USB)", "ant")]
+    SIMULATED_TEXT = "Puissance imitée : rejoint la consigne en quelques secondes."
+    SCAN_TEXT = ("Recherche des home trainers Bluetooth (5 s)… Pédalez pour réveiller le Wahoo, "
+                 "et fermez les autres applis qui pourraient s'y connecter (Wahoo, Zwift…).")
+    ANY_DEVICE = "Premier home trainer trouvé"
+
+    def scan_devices(self) -> list:
+        from ..sensors.trainer_ble import scan_trainers
+        return scan_trainers(timeout=5)
+
+    def sensor(self) -> PowerSource:
+        return open_power_source(self.kind.currentData(), address=self.ble_devices.currentData(),
+                                 device_number=self.ant_number.value())
 
 
 STYLE = f"""
@@ -650,6 +728,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("file", nargs="?", help="séance .erg, .mrc, .zwo ou .fit")
     parser.add_argument("--ftp", type=float, default=DEFAULT_FTP)
     parser.add_argument("--bricks", help="séance en notation briques")
+    parser.add_argument("--trainer", choices=["sim", "ble", "ant"], default="sim",
+                        help="home trainer : simulé (défaut), Wahoo Bluetooth ou Wahoo ANT+")
+    parser.add_argument("--trainer-address", help="adresse Bluetooth du home trainer (sinon le premier trouvé)")
+    parser.add_argument("--trainer-ant-id", type=int, default=0,
+                        help="numéro ANT+ du home trainer (sinon le premier trouvé)")
     parser.add_argument("--hr", choices=["sim", "ble", "ant", "aucun"], default="sim",
                         help="capteur cardio : simulé (défaut), Bluetooth, ANT+ ou aucun")
     parser.add_argument("--hr-address", help="adresse Bluetooth de la ceinture (sinon la première trouvée)")
@@ -671,7 +754,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     heart_rate = (None if args.hr == "aucun"
                   else open_heart_rate_sensor(args.hr, address=args.hr_address, device_number=args.hr_ant_id))
-    window = MainWindow(workout, args.ftp, heart_rate=heart_rate)
+    source = open_power_source(args.trainer, address=args.trainer_address, device_number=args.trainer_ant_id)
+    window = MainWindow(workout, args.ftp, source=source, heart_rate=heart_rate)
     window.resize(1100, 760)
     window.show()
     return app.exec()

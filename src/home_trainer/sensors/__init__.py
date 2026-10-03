@@ -5,8 +5,15 @@
     reading = sensor.latest()                   # HeartRateReading ou None
     sensor.stop()
 
-`BackgroundSensor` (base.py) est le socle commun : le pilote du home trainer
-Wahoo pourra s'appuyer dessus de la même façon.
+Le home trainer Wahoo se pilote de la même façon, avec une consigne en plus :
+
+    trainer = open_trainer("ble")               # ou "ant"
+    trainer.start()
+    trainer.set_target(200)                     # ERG à 200 W ; None = résistance libre
+    reading = trainer.read()                    # TrainerReading ou None
+    trainer.stop()
+
+`BackgroundSensor` (base.py) est le socle commun de tous ces capteurs.
 """
 
 from __future__ import annotations
@@ -14,8 +21,10 @@ from __future__ import annotations
 from .base import BackgroundSensor, SensorState, SensorUnavailable
 from .heart_rate import AntHeartRateDecoder, HeartRateReading, parse_ble_measurement
 from .simulated import SimulatedHeartRate
+from .trainer import Trainer, TrainerReading
 
 HEART_RATE_KINDS = {"sim": "simulé", "ble": "Bluetooth", "ant": "ANT+"}
+TRAINER_KINDS = {"ble": "Bluetooth", "ant": "ANT+"}
 
 
 def open_heart_rate_sensor(kind: str, *, address: str | None = None, device_number: int = 0,
@@ -32,6 +41,17 @@ def open_heart_rate_sensor(kind: str, *, address: str | None = None, device_numb
     raise ValueError(f"capteur cardio inconnu : {kind!r} (sim, ble ou ant)")
 
 
+def open_trainer(kind: str, *, address: str | None = None, device_number: int = 0) -> Trainer:
+    """Crée (sans le démarrer) le pilote du home trainer : "ble" ou "ant"."""
+    if kind == "ble":
+        from .trainer_ble import BleTrainer
+        return BleTrainer(address)
+    if kind == "ant":
+        from .trainer_ant import AntTrainer
+        return AntTrainer(device_number)
+    raise ValueError(f"home trainer inconnu : {kind!r} (ble ou ant)")
+
+
 __all__ = ["AntHeartRateDecoder", "BackgroundSensor", "HEART_RATE_KINDS", "HeartRateReading",
-           "SensorState", "SensorUnavailable", "SimulatedHeartRate", "open_heart_rate_sensor",
-           "parse_ble_measurement"]
+           "SensorState", "SensorUnavailable", "SimulatedHeartRate", "TRAINER_KINDS", "Trainer",
+           "TrainerReading", "open_heart_rate_sensor", "open_trainer", "parse_ble_measurement"]
