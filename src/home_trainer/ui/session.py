@@ -32,6 +32,7 @@ class Sample:
     power_w: float
     target_w: float | None
     cadence_rpm: float | None = None
+    heart_rate_bpm: float | None = None
 
 
 class WorkoutSession:
@@ -86,8 +87,9 @@ class WorkoutSession:
             dt -= remaining
             self.next_step()
 
-    def record(self, power_w: float, cadence_rpm: float | None = None) -> None:
-        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm))
+    def record(self, power_w: float, cadence_rpm: float | None = None,
+               heart_rate_bpm: float | None = None) -> None:
+        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm, heart_rate_bpm))
 
     # --- lecture ---------------------------------------------------------
 
@@ -108,6 +110,10 @@ class WorkoutSession:
         if seg.duration_s is None:
             return None
         return max(seg.duration_s - self.step_elapsed_s, 0.0)
+
+    def average_heart_rate(self) -> float | None:
+        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
+        return sum(values) / len(values) if values else None
 
     @property
     def total_s(self) -> float:
