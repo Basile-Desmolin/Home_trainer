@@ -14,6 +14,7 @@ en composer en briques « x min à y watts ».
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
 | Capteur cardiaque Bluetooth et ANT+ (+ simulé), affiché et enregistré | ✅ `src/home_trainer/sensors/` |
 | Éditeur graphique de briques, enregistrement .zwo/.mrc/.erg/.fit | ✅ `ui/editor.py` |
+| Bibliothèque : séances d'un dossier (sous-dossiers compris), recherche, filtre de durée, aperçu | ✅ `library.py`, `ui/library.py` |
 | Mode libre : ERG réglé à la main par pas de 5 W, ou pente simulée selon le poids, courbe en direct | ✅ `ui/free_ride.py` |
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
@@ -35,6 +36,22 @@ signé) : *Informations complémentaires* → *Exécuter quand même*.
 dossier `.venv` du dépôt et crée un raccourci **Home trainer** avec l'icône
 sur le Bureau et dans le menu Démarrer. Pour fabriquer soi-même le `.exe` :
 `packaging\windows\construire-exe.bat` (résultat dans `dist\`).
+
+## Bibliothèque des séances
+
+Bouton **Bibliothèque…** (Ctrl+B) : toutes les séances `.zwo`, `.mrc`, `.erg`
+et `.fit` d'un dossier et de ses sous-dossiers, avec leur durée, un petit
+profil et un TSS approché. La recherche ignore majuscules et accents et porte
+sur le nom, le sous-dossier et la description ; un menu filtre par durée. Un
+double-clic (ou **Rouler cette séance**) charge la séance.
+
+Le dossier est `Documents\HomeTrainer\Séances` par défaut (créé au premier
+lancement) ; **Changer…** en choisit un autre, qui est mémorisé. Les séances
+créées dans l'éditeur s'y enregistrent par défaut, et il suffit d'y copier
+des fichiers (Zwift, TrainerRoad, intervals.icu…) pour qu'ils apparaissent ;
+les fichiers illisibles, comme les sorties `.fit` enregistrées, sont ignorés.
+
+![Bibliothèque](docs/bibliotheque.png)
 
 ## Installation (développement)
 
