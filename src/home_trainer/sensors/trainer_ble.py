@@ -30,9 +30,12 @@ def scan_trainers(timeout: float = 5.0) -> list[BleDevice]:
 class BleTrainer(Trainer):
     """Se connecte à `address`, ou au premier home trainer Bluetooth trouvé."""
 
+    device_kind = "ble"
+
     def __init__(self, address: str | None = None, name: str | None = None) -> None:
         super().__init__(TargetThrottle(min_interval_s=1.0))
         self.address = address
+        self.device_id = address
         self.name = f"Wahoo Bluetooth {name or address or ''}".strip()
         self.protocol: str | None = None  # "FTMS" ou "Wahoo" une fois connecté
 
@@ -54,6 +57,7 @@ class BleTrainer(Trainer):
             self._set_state(SensorState.SEARCHING, "aucun home trainer à portée, pédalez pour le réveiller")
             return
         self.name = f"Wahoo Bluetooth {device.name or device.address}"
+        self.device_id = device.address
         disconnected = asyncio.Event()
         async with bleak.BleakClient(device, disconnected_callback=lambda _c: disconnected.set()) as client:
             self.throttle.reset()

@@ -42,6 +42,10 @@ class BackgroundSensor(Generic[T]):
     """
 
     name = "capteur"
+    # Adresse Bluetooth ou numéro ANT+ de l'appareil, connu d'avance ou découvert à la connexion :
+    # c'est ce que l'interface mémorise.
+    device_id: str | None = None
+    device_kind: str | None = None  # "ble" ou "ant"
     retry_s = 3.0
     max_age_s = 5.0  # au-delà, la dernière mesure est considérée comme perdue
 

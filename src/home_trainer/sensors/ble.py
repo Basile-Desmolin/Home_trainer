@@ -51,9 +51,12 @@ def scan_heart_rate_monitors(timeout: float = 5.0) -> list[BleDevice]:
 class BleHeartRateSensor(BackgroundSensor[HeartRateReading]):
     """Se connecte à `address`, ou au premier capteur cardio Bluetooth trouvé."""
 
+    device_kind = "ble"
+
     def __init__(self, address: str | None = None, name: str | None = None) -> None:
         super().__init__()
         self.address = address
+        self.device_id = address
         self.name = f"Cardio Bluetooth {name or address or ''}".strip()
         self._battery: int | None = None
 
@@ -75,6 +78,7 @@ class BleHeartRateSensor(BackgroundSensor[HeartRateReading]):
             self._set_state(SensorState.SEARCHING, "aucun capteur à portée")
             return
         self.name = f"Cardio Bluetooth {device.name or device.address}"
+        self.device_id = device.address
         disconnected = asyncio.Event()
 
         def on_measurement(_char, data: bytearray) -> None:

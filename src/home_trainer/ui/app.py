@@ -19,10 +19,11 @@ from pathlib import Path
 from PySide6.QtCore import QElapsedTimer, Qt, QTimer
 from PySide6.QtGui import QAction, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
+                               QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
                                QSpinBox, QStackedWidget, QToolBar, QVBoxLayout, QWidget)
 
 from ..bricks import BrickSyntaxError, parse_workout
+from ..devices import DeviceBook, SavedDevice, ant_ident
 from ..formats import FormatError, save_workout
 from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, SimulatedHeartRate, Trainer,
                        open_heart_rate_sensor)
@@ -87,9 +88,12 @@ class Metric(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self, workout: Workout, ftp: float = DEFAULT_FTP,
                  source: PowerSource | None = None,
-                 heart_rate: BackgroundSensor[HeartRateReading] | None = None) -> None:
+                 heart_rate: BackgroundSensor[HeartRateReading] | None = None,
+                 book: DeviceBook | None = None) -> None:
         super().__init__()
         self.ftp = ftp
+        self.book = book if book is not None else DeviceBook()  # sans fichier : rien n'est mémorisé
+        self._remembered: dict[str, tuple] = {}
         self.directory = str(Path.home())  # dernier dossier ouvert ou enregistré
         self.source: PowerSource = source or SimulatedTrainer()
         self.session = WorkoutSession(workout, ftp)
@@ -303,7 +307,7 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _choose_trainer(self) -> None:
-        dialog = TrainerDialog(self)
+        dialog = TrainerDialog(self.book, self)
         if dialog.exec() == QDialog.Accepted:
             self.set_power_source(dialog.sensor())
 
@@ -325,9 +329,28 @@ class MainWindow(QMainWindow):
         return r.power_w if r is not None and self.session.state is State.RUNNING else None
 
     def _choose_heart_rate(self) -> None:
-        dialog = HeartRateDialog(self)
+        dialog = HeartRateDialog(self.book, self)
         if dialog.exec() == QDialog.Accepted:
             self.set_heart_rate_sensor(dialog.sensor())
+
+    def _remember(self, role: str, sensor) -> None:
+        """Mémorise l'appareil dès qu'il est connecté (adresse ou numéro découverts à la connexion)."""
+        if not isinstance(sensor, BackgroundSensor) or sensor.state is not SensorState.CONNECTED:
+            return
+        if sensor.device_id is None or sensor.device_kind is None:
+            return
+        key = (id(sensor), sensor.device_kind, sensor.device_id)
+        if self._remembered.get(role) == key:
+            return
+        self._remembered[role] = key
+        self.book.remember(role, sensor.device_kind, sensor.device_id, sensor.name)
+        self.book.save()
+
+    def _display_name(self, role: str, sensor) -> str:
+        """Nom choisi par l'utilisateur pour cet appareil, sinon celui du pilote."""
+        saved = self.book.display_name(role, getattr(sensor, "device_kind", None) or "",
+                                       getattr(sensor, "device_id", None))
+        return saved or sensor.name
 
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
         if self.heart_rate is not None:
@@ -446,7 +469,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_source(self) -> None:
         source = self.source
-        text = source.name
+        self._remember("trainer", source)
+        text = self._display_name("trainer", source)
         if isinstance(source, Trainer) and (source.state is not SensorState.CONNECTED or source.latest() is None):
             text += f" : {source.status if source.state is not SensorState.CONNECTED else 'signal perdu'}"
         self.source_label.setText(f"  {text}")
@@ -456,6 +480,7 @@ class MainWindow(QMainWindow):
         if sensor is None:
             self.m_heart.set("—", "aucun capteur · menu Cardio…")
             return
+        self._remember("hr", sensor)
         heart = sensor.latest()
         average = self.session.average_heart_rate()
         if heart is not None:
@@ -467,28 +492,36 @@ class MainWindow(QMainWindow):
             self.m_heart.set(f"{heart.bpm}", sub)
         else:
             state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
-            self.m_heart.set("—", f"{sensor.name} : {state}")
+            self.m_heart.set("—", f"{self._display_name('hr', sensor)} : {state}")
 
 
 class SensorDialog(QDialog):
-    """Choix d'un appareil : simulé, Bluetooth (avec recherche) ou ANT+ (numéro, 0 = premier trouvé)."""
+    """Choix d'un appareil : un appareil mémorisé (renommable), simulé, Bluetooth (avec recherche)
+    ou ANT+ (numéro, 0 = premier trouvé). Les appareils se mémorisent d'eux-mêmes à la connexion."""
 
     TITLE = ""
+    ROLE = ""
     KINDS: list[tuple[str, str | None]] = []
     SIMULATED_TEXT = ""
     SCAN_TEXT = ""
     ANY_DEVICE = ""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, book: DeviceBook, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.book = book
         self.setWindowTitle(self.TITLE)
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(460)
         form = QFormLayout(self)
         self.kind = QComboBox()
         self.pages = QStackedWidget()
+        self._kind_pages: dict[str | None, QWidget] = {}
+        self.pages.addWidget(self._saved_page())
+        for device in book.devices(self.ROLE):
+            self.kind.addItem(str(device), device)
         for label, kind in self.KINDS:
             self.kind.addItem(label, kind)
-            self.pages.addWidget(self._page(kind))
+            page = self._kind_pages[kind] = self._page(kind)
+            self.pages.addWidget(page)
         form.addRow("Appareil", self.kind)
         form.addRow("", self.pages)
         self.message = QLabel("")
@@ -499,12 +532,45 @@ class SensorDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
-        self.kind.currentIndexChanged.connect(self.pages.setCurrentIndex)
-        self.kind.setCurrentIndex([k for _, k in self.KINDS].index("sim"))
+        self.kind.currentIndexChanged.connect(self._kind_changed)
+        self.kind.setCurrentIndex(-1)
+        self.kind.setCurrentIndex(self._initial_index())
 
         self._scan_result: list | Exception | None = None
         self._scan_timer = QTimer(self)
         self._scan_timer.timeout.connect(self._scan_done)
+
+    def _initial_index(self) -> int:
+        """Le dernier appareil choisi, sinon l'appareil simulé."""
+        last = self.book.last(self.ROLE)
+        if last is not None:
+            kind, ident = last
+            saved = self.book.find(self.ROLE, kind, ident) if kind in ("ble", "ant") else None
+            index = self.kind.findData(saved if saved is not None else kind)
+            if index >= 0:
+                if saved is None and kind == "ble" and ident:
+                    self.ble_devices.addItem(ident, ident)
+                    self.ble_devices.setCurrentIndex(self.ble_devices.count() - 1)
+                elif saved is None and kind == "ant" and ident and ident.isdigit():
+                    self.ant_number.setValue(int(ident))
+                return index
+        return self.kind.findData("sim")
+
+    def _saved_page(self) -> QWidget:
+        page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Nom de l'appareil")
+        self.name_edit.setToolTip("Renommer cet appareil (Entrée pour valider)")
+        self.name_edit.editingFinished.connect(self._rename)
+        self.forget_button = QPushButton("Oublier")
+        self.forget_button.setToolTip("Retirer cet appareil des appareils mémorisés")
+        self.forget_button.clicked.connect(self._forget)
+        row.addWidget(QLabel("Nom"))
+        row.addWidget(self.name_edit, 1)
+        row.addWidget(self.forget_button)
+        return page
 
     def _page(self, kind: str | None) -> QWidget:
         if kind == "sim":
@@ -526,6 +592,69 @@ class SensorDialog(QDialog):
             self.ant_number.setSpecialValueText(self.ANY_DEVICE)
             return self.ant_number
         return QWidget()
+
+    def saved_device(self) -> SavedDevice | None:
+        data = self.kind.currentData()
+        return data if isinstance(data, SavedDevice) else None
+
+    def _kind_changed(self) -> None:
+        saved = self.saved_device()
+        if saved is not None:
+            self.pages.setCurrentIndex(0)
+            self.name_edit.setText(saved.name)
+            what = "Adresse Bluetooth" if saved.kind == "ble" else "Numéro ANT+"
+            self.message.setText(f"{what} : {saved.ident}")
+        else:
+            page = self._kind_pages.get(self.kind.currentData())
+            if page is not None:
+                self.pages.setCurrentWidget(page)
+            self.message.setText("")
+
+    def _rename(self) -> None:
+        saved = self.saved_device()
+        if saved is None or self.name_edit.text().strip() == saved.name:
+            return
+        self.book.rename(saved, self.name_edit.text())
+        self.book.save()
+        self.name_edit.setText(saved.name)
+        self.kind.setItemText(self.kind.currentIndex(), str(saved))
+
+    def _forget(self) -> None:
+        saved = self.saved_device()
+        if saved is None:
+            return
+        self.book.forget(saved)
+        self.book.save()
+        self.kind.removeItem(self.kind.currentIndex())
+        self.kind.setCurrentIndex(self.kind.findData(saved.kind))
+        if saved.kind == "ble":
+            self.ble_devices.setCurrentIndex(0)
+        self.message.setText(f"« {saved.name} » oublié.")
+
+    def choice(self) -> tuple[str | None, str | None]:
+        """Ce qui est choisi : (type, adresse ou numéro) ; type None = aucun appareil."""
+        saved = self.saved_device()
+        if saved is not None:
+            return saved.kind, saved.ident
+        kind = self.kind.currentData()
+        if kind == "ble":
+            return kind, self.ble_devices.currentData()
+        if kind == "ant":
+            return kind, ant_ident(self.ant_number.value())
+        return kind, None
+
+    def _connect_args(self) -> tuple[str | None, dict]:
+        kind, ident = self.choice()
+        if kind == "ant":
+            return kind, {"address": None, "device_number": int(ident) if ident else 0}
+        return kind, {"address": ident if kind == "ble" else None, "device_number": 0}
+
+    def accept(self) -> None:
+        self._rename()
+        kind, ident = self.choice()
+        self.book.set_last(self.ROLE, kind, ident)
+        self.book.save()
+        super().accept()
 
     def scan_devices(self) -> list:
         raise NotImplementedError
@@ -555,7 +684,9 @@ class SensorDialog(QDialog):
         while self.ble_devices.count() > 1:
             self.ble_devices.removeItem(1)
         for device in result:
-            self.ble_devices.addItem(str(device), device.address)
+            saved = self.book.display_name(self.ROLE, "ble", device.address)
+            label = f"{saved}  ({device.address})" if saved else str(device)
+            self.ble_devices.addItem(label, device.address)
         if result:
             self.ble_devices.setCurrentIndex(1)
         self.message.setText(f"{len(result)} appareil(s) trouvé(s)." if result else "Aucun appareil trouvé.")
@@ -565,6 +696,7 @@ class HeartRateDialog(SensorDialog):
     """Choix du capteur cardio : aucun, simulé, Bluetooth ou ANT+."""
 
     TITLE = "Capteur cardiaque"
+    ROLE = "hr"
     KINDS = [("Aucun", None), ("Simulé", "sim"), ("Bluetooth", "ble"), ("ANT+ (clé USB)", "ant")]
     SIMULATED_TEXT = "Fréquence calculée à partir de la puissance pédalée."
     SCAN_TEXT = "Recherche des ceintures Bluetooth (5 s)… Mouillez la sangle pour la réveiller."
@@ -575,17 +707,17 @@ class HeartRateDialog(SensorDialog):
         return scan_heart_rate_monitors(timeout=5)
 
     def sensor(self) -> BackgroundSensor[HeartRateReading] | None:
-        kind = self.kind.currentData()
+        kind, args = self._connect_args()
         if kind is None:
             return None
-        return open_heart_rate_sensor(kind, address=self.ble_devices.currentData(),
-                                      device_number=self.ant_number.value())
+        return open_heart_rate_sensor(kind, **args)
 
 
 class TrainerDialog(SensorDialog):
     """Choix du home trainer : simulé, Wahoo en Bluetooth ou en ANT+."""
 
     TITLE = "Home trainer"
+    ROLE = "trainer"
     KINDS = [("Simulé", "sim"), ("Wahoo Bluetooth", "ble"), ("Wahoo ANT+ (clé USB)", "ant")]
     SIMULATED_TEXT = "Puissance imitée : rejoint la consigne en quelques secondes."
     SCAN_TEXT = ("Recherche des home trainers Bluetooth (5 s)… Pédalez pour réveiller le Wahoo, "
@@ -597,8 +729,8 @@ class TrainerDialog(SensorDialog):
         return scan_trainers(timeout=5)
 
     def sensor(self) -> PowerSource:
-        return open_power_source(self.kind.currentData(), address=self.ble_devices.currentData(),
-                                 device_number=self.ant_number.value())
+        kind, args = self._connect_args()
+        return open_power_source(kind, **args)
 
 
 STYLE = f"""
@@ -631,13 +763,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("file", nargs="?", help="séance .erg, .mrc, .zwo ou .fit")
     parser.add_argument("--ftp", type=float, default=DEFAULT_FTP)
     parser.add_argument("--bricks", help="séance en notation briques")
-    parser.add_argument("--trainer", choices=["sim", "ble", "ant"], default="sim",
-                        help="home trainer : simulé (défaut), Wahoo Bluetooth ou Wahoo ANT+")
+    parser.add_argument("--trainer", choices=["sim", "ble", "ant"],
+                        help="home trainer : simulé, Wahoo Bluetooth ou Wahoo ANT+ "
+                             "(défaut : le dernier utilisé, sinon simulé)")
     parser.add_argument("--trainer-address", help="adresse Bluetooth du home trainer (sinon le premier trouvé)")
     parser.add_argument("--trainer-ant-id", type=int, default=0,
                         help="numéro ANT+ du home trainer (sinon le premier trouvé)")
-    parser.add_argument("--hr", choices=["sim", "ble", "ant", "aucun"], default="sim",
-                        help="capteur cardio : simulé (défaut), Bluetooth, ANT+ ou aucun")
+    parser.add_argument("--hr", choices=["sim", "ble", "ant", "aucun"],
+                        help="capteur cardio : simulé, Bluetooth, ANT+ ou aucun "
+                             "(défaut : le dernier utilisé, sinon simulé)")
     parser.add_argument("--hr-address", help="adresse Bluetooth de la ceinture (sinon la première trouvée)")
     parser.add_argument("--hr-ant-id", type=int, default=0,
                         help="numéro ANT+ de la ceinture (sinon la première trouvée)")
@@ -649,9 +783,20 @@ def main(argv: list[str] | None = None) -> int:
     app.setStyleSheet(STYLE)
     if ICON.exists():
         app.setWindowIcon(QIcon(str(ICON)))
-    heart_rate = (None if args.hr == "aucun"
-                  else open_heart_rate_sensor(args.hr, address=args.hr_address, device_number=args.hr_ant_id))
-    source = open_power_source(args.trainer, address=args.trainer_address, device_number=args.trainer_ant_id)
+    # Sans option, on rebranche les appareils de la dernière fois (mémorisés dans le profil utilisateur).
+    book = DeviceBook.load()
+    if args.hr is None:
+        hr_kind, hr_address, hr_number = book.startup_choice("hr", ("sim", "ble", "ant", None))
+    else:
+        hr_kind = None if args.hr == "aucun" else args.hr
+        hr_address, hr_number = args.hr_address, args.hr_ant_id
+    if args.trainer is None:
+        trainer_kind, trainer_address, trainer_number = book.startup_choice("trainer", ("sim", "ble", "ant"))
+    else:
+        trainer_kind, trainer_address, trainer_number = args.trainer, args.trainer_address, args.trainer_ant_id
+    heart_rate = (None if hr_kind is None
+                  else open_heart_rate_sensor(hr_kind, address=hr_address, device_number=hr_number))
+    source = open_power_source(trainer_kind, address=trainer_address, device_number=trainer_number)
     try:
         workout = parse_workout(args.bricks or DEFAULT_BRICKS,
                                 name="Séance en briques" if args.bricks else "Sweet spot (démo)")
@@ -659,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
         # Lancée depuis une icône, l'appli n'a pas de console : les erreurs s'affichent dans une fenêtre.
         QMessageBox.warning(None, "Briques invalides", str(e))
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
-    window = MainWindow(workout, args.ftp, source=source, heart_rate=heart_rate)
+    window = MainWindow(workout, args.ftp, source=source, heart_rate=heart_rate, book=book)
     window.resize(1100, 760)
     window.show()
     if args.file:  # fichier passé en argument, ou glissé sur l'icône
