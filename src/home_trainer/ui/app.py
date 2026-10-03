@@ -5,7 +5,7 @@ et parcours GPX (la pente de la route suit la distance parcourue).
 
     home-trainer-gui [seance.erg | parcours.gpx] [--ftp 250] [--weight 70] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
                      [--trainer sim|ble|ant] [--trainer-address AA:BB:…] [--trainer-ant-id 12345]
-                     [--hr sim|ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
+                     [--hr ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 → ou N = brique suivante, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
@@ -470,8 +470,6 @@ class MainWindow(QMainWindow):
         self.free.ftp = self.ftp
         if self.route is not None:
             self.route.ftp = self.ftp
-        if isinstance(self.heart_rate, SimulatedHeartRate):
-            self.heart_rate.ftp = self.ftp
         s = self.session
         index, step_elapsed, elapsed, state, samples = (s.index, s.step_elapsed_s, s.elapsed_s,
                                                          s.state, s.samples)
@@ -511,18 +509,10 @@ class MainWindow(QMainWindow):
         """Remplace le capteur cardio (None = aucun) et le démarre."""
         if self.heart_rate is not None:
             self.heart_rate.stop()
-        if isinstance(sensor, SimulatedHeartRate):
-            sensor.ftp = self.ftp
-            sensor.effort_w = self._simulated_effort
         self.heart_rate = sensor
         if sensor is not None:
             sensor.start()
         self._refresh()
-
-    def _simulated_effort(self) -> float | None:
-        """Ce que « ressent » le cardio simulé : la puissance pédalée en ce moment."""
-        r = self._last_reading
-        return r.power_w if r is not None and self.active.state is State.RUNNING else None
 
     def _choose_heart_rate(self) -> None:
         dialog = HeartRateDialog(self.book, self)
@@ -829,7 +819,7 @@ class MainWindow(QMainWindow):
                             session: WorkoutSession | FreeRideSession | RouteSession) -> None:
         sensor = self.heart_rate
         if sensor is None:
-            metric.set("—", "aucun capteur · menu Cardio…")
+            metric.set("Off", "aucun capteur · menu Cardio…")
             return
         self._remember("hr", sensor)
         heart = sensor.latest()
@@ -843,7 +833,7 @@ class MainWindow(QMainWindow):
             metric.set(f"{heart.bpm}", sub)
         else:
             state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
-            metric.set("—", f"{self._display_name('hr', sensor)} : {state}")
+            metric.set("Off", f"{self._display_name('hr', sensor)} : {state}")
 
 
 FINISH_TIP = ("Terminer la sortie : elle est enregistrée en .fit et envoyée vers Strava / Nolio (Ctrl+T)")
@@ -861,6 +851,7 @@ class SensorDialog(QDialog):
     ROLE = ""
     KINDS: list[tuple[str, str | None]] = []
     SIMULATED_TEXT = ""
+    DEFAULT_KIND: str | None = "sim"  # proposé si rien n'a encore été choisi
     SCAN_TEXT = ""
     ANY_DEVICE = ""
 
@@ -903,7 +894,7 @@ class SensorDialog(QDialog):
         """Lignes propres à un type d'appareil, avant les boutons OK / Annuler."""
 
     def _initial_index(self) -> int:
-        """Le dernier appareil choisi, sinon l'appareil simulé."""
+        """Le dernier appareil choisi, sinon l'appareil par défaut (simulé, ou aucun cardio)."""
         last = self.book.last(self.ROLE)
         if last is not None:
             kind, ident = last
@@ -916,7 +907,7 @@ class SensorDialog(QDialog):
                 elif saved is None and kind == "ant" and ident and ident.isdigit():
                     self.ant_number.setValue(int(ident))
                 return index
-        return self.kind.findData("sim")
+        return self.kind.findData(self.DEFAULT_KIND)
 
     def _saved_page(self) -> QWidget:
         page = QWidget()
@@ -1055,12 +1046,12 @@ class SensorDialog(QDialog):
 
 
 class HeartRateDialog(SensorDialog):
-    """Choix du capteur cardio : aucun, simulé, Bluetooth ou ANT+."""
+    """Choix du capteur cardio : aucun, Bluetooth ou ANT+."""
 
     TITLE = "Capteur cardiaque"
     ROLE = "hr"
-    KINDS = [("Aucun", None), ("Simulé", "sim"), ("Bluetooth", "ble"), ("ANT+ (clé USB)", "ant")]
-    SIMULATED_TEXT = "Fréquence calculée à partir de la puissance pédalée."
+    KINDS = [("Aucun", None), ("Bluetooth", "ble"), ("ANT+ (clé USB)", "ant")]
+    DEFAULT_KIND = None
     SCAN_TEXT = "Recherche des ceintures Bluetooth (5 s)… Mouillez la sangle pour la réveiller."
     ANY_DEVICE = "Première ceinture trouvée"
 
@@ -1163,9 +1154,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trainer-address", help="adresse Bluetooth du home trainer (sinon le premier trouvé)")
     parser.add_argument("--trainer-ant-id", type=int, default=0,
                         help="numéro ANT+ du home trainer (sinon le premier trouvé)")
-    parser.add_argument("--hr", choices=["sim", "ble", "ant", "aucun"],
-                        help="capteur cardio : simulé, Bluetooth, ANT+ ou aucun "
-                             "(défaut : le dernier utilisé, sinon simulé)")
+    parser.add_argument("--hr", choices=["ble", "ant", "aucun"],
+                        help="capteur cardio : Bluetooth, ANT+ ou aucun "
+                             "(défaut : le dernier utilisé, sinon aucun)")
     parser.add_argument("--hr-address", help="adresse Bluetooth de la ceinture (sinon la première trouvée)")
     parser.add_argument("--hr-ant-id", type=int, default=0,
                         help="numéro ANT+ de la ceinture (sinon la première trouvée)")
@@ -1181,7 +1172,7 @@ def main(argv: list[str] | None = None) -> int:
     book = DeviceBook.load()
     accounts = AccountBook.load()
     if args.hr is None:
-        hr_kind, hr_address, hr_number = book.startup_choice("hr", ("sim", "ble", "ant", None))
+        hr_kind, hr_address, hr_number = book.startup_choice("hr", ("ble", "ant", None), default=None)
     else:
         hr_kind = None if args.hr == "aucun" else args.hr
         hr_address, hr_number = args.hr_address, args.hr_ant_id

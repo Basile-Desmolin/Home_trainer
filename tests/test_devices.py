@@ -66,6 +66,8 @@ def test_startup_choice(tmp_path):
     book.set_last("hr", None)
     assert book.startup_choice("hr", ("sim", "ble", "ant", None)) == (None, None, 0)
     assert book.startup_choice("hr", ("sim", "ble", "ant")) == ("sim", None, 0)  # « aucun » interdit ici
+    book.set_last("hr", "sim")  # ancien cardio simulé, retiré : on démarre sans cardio
+    assert book.startup_choice("hr", ("ble", "ant", None), default=None) == (None, None, 0)
 
 
 def test_default_path_override(monkeypatch, tmp_path):
