@@ -1,0 +1,505 @@
+"""Fenêtre principale : séance complète, temps restant, puissance, réglage ±1 %.
+
+    home-trainer-gui [seance.erg] [--ftp 250] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
+
+Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
+→ ou N = brique suivante.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
+from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QInputDialog,
+                               QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSpinBox,
+                               QToolBar, QVBoxLayout, QWidget)
+
+from ..bricks import BrickSyntaxError, parse_workout
+from ..workout import PowerUnit, Segment, Workout
+from .loader import FILE_FILTER, load_workout
+from .power import PowerSource, SimulatedTrainer
+from .session import State, WorkoutSession
+
+DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
+DEFAULT_FTP = 250
+TICK_MS = 200
+
+BG = "#16181d"
+PANEL = "#20242c"
+TEXT = "#e8eaed"
+MUTED = "#8b919c"
+ACCENT = "#ffd24a"
+POWER = "#4fc3f7"
+
+# Zones de Coggan (borne haute en % FTP) et couleurs associées.
+ZONES = [(55, "#7f8c9a"), (76, "#3d8bd9"), (91, "#3fb37f"), (106, "#e7c43a"),
+         (121, "#f08a2c"), (151, "#e5484d"), (10_000, "#b84ae0")]
+
+
+def zone_color(watts: float | None, ftp: float) -> QColor:
+    if watts is None:
+        return QColor("#4a505c")
+    pct = watts / ftp * 100
+    return QColor(next(color for limit, color in ZONES if pct < limit))
+
+
+def hms(seconds: float | None) -> str:
+    if seconds is None:
+        return "—"
+    s = int(round(seconds))
+    h, rest = divmod(s, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) -> str:
+    if seg is None:
+        return "—"
+    duration = "jusqu'au tour" if seg.duration_s is None else hms(seg.duration_s)
+    p = seg.step.power
+    if p is None or seg.low_w is None:
+        target = "libre"
+    else:
+        k = intensity_pct / 100
+        start = (seg.low_w + seg.high_w) / 2 * k
+        end = (seg.end_low_w + seg.end_high_w) / 2 * k
+        target = f"{start:.0f} W" if round(start) == round(end) else f"{start:.0f} → {end:.0f} W"
+        if p.unit is PowerUnit.FTP_PERCENT:
+            pct = (p.low + p.high) / 2 * k
+            target += f"  ({pct:.0f} % FTP)" if not seg.step.is_ramp else ""
+    name = f"  ·  {seg.step.name}" if seg.step.name else ""
+    return f"{duration} à {target}{name}"
+
+
+class WorkoutChart(QWidget):
+    """Profil complet de la séance, avancement et puissance réalisée."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.session: WorkoutSession | None = None
+        self.setMinimumHeight(220)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_session(self, session: WorkoutSession) -> None:
+        self.session = session
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 (API Qt)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor(PANEL))
+        s = self.session
+        if s is None or not s.segments:
+            return
+        ftp = s.ftp or DEFAULT_FTP
+        margin_l, margin_r, margin_t, margin_b = 44, 12, 12, 26
+        area = QRectF(margin_l, margin_t, self.width() - margin_l - margin_r,
+                      self.height() - margin_t - margin_b)
+        total = max(s.total_s, 1.0)
+        peak = max([seg.high_w or 0 for seg in s.segments] + [seg.end_high_w or 0 for seg in s.segments]
+                   + [x.power_w for x in s.samples] + [ftp])
+        peak *= max(s.intensity_pct, 100) / 100 * 1.12
+
+        def x(t: float) -> float:
+            return area.left() + t / total * area.width()
+
+        def y(w: float) -> float:
+            return area.bottom() - w / peak * area.height()
+
+        # Graduations : FTP et axe du temps.
+        p.setFont(QFont(self.font().family(), 8))
+        p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
+        p.drawLine(QPointF(area.left(), y(ftp)), QPointF(area.right(), y(ftp)))
+        p.drawText(QRectF(0, y(ftp) - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, "FTP")
+        step = next(v for v in (60, 300, 600, 900, 1800, 3600, 7200) if total / v <= 12)
+        p.setPen(QColor(MUTED))
+        t = 0
+        while t <= total:
+            p.drawText(QRectF(x(t) - 30, area.bottom() + 4, 60, 18), Qt.AlignHCenter, hms(t))
+            t += step
+
+        # Briques (rampes = trapèzes), passées assombries, en cours mise en avant.
+        position = s.position_s
+        for i, seg in enumerate(s.segments):
+            if not seg.duration_s:
+                continue
+            x0, x1 = x(seg.start_s), x(seg.start_s + seg.duration_s)
+            w0 = seg.target_w(0) or 0
+            w1 = seg.target_w(seg.duration_s) or 0
+            path = QPainterPath(QPointF(x0, area.bottom()))
+            path.lineTo(x0, y(max(w0, peak * 0.03)))
+            path.lineTo(x1, y(max(w1, peak * 0.03)))
+            path.lineTo(x1, area.bottom())
+            path.closeSubpath()
+            color = zone_color(seg.target_w(seg.duration_s / 2), ftp)
+            if i < s.index:
+                color.setAlpha(90)
+            elif i > s.index:
+                color.setAlpha(190)
+            p.fillPath(path, color)
+            if i == s.index:
+                p.setPen(QPen(QColor(TEXT), 2))
+                p.drawPath(path)
+
+        # Consigne ajustée pour la suite de la séance (si l'intensité n'est pas 100 %).
+        if s.intensity_pct != 100:
+            k = s.intensity_pct / 100
+            p.setPen(QPen(QColor(ACCENT), 2, Qt.DashLine))
+            for seg in s.segments[s.index:]:
+                if not seg.duration_s or seg.low_w is None:
+                    continue
+                start = max(seg.start_s, position)
+                if start >= seg.start_s + seg.duration_s:
+                    continue
+                a = seg.target_w(start - seg.start_s) * k
+                b = seg.target_w(seg.duration_s) * k
+                p.drawLine(QPointF(x(start), y(a)), QPointF(x(seg.start_s + seg.duration_s), y(b)))
+
+        # Puissance réalisée.
+        if len(s.samples) > 1:
+            path = QPainterPath(QPointF(x(s.samples[0].t), y(s.samples[0].power_w)))
+            for sample in s.samples[1:]:
+                path.lineTo(x(sample.t), y(sample.power_w))
+            p.setPen(QPen(QColor(POWER), 1.6))
+            p.drawPath(path)
+
+        # Curseur de position.
+        p.setPen(QPen(QColor(TEXT), 2))
+        p.drawLine(QPointF(x(position), area.top()), QPointF(x(position), area.bottom()))
+
+
+class Metric(QFrame):
+    """Une grande valeur avec son libellé."""
+
+    def __init__(self, title: str, size: int = 34, color: str = TEXT) -> None:
+        super().__init__()
+        self.setObjectName("metric")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 8, 14, 10)
+        layout.setSpacing(0)
+        self.title = QLabel(title)
+        self.title.setObjectName("metricTitle")
+        self.value = QLabel("—")
+        font = QFont()
+        font.setPointSize(size)
+        font.setBold(True)
+        self.value.setFont(font)
+        self.value.setStyleSheet(f"color: {color};")
+        self.sub = QLabel("")
+        self.sub.setObjectName("metricSub")
+        for w in (self.title, self.value, self.sub):
+            layout.addWidget(w)
+
+    def set(self, value: str, sub: str = "") -> None:
+        self.value.setText(value)
+        self.sub.setText(sub)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, workout: Workout, ftp: float = DEFAULT_FTP,
+                 source: PowerSource | None = None) -> None:
+        super().__init__()
+        self.ftp = ftp
+        self.source: PowerSource = source or SimulatedTrainer()
+        self.session = WorkoutSession(workout, ftp)
+        self._since_sample = 0.0
+        self._last_reading = None
+
+        self._build_toolbar()
+        self._build_body()
+        self._build_shortcuts()
+
+        self.clock = QElapsedTimer()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._on_tick)
+        self.timer.start(TICK_MS)
+        self.clock.start()
+        self.load(workout)
+
+    # --- construction ----------------------------------------------------
+
+    def _build_toolbar(self) -> None:
+        bar = QToolBar("Séance")
+        bar.setMovable(False)
+        self.addToolBar(bar)
+        open_action = QAction("Ouvrir…", self)
+        open_action.setShortcut(QKeySequence.Open)
+        open_action.triggered.connect(self._open_file)
+        bar.addAction(open_action)
+        bricks_action = QAction("Briques…", self)
+        bricks_action.triggered.connect(self._enter_bricks)
+        bar.addAction(bricks_action)
+        bar.addSeparator()
+        bar.addWidget(QLabel(" FTP "))
+        self.ftp_box = QSpinBox()
+        self.ftp_box.setRange(50, 600)
+        self.ftp_box.setSuffix(" W")
+        self.ftp_box.setValue(int(self.ftp))
+        self.ftp_box.editingFinished.connect(self._ftp_changed)
+        bar.addWidget(self.ftp_box)
+        bar.addSeparator()
+        self.source_label = QLabel(f"  {self.source.name}")
+        self.source_label.setObjectName("metricSub")
+        bar.addWidget(self.source_label)
+
+    def _build_body(self) -> None:
+        root = QWidget()
+        self.setCentralWidget(root)
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(14, 10, 14, 14)
+        layout.setSpacing(10)
+
+        self.title = QLabel()
+        self.title.setObjectName("title")
+        layout.addWidget(self.title)
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        self.m_power = Metric("PUISSANCE", 52, POWER)
+        self.m_target = Metric("CIBLE", 52, ACCENT)
+        self.m_step = Metric("RESTE SUR LA BRIQUE", 52)
+        self.m_total = Metric("RESTE AU TOTAL", 30)
+        self.m_cadence = Metric("CADENCE", 30)
+        grid.addWidget(self.m_power, 0, 0)
+        grid.addWidget(self.m_target, 0, 1)
+        grid.addWidget(self.m_step, 0, 2)
+        grid.addWidget(self.m_total, 1, 2)
+        grid.addWidget(self.m_cadence, 1, 0)
+        grid.addWidget(self._build_intensity(), 1, 1)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+        layout.addLayout(grid)
+
+        self.current_label = QLabel()
+        self.current_label.setObjectName("current")
+        self.next_label = QLabel()
+        self.next_label.setObjectName("metricSub")
+        layout.addWidget(self.current_label)
+        layout.addWidget(self.next_label)
+
+        self.chart = WorkoutChart()
+        layout.addWidget(self.chart, 1)
+
+        buttons = QHBoxLayout()
+        self.play_button = QPushButton("Démarrer")
+        self.play_button.setObjectName("play")
+        self.play_button.clicked.connect(self._toggle)
+        self.next_button = QPushButton("Brique suivante")
+        self.next_button.clicked.connect(self._next_step)
+        self.reset_button = QPushButton("Recommencer")
+        self.reset_button.clicked.connect(self._reset)
+        for b in (self.play_button, self.next_button, self.reset_button):
+            b.setFocusPolicy(Qt.NoFocus)
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        hint = QLabel("Espace : démarrer / pause   ↑ ↓ : ±1 %   → : brique suivante")
+        hint.setObjectName("metricSub")
+        buttons.addWidget(hint)
+        layout.addLayout(buttons)
+
+    def _build_intensity(self) -> QWidget:
+        box = QFrame()
+        box.setObjectName("metric")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(14, 8, 14, 10)
+        layout.setSpacing(4)
+        title = QLabel("INTENSITÉ")
+        title.setObjectName("metricTitle")
+        layout.addWidget(title)
+        row = QHBoxLayout()
+        self.minus_button = QPushButton("−1 %")
+        self.plus_button = QPushButton("+1 %")
+        self.intensity_label = QLabel("100 %")
+        font = QFont()
+        font.setPointSize(30)
+        font.setBold(True)
+        self.intensity_label.setFont(font)
+        self.intensity_label.setAlignment(Qt.AlignCenter)
+        for b, delta in ((self.minus_button, -1), (self.plus_button, +1)):
+            b.setObjectName("adjust")
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setAutoRepeat(True)  # rester appuyé fait défiler les pourcents
+            b.setAutoRepeatDelay(400)
+            b.setAutoRepeatInterval(120)
+            b.clicked.connect(lambda _=False, d=delta: self.adjust(d))
+        row.addWidget(self.minus_button)
+        row.addWidget(self.intensity_label, 1)
+        row.addWidget(self.plus_button)
+        layout.addLayout(row)
+        return box
+
+    def _build_shortcuts(self) -> None:
+        for keys, slot in (((Qt.Key_Space,), self._toggle),
+                           ((Qt.Key_Up, Qt.Key_Plus, Qt.Key_Equal), lambda: self.adjust(+1)),
+                           ((Qt.Key_Down, Qt.Key_Minus), lambda: self.adjust(-1)),
+                           ((Qt.Key_Right, Qt.Key_N), self._next_step)):
+            for key in keys:
+                QShortcut(QKeySequence(key), self, activated=slot)
+
+    # --- actions ---------------------------------------------------------
+
+    def load(self, workout: Workout) -> None:
+        intensity = self.session.intensity_pct
+        self.session = WorkoutSession(workout, self.ftp)
+        self.session.intensity_pct = intensity
+        self._since_sample = 0.0
+        self.chart.set_session(self.session)
+        self.title.setText(f"{workout.name}  ·  {hms(self.session.total_s)}")
+        self.setWindowTitle(f"{workout.name} — Home trainer")
+        self._refresh()
+
+    def adjust(self, delta: int) -> None:
+        self.session.adjust_intensity(delta)
+        self._push_target()
+        self._refresh()
+
+    def _toggle(self) -> None:
+        if self.session.state is State.FINISHED:
+            self._reset()
+        self.session.toggle()
+        self.clock.restart()
+        self._refresh()
+
+    def _next_step(self) -> None:
+        self.session.next_step()
+        self._push_target()
+        self._refresh()
+
+    def _reset(self) -> None:
+        self.load(self.session.workout)
+
+    def _ftp_changed(self) -> None:
+        if self.ftp_box.value() == self.ftp:
+            return
+        self.ftp = self.ftp_box.value()
+        s = self.session
+        index, step_elapsed, elapsed, state, samples = (s.index, s.step_elapsed_s, s.elapsed_s,
+                                                         s.state, s.samples)
+        self.load(s.workout)
+        # Garder l'avancement : seule la conversion % FTP → W change.
+        self.session.index, self.session.step_elapsed_s, self.session.elapsed_s = index, step_elapsed, elapsed
+        self.session.state, self.session.samples = state, samples
+        self._refresh()
+
+    def _open_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Ouvrir une séance", str(Path.home()), FILE_FILTER)
+        if not path:
+            return
+        warnings: list[str] = []
+        try:
+            workout = load_workout(path, warnings)
+        except Exception as e:  # noqa: BLE001 (tout échec de lecture est montré à l'utilisateur)
+            QMessageBox.warning(self, "Lecture impossible", f"{Path(path).name} : {e}")
+            return
+        if warnings:
+            QMessageBox.information(self, "À savoir", "\n".join(warnings))
+        self.load(workout)
+
+    def _enter_bricks(self) -> None:
+        text, ok = QInputDialog.getText(self, "Composer une séance",
+                                        "Briques (ex. 10m@150 3x(4m@105% 2m@55%) 10m@110) :",
+                                        text=DEFAULT_BRICKS)
+        if not ok or not text.strip():
+            return
+        try:
+            self.load(parse_workout(text, name="Séance en briques"))
+        except BrickSyntaxError as e:
+            QMessageBox.warning(self, "Briques invalides", str(e))
+
+    # --- boucle ----------------------------------------------------------
+
+    def _on_tick(self) -> None:
+        dt = self.clock.restart() / 1000
+        self.session.tick(dt)
+        self._push_target()
+        running = self.session.state is State.RUNNING
+        reading = self.source.read(dt) if running else None
+        self._last_reading = reading
+        if reading is not None:
+            self._since_sample += dt
+            if self._since_sample >= 1.0:
+                self._since_sample -= 1.0
+                self.session.record(reading.power_w, reading.cadence_rpm)
+        self._refresh()
+
+    def _push_target(self) -> None:
+        self.source.set_target(self.session.target_w)
+
+    def _refresh(self) -> None:
+        s = self.session
+        r = self._last_reading
+        self.m_power.set(f"{r.power_w:.0f} W" if r else "—", f"{r.power_w / self.ftp * 100:.0f} % FTP" if r else "")
+        target = s.target_w
+        base = s.base_target_w
+        self.m_target.set("libre" if target is None else f"{target:.0f} W",
+                          "" if base is None or s.intensity_pct == 100
+                          else f"séance : {base:.0f} W  ({s.intensity_pct} %)")
+        remaining = s.step_remaining_s
+        self.m_step.set("tour" if remaining is None else hms(remaining),
+                        f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}")
+        self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
+        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
+        self.intensity_label.setText(f"{s.intensity_pct} %")
+        self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
+        if s.state is State.FINISHED:
+            self.current_label.setText("Séance terminée")
+            self.next_label.setText("")
+        else:
+            self.current_label.setText(f"Maintenant : {describe_segment(s.segment, self.ftp, s.intensity_pct)}")
+            self.next_label.setText(f"Ensuite : {describe_segment(s.next_segment, self.ftp, s.intensity_pct)}"
+                                    if s.next_segment else "Dernière brique")
+        self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
+                                  State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
+        self.chart.update()
+
+
+STYLE = f"""
+QMainWindow, QWidget {{ background: {BG}; color: {TEXT}; }}
+QToolBar {{ background: {PANEL}; border: none; padding: 4px; spacing: 6px; }}
+QToolBar QToolButton {{ padding: 4px 10px; }}
+QFrame#metric {{ background: {PANEL}; border-radius: 10px; }}
+QFrame#metric QLabel {{ background: transparent; }}
+QLabel#metricTitle {{ color: {MUTED}; font-size: 11px; font-weight: bold; letter-spacing: 1px; }}
+QLabel#metricSub {{ color: {MUTED}; font-size: 12px; background: transparent; }}
+QLabel#title {{ font-size: 18px; font-weight: bold; }}
+QLabel#current {{ font-size: 16px; }}
+QPushButton {{ background: #2d323c; border: none; border-radius: 6px; padding: 8px 16px; font-size: 14px; }}
+QPushButton:hover {{ background: #3a404c; }}
+QPushButton#play {{ background: {ACCENT}; color: #1a1a1a; font-weight: bold; min-width: 110px; }}
+QPushButton#adjust {{ font-size: 18px; font-weight: bold; min-width: 70px; min-height: 44px; }}
+QSpinBox {{ background: #2d323c; border: none; padding: 3px 6px; }}
+"""
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="home-trainer-gui", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("file", nargs="?", help="séance .erg, .mrc, .zwo ou .fit")
+    parser.add_argument("--ftp", type=float, default=DEFAULT_FTP)
+    parser.add_argument("--bricks", help="séance en notation briques")
+    args = parser.parse_args(argv)
+
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("Home trainer")
+    app.setStyleSheet(STYLE)
+    try:
+        if args.file:
+            workout = load_workout(args.file)
+        else:
+            workout = parse_workout(args.bricks or DEFAULT_BRICKS,
+                                    name="Séance en briques" if args.bricks else "Sweet spot (démo)")
+    except Exception as e:  # noqa: BLE001
+        print(f"erreur : {e}", file=sys.stderr)
+        return 1
+    window = MainWindow(workout, args.ftp)
+    window.resize(1100, 760)
+    window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

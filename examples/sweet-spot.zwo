@@ -1,0 +1,12 @@
+<workout_file>
+    <author>home-trainer</author>
+    <name>Sweet spot 3x10</name>
+    <description />
+    <sportType>bike</sportType>
+    <tags />
+    <workout>
+        <Ramp Duration="600" PowerLow="0.5" PowerHigh="0.7" />
+        <IntervalsT Repeat="3" OnDuration="600" OffDuration="180" OnPower="0.9" OffPower="0.55" />
+        <Ramp Duration="600" PowerLow="0.6" PowerHigh="0.4" />
+    </workout>
+</workout_file>

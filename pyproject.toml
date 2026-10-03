@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "home-trainer"
+version = "0.1.0"
+description = "Pilotage d'un home trainer Wahoo (Bluetooth / ANT+) et séances .fit en briques"
+requires-python = ">=3.10"
+dependencies = [
+    "garmin-fit-sdk>=21.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+gui = ["PySide6>=6.5"]
+
+[project.scripts]
+home-trainer = "home_trainer.cli:main"
+home-trainer-gui = "home_trainer.ui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
