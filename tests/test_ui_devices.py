@@ -9,7 +9,8 @@ QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from home_trainer.bricks import parse_workout  # noqa: E402
 from home_trainer.devices import DeviceBook  # noqa: E402
-from home_trainer.sensors import SensorState  # noqa: E402
+from home_trainer.sensors import HeartRateReading, SensorState  # noqa: E402
+from home_trainer.sensors.ble import BleHeartRateSensor  # noqa: E402
 from home_trainer.sensors.trainer_ble import BleTrainer  # noqa: E402
 from home_trainer.ui.app import HeartRateDialog, MainWindow, TrainerDialog  # noqa: E402
 
@@ -59,7 +60,8 @@ def test_forget_and_accept_records_last_choice(app, book):
 
 def test_heart_rate_dialog_none_is_remembered(app, book):
     dialog = HeartRateDialog(book)
-    assert dialog.kind.currentData() == "sim"  # jamais choisi : simulé
+    assert dialog.kind.currentText() == "Aucun"  # jamais choisi : pas de cardio
+    assert dialog.kind.findData("sim") == -1  # plus de cardio simulé
     dialog.kind.setCurrentIndex(dialog.kind.findData(None))
     dialog.accept()
     assert dialog.sensor() is None
@@ -110,4 +112,26 @@ def test_main_window_pauses_for_calibration(app, tmp_path):
     assert window.session.state.name == "RUNNING"
     window._pause_for_calibration()
     assert window.session.state.name == "PAUSED"
+    window.close()
+
+
+def test_heart_rate_off_without_sensor_or_signal(app, tmp_path):
+    window = MainWindow(parse_workout("1m@100"), book=DeviceBook(tmp_path / "a.json"))
+    assert window.m_heart.value.text() == "Off"
+    for panel in (window.free_panel, window.route_panel):
+        window._refresh_heart_rate(panel.m_heart, window.session)
+        assert panel.m_heart.value.text() == "Off"
+
+    class Silent(BleHeartRateSensor):  # branché mais sans fréquence reçue
+        def start(self):
+            pass
+
+        def stop(self, timeout=3.0):
+            pass
+
+    window.set_heart_rate_sensor(Silent("AA:BB"))
+    assert window.m_heart.value.text() == "Off"
+    window.heart_rate._publish(HeartRateReading(131))
+    window._refresh()
+    assert window.m_heart.value.text() == "131"
     window.close()

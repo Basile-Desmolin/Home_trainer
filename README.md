@@ -12,7 +12,7 @@ en composer en briques « x min à y watts ».
 | Lecture / écriture `.zwo`, `.erg`, `.mrc`, `.fit` | ✅ `src/home_trainer/formats/` |
 | Notation texte des briques + ligne de commande | ✅ `bricks.py`, `cli.py` |
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
-| Capteur cardiaque Bluetooth et ANT+ (+ simulé), affiché et enregistré | ✅ `src/home_trainer/sensors/` |
+| Capteur cardiaque Bluetooth et ANT+, affiché et enregistré (« Off » sans fréquence) | ✅ `src/home_trainer/sensors/` |
 | Éditeur graphique de briques, enregistrement .zwo/.mrc/.erg/.fit | ✅ `ui/editor.py` |
 | Bibliothèque : séances d'un dossier (sous-dossiers compris), recherche, filtre de durée, aperçu | ✅ `library.py`, `ui/library.py` |
 | Mode libre : ERG réglé à la main par pas de 5 W, ou pente simulée selon le poids, courbe en direct | ✅ `ui/free_ride.py` |
@@ -258,21 +258,22 @@ pip install -e ".[gui,ant]"            # ANT+ (openant) avec une clé USB ANT+
 home-trainer-gui --hr ble              # première ceinture Bluetooth à portée
 home-trainer-gui --hr ble --hr-address AA:BB:CC:DD:EE:FF
 home-trainer-gui --hr ant              # première ceinture ANT+ (ou --hr-ant-id 12345)
-home-trainer-gui --hr sim              # cardio simulé, --hr aucun pour le masquer
-home-trainer-gui                       # sans option : la dernière ceinture utilisée (sinon simulé)
+home-trainer-gui --hr aucun            # sans ceinture cardio
+home-trainer-gui                       # sans option : la dernière ceinture utilisée (sinon aucune)
 ```
 
 Le capteur se choisit aussi en cours de route avec le bouton **Cardio…**
 (recherche des ceintures Bluetooth à portée). La fréquence s'affiche en
 grand avec la moyenne de la séance, et sa courbe se superpose au profil
-(échelle en bpm à droite). En cas de perte du signal, l'interface l'indique
-et la connexion est retentée automatiquement.
+(échelle en bpm à droite). Sans ceinture, ou tant qu'aucune fréquence
+n'est reçue, la tuile CARDIO affiche **Off** (séance, mode libre et parcours
+GPX). En cas de perte du signal, la connexion est retentée automatiquement.
+La fréquence n'est jamais estimée à partir de la puissance.
 
 - Bluetooth : service standard Heart Rate (0x180D), compatible avec les
   ceintures Polar, Garmin, Wahoo TICKR, montres en mode diffusion…
 - ANT+ : profil HRM (type 120) ; ANT+ nécessite une clé USB (Garmin, CycPlus…)
   et, sous Linux, une règle udev pour y accéder sans être root.
-- Le cardio simulé suit la puissance pédalée, avec l'inertie d'un vrai cœur.
 
 `home_trainer.sensors.BackgroundSensor` est le socle commun : connexion
 dans un fil dédié, reconnexion, état lisible, dernière mesure (`latest()`)

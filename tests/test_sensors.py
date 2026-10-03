@@ -3,7 +3,7 @@ import time
 import pytest
 
 from home_trainer.sensors import (AntHeartRateDecoder, BackgroundSensor, SensorState, SensorUnavailable,
-                                  SimulatedHeartRate, open_heart_rate_sensor, parse_ble_measurement)
+                                  HeartRateReading, open_heart_rate_sensor, parse_ble_measurement)
 from home_trainer.ui import WorkoutSession
 from home_trainer.bricks import parse_workout
 
@@ -65,39 +65,35 @@ def test_ant_page_must_be_8_bytes():
         AntHeartRateDecoder().feed([0, 1, 2])
 
 
-# --- cardio simulé et socle ----------------------------------------------------
+# --- socle des capteurs --------------------------------------------------------
 
-def test_simulated_heart_rate_follows_effort():
-    power = {"w": None}
-    hr = SimulatedHeartRate(lambda: power["w"], ftp=250, seed=1)
-    for _ in range(60):
-        rest = hr.step(1)
-    assert rest.bpm == pytest.approx(62, abs=3)
-    power["w"] = 250
-    first = hr.step(1).bpm
-    for _ in range(300):
-        r = hr.step(1)
-    assert first < 80 and r.bpm == pytest.approx(168, abs=3)  # monte progressivement jusqu'au seuil
-    assert r.rr_ms[0] == pytest.approx(60_000 / r.bpm, rel=0.01)
-    assert hr.latest() == r and hr.state is SensorState.CONNECTED
+class Beating(BackgroundSensor):
+    """Capteur de test : publie un battement à chaque tour."""
+
+    name = "test"
+
+    def _run(self, stop):
+        while not stop.wait(0.01):
+            self._publish(HeartRateReading(120))
 
 
-def test_simulated_runs_in_background():
-    hr = SimulatedHeartRate(period_s=0.01, seed=2)
+def test_sensor_runs_in_background():
+    hr = Beating()
     hr.start()
     try:
         deadline = time.monotonic() + 2
         while hr.latest() is None and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert hr.latest() is not None and hr.running
+        assert hr.latest().bpm == 120 and hr.running and hr.state is SensorState.CONNECTED
     finally:
         hr.stop()
     assert not hr.running and hr.state is SensorState.STOPPED
 
 
 def test_stale_reading_is_dropped():
-    hr = SimulatedHeartRate(seed=3)
-    hr.step(1)
+    hr = Beating()
+    hr._publish(HeartRateReading(100))
+    assert hr.latest().bpm == 100
     hr.max_age_s = 0
     time.sleep(0.01)
     assert hr.latest() is None
@@ -119,11 +115,12 @@ def test_missing_hardware_is_reported_without_retry():
 
 
 def test_factory():
-    assert isinstance(open_heart_rate_sensor("sim"), SimulatedHeartRate)
     assert open_heart_rate_sensor("ble", address="AA:BB").address == "AA:BB"
     assert open_heart_rate_sensor("ant", device_number=42).device_number == 42
     with pytest.raises(ValueError):
         open_heart_rate_sensor("usb")
+    with pytest.raises(ValueError):  # plus de cardio estimé à partir de la puissance
+        open_heart_rate_sensor("sim")
 
 
 def test_session_records_heart_rate():
