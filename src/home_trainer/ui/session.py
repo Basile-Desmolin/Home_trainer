@@ -390,7 +390,7 @@ class RouteSession:
 
 # --- sortie enregistrée ------------------------------------------------------
 
-MIN_RIDE_SAMPLES = 60  # moins d'une minute de pédalage : rien à enregistrer
+MIN_RIDE_SAMPLES = 1  # sans aucune seconde pédalée, rien à enregistrer
 
 
 def ride_points(samples: list[Sample]) -> list[ActivityPoint]:

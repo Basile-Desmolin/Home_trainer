@@ -20,6 +20,7 @@ en composer en briques « x min à y watts ».
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 | Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
+| Profils de cyclistes (FTP, poids, comptes Strava / Nolio, sorties), choisis au lancement | ✅ `profiles.py`, `ui/profiles.py` |
 | Chaque sortie enregistrée en `.fit` d'activité, envoi automatique vers Strava et Nolio | ✅ `formats/fit_activity.py`, `sync/` |
 | Calibration (spindown) guidée : *Home trainer…* → *Calibrer…* (FTMS, protocole Wahoo, ANT+ FE-C) | ✅ `ui/calibration.py`, pas encore essayée sur le vrai matériel |
 
@@ -256,6 +257,33 @@ La liste est enregistrée dans `%APPDATA%\HomeTrainer\appareils.json` sous
 Windows, `~/.config/home-trainer/appareils.json` ailleurs (variable
 `HOME_TRAINER_DEVICES` pour un autre fichier).
 
+## Profils
+
+![Choix du profil](docs/profils.png)
+
+Au lancement, l'appli demande **qui roule** : on choisit un profil ou on en
+crée un (**Nouveau** : nom, FTP, poids). Chaque profil a sa propre **FTP**,
+son **poids**, ses **comptes Strava / Nolio** et ses **sorties** (avec leurs
+envois en attente) ; les appareils mémorisés et le dossier de la bibliothèque
+sont communs. FTP et poids changés dans la barre d'outils (ou dans l'éditeur)
+sont gardés dans le profil.
+
+- **Se souvenir de mon choix** : l'appli reprend directement le dernier
+  profil, sans demander. Pour changer de cycliste ou décocher, bouton
+  **Profil : …** dans la barre d'outils. En changeant de profil, la sortie en
+  cours est enregistrée pour le profil d'avant.
+- `home-trainer-gui --profile Camille` choisit (ou crée) le profil sans
+  demander ; `--ftp` et `--weight` changent alors ses valeurs.
+- **Supprimer** retire le profil de la liste, mais ses sorties et ses
+  comptes restent sur l'ordinateur.
+
+La liste est dans `profils.json` du dossier de configuration
+(`%APPDATA%\HomeTrainer` sous Windows, `~/.config/home-trainer` ailleurs ;
+variable `HOME_TRAINER_PROFILES` pour un autre fichier), et chaque profil a
+son dossier `profils/<nom>/` avec `comptes.json` et `sorties/`. Au premier
+lancement après la mise à jour, les comptes et les sorties déjà là sont
+rangés dans un premier profil, « Mon profil », à renommer.
+
 ## Sorties enregistrées, envoi vers Strava et Nolio
 
 À la fin de chaque sortie (séance, mode libre en ERG ou en pente, parcours GPX), l'appli
@@ -271,13 +299,14 @@ Une sortie se termine :
 - en changeant de séance, avec **Recommencer** / **Remettre à zéro**, ou en
   fermant l'appli (la sortie en cours n'est jamais perdue).
 
-Moins d'une minute de pédalage n'est pas enregistré. Sans vitesse donnée par
+Toute sortie est enregistrée, même courte (seule une sortie sans aucun
+pédalage ne l'est pas). Sans vitesse donnée par
 le home trainer, elle est calculée comme sur la route (poids saisi, plat ou
 pente simulée), ce qui donne aussi la distance.
 
-Les fichiers vont dans `%APPDATA%\HomeTrainer\sorties` sous Windows
-(`~/.config/home-trainer/sorties` ailleurs, ou la variable
-`HOME_TRAINER_RIDES`) ; bouton **Ouvrir le dossier des sorties** dans la
+Les fichiers vont dans le dossier `sorties` du profil
+(`%APPDATA%\HomeTrainer\profils\<nom>\sorties` sous Windows,
+`~/.config/home-trainer/profils/<nom>/sorties` ailleurs) ; bouton **Ouvrir le dossier des sorties** dans la
 fenêtre **Strava / Nolio…**. Un envoi raté (pas de réseau, appli fermée
 pendant l'envoi) est retenté au lancement suivant, ou avec **Envoyer les
 sorties en attente**.
@@ -320,8 +349,7 @@ apparaît dans le calendrier au bout de quelques instants.
 ### Sécurité
 
 Identifiants et jetons d'accès restent sur l'ordinateur, dans
-`comptes.json` du dossier de configuration (variable
-`HOME_TRAINER_ACCOUNTS` pour un autre fichier), jamais dans le dépôt. La
+`comptes.json` du dossier du profil, jamais dans le dépôt. La
 connexion passe par le navigateur (OAuth 2) : l'appli ne voit jamais le mot
 de passe Strava ou Nolio. **Déconnecter** oublie les jetons.
 
