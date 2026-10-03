@@ -10,7 +10,8 @@ et parcours GPX (la pente de la route suit la distance parcourue).
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 → ou N = brique suivante, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
 Ctrl+E = modifier, Ctrl+S = enregistrer sous, Ctrl+L = mode libre / séance,
-Ctrl+G = rouler un parcours GPX.
+Ctrl+G = rouler un parcours GPX,
+Ctrl+T = terminer la sortie (enregistrée en .fit, envoyée vers Strava / Nolio).
 En mode libre : ↑ ↓ = ±5 W ou ±0,5 %, Page↑ Page↓ = ±25 W ou ±2 %.
 Sur un parcours : ↑ ↓ = difficulté ±10 %.
 """
@@ -20,9 +21,10 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QElapsedTimer, QLocale, Qt, QTimer
+from PySide6.QtCore import QElapsedTimer, QLocale, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
@@ -32,9 +34,11 @@ from ..bricks import BrickSyntaxError, parse_workout
 from ..devices import DeviceBook, SavedDevice, ant_ident
 from ..formats import FormatError, save_workout
 from ..route import RouteError, load_route
-from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Trainer,
+from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Slope, Trainer,
                        open_heart_rate_sensor)
+from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
+from .accounts import AccountsDialog
 from .calibration import CalibrationDialog, can_calibrate
 from .chart import ACCENT, BG, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
 from .library import Library, LibraryDialog, documents_folder
@@ -42,14 +46,15 @@ from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
 from .loader import load_workout
 from .metric import Metric
-from .power import PowerSource, SimulatedTrainer, open_power_source
+from .power import PowerSource, SimulatedTrainer, open_power_source, road_speed_kmh
 from .route_ride import RoutePanel
-from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, RouteSession,
-                      State, WorkoutSession)
+from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
+                      FreeRideSession, RouteSession, State, WorkoutSession, ride_points, ride_title)
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
 TICK_MS = 200
+CLOSE_SEND_WAIT_S = 20  # à la fermeture, temps laissé à l'envoi de la dernière sortie
 ICON = Path(__file__).with_name("assets") / "icon.png"
 OPEN_FILTER = ("Séances et parcours (*.zwo *.mrc *.erg *.fit *.gpx);;Séances (*.zwo *.mrc *.erg *.fit);;"
                "Parcours GPX (*.gpx);;Tous les fichiers (*)")
@@ -77,8 +82,16 @@ class MainWindow(QMainWindow):
     def __init__(self, workout: Workout, ftp: float = DEFAULT_FTP,
                  source: PowerSource | None = None,
                  heart_rate: BackgroundSensor[HeartRateReading] | None = None,
-                 book: DeviceBook | None = None) -> None:
+                 book: DeviceBook | None = None, accounts: AccountBook | None = None,
+                 outbox: Outbox | None = None) -> None:
         super().__init__()
+        # Sans dossier des sorties (tests), les sorties ne sont ni enregistrées ni envoyées.
+        self.accounts = accounts if accounts is not None else AccountBook()
+        self.outbox = outbox
+        self._sync = _SyncSignals(self)
+        self._sync.done.connect(self._sent)
+        self._send_thread: threading.Thread | None = None
+        self._send_again = False
         self.ftp = ftp
         self.book = book if book is not None else DeviceBook()  # sans fichier : rien n'est mémorisé
         self._remembered: dict[str, tuple] = {}
@@ -104,6 +117,7 @@ class MainWindow(QMainWindow):
         self.load(workout)
         self.set_power_source(self.source)
         self.set_heart_rate_sensor(heart_rate)
+        self.send_rides()  # sorties restées en attente la dernière fois
 
     # --- construction ----------------------------------------------------
 
@@ -135,6 +149,10 @@ class MainWindow(QMainWindow):
         heart_action = QAction("Cardio…", self)
         heart_action.triggered.connect(self._choose_heart_rate)
         bar.addAction(heart_action)
+        accounts_action = QAction("Strava / Nolio…", self)
+        accounts_action.setToolTip("Comptes vers lesquels envoyer chaque sortie terminée")
+        accounts_action.triggered.connect(self._choose_accounts)
+        bar.addAction(accounts_action)
         bar.addSeparator()
         bar.addWidget(QLabel(" FTP "))
         self.ftp_box = QSpinBox()
@@ -212,7 +230,10 @@ class MainWindow(QMainWindow):
         self.free_button = QPushButton("Mode libre")
         self.free_button.setToolTip("Rouler sans séance en réglant la puissance à la main (Ctrl+L)")
         self.free_button.clicked.connect(self.enter_free_ride)
-        for b in (self.play_button, self.next_button, self.reset_button, self.free_button):
+        self.finish_button = QPushButton("Terminer")
+        self.finish_button.setToolTip(FINISH_TIP)
+        self.finish_button.clicked.connect(self.finish_ride)
+        for b in (self.play_button, self.next_button, self.reset_button, self.finish_button, self.free_button):
             b.setFocusPolicy(Qt.NoFocus)
             buttons.addWidget(b)
         buttons.addStretch(1)
@@ -226,6 +247,8 @@ class MainWindow(QMainWindow):
         self.free_panel.play_button.clicked.connect(self._toggle)
         self.free_panel.reset_button.clicked.connect(self._reset_free_ride)
         self.free_panel.back_button.clicked.connect(self.leave_free_ride)
+        self.free_panel.finish_button.setToolTip(FINISH_TIP)
+        self.free_panel.finish_button.clicked.connect(self.finish_ride)
         for b, direction, big in self.free_panel.adjust_buttons:
             b.clicked.connect(lambda _=False, d=direction, big=big: self.nudge_free(d, big))
         for mode, b in self.free_panel.mode_buttons.items():
@@ -236,6 +259,8 @@ class MainWindow(QMainWindow):
         self.route_panel.play_button.clicked.connect(self._toggle)
         self.route_panel.reset_button.clicked.connect(self._reset_route)
         self.route_panel.back_button.clicked.connect(self.leave_free_ride)
+        self.route_panel.finish_button.setToolTip(FINISH_TIP)
+        self.route_panel.finish_button.clicked.connect(self.finish_ride)
         for b, delta in self.route_panel.difficulty_buttons:
             b.clicked.connect(lambda _=False, d=delta: self.adjust_difficulty(d))
         self.pages.addWidget(self.route_panel)
@@ -282,6 +307,7 @@ class MainWindow(QMainWindow):
             for key in keys:
                 QShortcut(QKeySequence(key), self, activated=slot)
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self._toggle_free_ride)
+        QShortcut(QKeySequence("Ctrl+T"), self, activated=self.finish_ride)
 
     # --- actions ---------------------------------------------------------
 
@@ -301,7 +327,9 @@ class MainWindow(QMainWindow):
             return self.route
         return self.free if self.free_ride else self.session
 
-    def load(self, workout: Workout) -> None:
+    def load(self, workout: Workout, *, end_ride: bool = True) -> None:
+        if end_ride:  # la séance en cours, même inachevée, est enregistrée avant d'être remplacée
+            self.end_ride(self.session)
         intensity = self.session.intensity_pct
         self.session = WorkoutSession(workout, self.ftp)
         self.session.intensity_pct = intensity
@@ -376,6 +404,8 @@ class MainWindow(QMainWindow):
     def ride_route(self, route) -> None:
         """Affiche ce parcours, prêt à partir ; ce qui roulait est mis en pause."""
         self.active.pause()
+        if self.route is not None:  # le parcours précédent, même inachevé, est enregistré
+            self.end_ride(self.route)
         self.route = RouteSession(route, self.ftp, self.weight_box.value())
         self.route_panel.set_session(self.route)
         self._since_sample = 0.0
@@ -395,6 +425,7 @@ class MainWindow(QMainWindow):
 
     def _reset_free_ride(self) -> None:
         old = self.free
+        self.end_ride(old)
         self.free = FreeRideSession(self.ftp, old.target_w, old.rider_kg, old.mode, old.grade_pct)
         self.free_panel.chart.set_session(self.free)
         self._since_sample = 0.0
@@ -442,7 +473,8 @@ class MainWindow(QMainWindow):
         s = self.session
         index, step_elapsed, elapsed, state, samples = (s.index, s.step_elapsed_s, s.elapsed_s,
                                                          s.state, s.samples)
-        self.load(s.workout)
+        self.load(s.workout, end_ride=False)
+        self.session.exported = s.exported
         # Garder l'avancement : seule la conversion % FTP → W change.
         self.session.index, self.session.step_elapsed_s, self.session.elapsed_s = index, step_elapsed, elapsed
         self.session.state, self.session.samples = state, samples
@@ -521,6 +553,11 @@ class MainWindow(QMainWindow):
         return saved or sensor.name
 
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        self.end_ride(self.session, send=False)
+        self.end_ride(self.free, send=False)
+        if self.route is not None:
+            self.end_ride(self.route, send=False)
+        self.send_rides(wait_s=CLOSE_SEND_WAIT_S)
         if self.heart_rate is not None:
             self.heart_rate.stop()
         if isinstance(self.source, Trainer):
@@ -606,6 +643,87 @@ class MainWindow(QMainWindow):
         self.directory = str(Path(path).parent)
         self.statusBar().showMessage(f"Enregistrée : {path}", 8000)
 
+    # --- sorties : .fit d'activité et envoi vers Strava / Nolio -------------
+
+    def finish_ride(self) -> None:
+        """Bouton « Terminer » : la sortie en cours est enregistrée et envoyée, puis on repart de zéro."""
+        active = self.active
+        if active.state is State.RUNNING:
+            active.pause()
+            self._push_target()
+        if len(active.samples) < MIN_RIDE_SAMPLES:
+            self.statusBar().showMessage("Sortie trop courte pour être enregistrée (moins d'une minute)", 8000)
+        else:
+            self.end_ride(active)
+        if active is self.free:
+            self._reset_free_ride()
+        elif active is self.route:
+            self._reset_route()
+        else:
+            self._reset()
+
+    def end_ride(self, session: WorkoutSession | FreeRideSession | RouteSession, send: bool = True) -> None:
+        """Enregistre la sortie en .fit (une seule fois) puis l'envoie aux comptes connectés."""
+        if self.outbox is None or session.exported or len(session.samples) < MIN_RIDE_SAMPLES:
+            return
+        session.exported = True
+        title, description = ride_title(session)
+        try:
+            path = self.outbox.add(ride_points(session.samples), title, description)
+        except (OSError, ValueError) as e:
+            QMessageBox.warning(self, "Sortie non enregistrée", f"{self.outbox.dir} : {e}")
+            return
+        if not auto_services(self.accounts):
+            self.statusBar().showMessage(f"Sortie enregistrée : {path.name} (pour l'envoyer vers Strava ou "
+                                         f"Nolio, connectez un compte : Strava / Nolio…)", 15000)
+        else:
+            self.statusBar().showMessage(f"Sortie enregistrée : {path.name}, envoi en cours…", 15000)
+        if send:
+            self.send_rides()
+
+    def send_rides(self, wait_s: float = 0) -> None:
+        """Envoie en tâche de fond ce qui attend ; `wait_s` > 0 attend la fin (fermeture de l'appli)."""
+        if self.outbox is None or not auto_services(self.accounts):
+            return
+        if self._send_thread is not None and self._send_thread.is_alive():
+            self._send_again = True
+        else:
+            outbox, accounts, signals = self.outbox, self.accounts, self._sync
+
+            def work() -> None:
+                reports = send_pending(outbox, accounts)
+                try:
+                    signals.done.emit(reports)
+                except RuntimeError:  # fenêtre déjà fermée
+                    pass
+
+            self._send_thread = threading.Thread(target=work, daemon=True, name="envoi des sorties")
+            self._send_thread.start()
+        if wait_s > 0:
+            deadline = time.monotonic() + wait_s
+            while self._send_thread.is_alive() and time.monotonic() < deadline:
+                self._send_thread.join(0.2)
+            if self._send_again and not self._send_thread.is_alive():
+                self._send_again = False
+                send_pending(self.outbox, self.accounts)
+
+    def _sent(self, reports: list) -> None:
+        if reports:
+            text = " · ".join(str(r) for r in reports[-4:])
+            failed = [r for r in reports if not r.ok]
+            if failed:
+                text += " (nouvel essai au prochain lancement, ou bouton Strava / Nolio…)"
+            self.statusBar().showMessage(text, 20000)
+        if self._send_again:
+            self._send_again = False
+            self.send_rides()
+
+    def _choose_accounts(self) -> None:
+        outbox = self.outbox if self.outbox is not None else Outbox()
+        dialog = AccountsDialog(self.accounts, outbox, self)
+        dialog.send_requested.connect(self.send_rides)
+        dialog.exec()
+
     # --- boucle ----------------------------------------------------------
 
     def _on_tick(self) -> None:
@@ -622,12 +740,26 @@ class MainWindow(QMainWindow):
             if self._since_sample >= 1.0:
                 self._since_sample -= 1.0
                 heart = self.heart_rate.latest() if self.heart_rate is not None else None
-                active.record(reading.power_w, reading.cadence_rpm, heart.bpm if heart else None)
+                active.record(reading.power_w, reading.cadence_rpm, heart.bpm if heart else None,
+                              self._speed(reading))
             if active is self.route:
                 active.ride(dt, reading.power_w)
                 if active.state is State.FINISHED:
                     self._push_target()  # arrivée : résistance libre
+        for session in (self.session, self.route):  # fin de séance ou arrivée : enregistrée et envoyée d'elle-même
+            if session is not None and session.state is State.FINISHED:
+                self.end_ride(session)
         self._refresh()
+
+    def _speed(self, reading) -> float:
+        """Vitesse donnée par le home trainer, sinon celle d'un cycliste de ce poids sur le plat (ou la pente)."""
+        if self.route_ride:  # sur un parcours, la distance suit la vitesse simulée de la route
+            return round(self.route.speed_kmh, 2)
+        speed = getattr(reading, "speed_kmh", None)
+        if speed is not None:
+            return speed
+        grade = self.free.grade_pct if self.free_ride and self.free.mode is FreeMode.SLOPE else 0.0
+        return round(road_speed_kmh(reading.power_w, Slope(grade, self.free.rider_kg)), 2)
 
     def _push_target(self) -> None:
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
@@ -702,6 +834,13 @@ class MainWindow(QMainWindow):
         else:
             state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
             metric.set("Off", f"{self._display_name('hr', sensor)} : {state}")
+
+
+FINISH_TIP = ("Terminer la sortie : elle est enregistrée en .fit et envoyée vers Strava / Nolio (Ctrl+T)")
+
+
+class _SyncSignals(QObject):
+    done = Signal(list)  # comptes rendus d'envoi, émis depuis le fil d'envoi
 
 
 class SensorDialog(QDialog):
@@ -1031,6 +1170,7 @@ def main(argv: list[str] | None = None) -> int:
         app.setWindowIcon(QIcon(str(ICON)))
     # Sans option, on rebranche les appareils de la dernière fois (mémorisés dans le profil utilisateur).
     book = DeviceBook.load()
+    accounts = AccountBook.load()
     if args.hr is None:
         hr_kind, hr_address, hr_number = book.startup_choice("hr", ("ble", "ant", None), default=None)
     else:
@@ -1050,8 +1190,9 @@ def main(argv: list[str] | None = None) -> int:
         # Lancée depuis une icône, l'appli n'a pas de console : les erreurs s'affichent dans une fenêtre.
         QMessageBox.warning(None, "Briques invalides", str(e))
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
-    window = MainWindow(workout, args.ftp, source=source, heart_rate=heart_rate, book=book)
-    window.resize(1100, 760)
+    window = MainWindow(workout, args.ftp, source=source, heart_rate=heart_rate, book=book,
+                        accounts=accounts, outbox=Outbox())
+    window.resize(1240, 760)
     if args.weight:
         window.weight_box.setValue(args.weight)
     window.set_library(Library.load(documents=documents_folder()))
