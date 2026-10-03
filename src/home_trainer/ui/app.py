@@ -34,7 +34,7 @@ from ..bricks import BrickSyntaxError, parse_workout
 from ..devices import DeviceBook, SavedDevice, ant_ident
 from ..formats import FormatError, save_workout
 from ..route import RouteError, load_route
-from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, SimulatedHeartRate, Slope, Trainer,
+from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Slope, Trainer,
                        open_heart_rate_sensor)
 from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
