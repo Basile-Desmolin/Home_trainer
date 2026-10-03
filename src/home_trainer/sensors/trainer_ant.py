@@ -9,7 +9,7 @@ from .ant import open_ant_node
 from .base import SensorState
 from .heart_rate import ANT_RF_FREQUENCY
 from .trainer import (ANT_FEC_DEVICE_TYPE, ANT_FEC_PERIOD, AntFecDecoder, TargetThrottle, Trainer,
-                      fec_page_for)
+                      fec_page_for, fec_pages_for)
 
 log = logging.getLogger(__name__)
 
@@ -68,7 +68,8 @@ class AntTrainer(Trainer):
             due, target = self._pending_target()
             if due and self.state is SensorState.CONNECTED:
                 try:
-                    channel.send_acknowledged_data(fec_page_for(target))
+                    for page in fec_pages_for(target):
+                        channel.send_acknowledged_data(page)
                     self._target_sent(target)
                 except Exception as e:  # noqa: BLE001 (message perdu : on retentera)
                     log.debug("%s : consigne non transmise (%s)", self.name, e)

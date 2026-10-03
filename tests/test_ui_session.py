@@ -1,7 +1,10 @@
 import pytest
 
 from home_trainer.bricks import parse_workout
+from home_trainer.sensors import Slope
 from home_trainer.ui import FreeRideSession, SimulatedTrainer, State, WorkoutSession
+from home_trainer.ui.power import road_speed_kmh
+from home_trainer.ui.session import FreeMode
 
 
 def make(text="1m@100 2x(30s@200 30s@100%) open@150", ftp=200):
@@ -106,3 +109,31 @@ def test_free_ride_clock_and_samples_keep_the_target_of_the_moment():
     s.toggle()
     s.tick(30)
     assert s.state is State.PAUSED and s.elapsed_s == 2
+
+
+def test_free_ride_slope_mode_sends_grade_and_weight():
+    s = FreeRideSession(ftp=250, rider_kg=70)
+    assert s.command == 150
+    s.mode = FreeMode.SLOPE
+    assert s.command == Slope(0.0, 70)
+    assert s.adjust_grade(+0.5) == 0.5 and s.adjust_grade(+2) == 2.5
+    assert s.set_grade(3.3) == 3.5
+    assert s.set_grade(-50) == -10 and s.set_grade(99) == 20
+    s.set_grade(4)
+    s.start()
+    s.tick(1)
+    s.record(220)
+    assert s.samples[-1].target_w is None and s.samples[-1].grade_pct == 4
+    assert s.command == Slope(4.0, 70) and s.target_w == 150  # la cible ERG reste pour le retour en ERG
+
+
+def test_simulated_rider_slows_down_uphill():
+    flat, climb = SimulatedTrainer(noise_w=0, seed=1), SimulatedTrainer(noise_w=0, seed=1)
+    flat.set_target(Slope(0, 70))
+    climb.set_target(Slope(8, 70))
+    for _ in range(100):
+        a, b = flat.read(0.2), climb.read(0.2)
+    assert b.power_w > a.power_w  # on appuie plus fort en montée…
+    assert b.speed_kmh < a.speed_kmh * 0.7  # … et on va bien moins vite
+    assert 20 < a.speed_kmh < 35
+    assert road_speed_kmh(200, Slope(-5, 70)) > road_speed_kmh(200, Slope(0, 70))

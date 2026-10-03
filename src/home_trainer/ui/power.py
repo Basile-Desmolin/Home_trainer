@@ -3,7 +3,9 @@
 Le pilotage réel (`home_trainer.sensors.open_trainer`, Wahoo en Bluetooth
 FTMS ou ANT+ FE-C) et `SimulatedTrainer` offrent la même interface. Le
 simulateur imite un home trainer en mode ERG : la puissance mesurée rejoint
-la consigne en quelques secondes, avec un peu de bruit de pédalage.
+la consigne en quelques secondes, avec un peu de bruit de pédalage. En pente
+(`Slope`), il imite un cycliste qui appuie plus fort quand ça monte : sa
+vitesse découle de la puissance, de la pente et du poids.
 """
 
 from __future__ import annotations
@@ -13,18 +15,23 @@ import random
 from dataclasses import dataclass
 from typing import Protocol
 
+from ..sensors.trainer import DEFAULT_CRR, DEFAULT_CW, Slope
+
+G = 9.81
+
 
 @dataclass(frozen=True)
 class Reading:
     power_w: float
     cadence_rpm: float | None = None
+    speed_kmh: float | None = None
 
 
 class PowerSource(Protocol):
     name: str
 
-    def set_target(self, watts: float | None) -> None:
-        """Consigne ERG en watts ; None = résistance libre."""
+    def set_target(self, watts: float | Slope | None) -> None:
+        """Consigne ERG en watts, pente (`Slope`, mode simulation) ; None = résistance libre."""
 
     def read(self, dt: float) -> Reading | None:
         """Dernière mesure, `dt` secondes après la précédente (None : home trainer muet)."""
@@ -46,17 +53,42 @@ class SimulatedTrainer:
         self.response_s = response_s  # constante de temps de la régulation ERG
         self.noise_w = noise_w
         self.free_ride_w = free_ride_w  # puissance « naturelle » sans consigne
-        self._target: float | None = None
+        self._target: float | Slope | None = None
         self._power = 0.0
         self._rng = random.Random(seed)
 
-    def set_target(self, watts: float | None) -> None:
+    def set_target(self, watts: float | Slope | None) -> None:
         self._target = watts
 
     def read(self, dt: float) -> Reading:
-        goal = self.free_ride_w if self._target is None else self._target
+        target = self._target
+        grade = target.grade_pct if isinstance(target, Slope) else 0.0
+        if target is None or isinstance(target, Slope):
+            goal = max(60.0, self.free_ride_w + 20 * grade)  # on appuie plus fort en montée
+        else:
+            goal = target
         if dt > 0:
             self._power += (goal - self._power) * (1 - math.exp(-dt / self.response_s))
         power = max(self._power + self._rng.gauss(0, self.noise_w), 0.0) if goal > 0 else 0.0
-        cadence = 0.0 if goal <= 0 else 88 + self._rng.gauss(0, 1.5)
-        return Reading(round(power), round(cadence))
+        cadence = 0.0 if goal <= 0 else 88 - 1.5 * max(grade, 0) + self._rng.gauss(0, 1.5)
+        speed = None
+        if isinstance(target, Slope):
+            speed = round(road_speed_kmh(self._power, target), 1)
+        return Reading(round(power), round(cadence), speed)
+
+
+def road_speed_kmh(power_w: float, slope: Slope, crr: float = DEFAULT_CRR, cw: float = DEFAULT_CW) -> float:
+    """Vitesse sur la route à `power_w`, pour cette pente et ce poids (sans vent)."""
+    theta = math.atan(slope.grade_pct / 100)
+    weight = slope.total_kg * G * (math.sin(theta) + crr * math.cos(theta))
+
+    def need(v: float) -> float:  # puissance pour rouler à v m/s
+        return (weight + 0.5 * cw * v * v) * v
+
+    lo, hi = 0.0, 40.0
+    if power_w <= 0 or need(hi) < power_w:
+        return 0.0 if power_w <= 0 else hi * 3.6
+    for _ in range(50):  # `need` croît avec v (en descente aussi, dès que la vitesse est positive)
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if need(mid) < power_w else (lo, mid)
+    return lo * 3.6

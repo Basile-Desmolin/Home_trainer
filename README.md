@@ -14,7 +14,7 @@ en composer en briques « x min à y watts ».
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
 | Capteur cardiaque Bluetooth et ANT+ (+ simulé), affiché et enregistré | ✅ `src/home_trainer/sensors/` |
 | Éditeur graphique de briques, enregistrement .zwo/.mrc/.erg/.fit | ✅ `ui/editor.py` |
-| Mode libre : consigne ERG réglée à la main par pas de 5 W, courbe en direct | ✅ `ui/free_ride.py` |
+| Mode libre : ERG réglé à la main par pas de 5 W, ou pente simulée selon le poids, courbe en direct | ✅ `ui/free_ride.py` |
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 
@@ -137,6 +137,22 @@ puissance et cardio). En pause, le home trainer repasse en résistance libre.
 où elle en était (Page↑ Page↓ y règlent l'intensité de ±5 %).
 
 ![Mode libre](docs/mode-libre.png)
+
+**Pente simulée** : le bouton **Pente** (en haut de la cible) remplace l'ERG
+par une route en pente, par pas de 0,5 % (↑ ↓) et 2 % (Page↑ Page↓), de
+−10 % à +20 %. La résistance dépend alors de la pente, de la vitesse et du
+**poids** saisi à côté de la FTP (cycliste ; 9 kg de vélo s'y ajoutent), ou
+`--weight 70` au lancement. La vitesse simulée s'affiche sous la cadence.
+
+- ANT+ FE-C : le poids part dans la page 0x37 (configuration utilisateur),
+  la pente dans la page 0x33.
+- Bluetooth Wahoo (anciens firmwares) : le poids part avec le mode
+  simulation, puis la pente.
+- Bluetooth FTMS ne transmet pas de poids : le home trainer simule une masse
+  fixe, supposée de 75 kg. La pente envoyée est donc ajustée au poids réel
+  (× (cycliste + vélo) / 75), ce qui donne le même effort qu'avec ce poids.
+
+![Pente simulée](docs/mode-pente.png)
 
 ## Pilotage du home trainer Wahoo
 
