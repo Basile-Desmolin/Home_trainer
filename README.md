@@ -17,6 +17,7 @@ en composer en briques « x min à y watts ».
 | Mode libre : ERG réglé à la main par pas de 5 W, ou pente simulée selon le poids, courbe en direct | ✅ `ui/free_ride.py` |
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
 | Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
+| Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
 
 ## Lancer l'appli sous Windows (icône)
 
@@ -162,7 +163,8 @@ pip install -e ".[gui,ant]"            # ANT+ (openant) avec une clé USB ANT+
 home-trainer-gui --trainer ble         # premier home trainer Bluetooth à portée
 home-trainer-gui --trainer ble --trainer-address AA:BB:CC:DD:EE:FF
 home-trainer-gui --trainer ant         # premier home trainer ANT+ (ou --trainer-ant-id 12345)
-home-trainer-gui --trainer sim         # home trainer simulé (défaut)
+home-trainer-gui --trainer sim         # home trainer simulé
+home-trainer-gui                       # sans option : le dernier home trainer utilisé (sinon simulé)
 ```
 
 Il se choisit aussi avec le bouton **Home trainer…** (recherche Bluetooth).
@@ -187,6 +189,23 @@ contrôle. L'état de la connexion s'affiche à droite de la barre d'outils.
 Les trames sont encodées et décodées par des fonctions pures
 (`sensors/trainer.py`), testées sans matériel (`tests/test_trainer.py`).
 
+## Appareils mémorisés
+
+![Appareils mémorisés](docs/appareils.png)
+
+Chaque home trainer ou ceinture cardio qui se connecte est **mémorisé** avec
+son adresse Bluetooth ou son numéro ANT+ (même choisi en « premier trouvé ») :
+il apparaît ensuite en tête de la liste **Appareil** des boutons
+**Home trainer…** et **Cardio…**. En le choisissant, on peut le **renommer**
+(« Kickr du salon », « Ceinture Polar »…, Entrée pour valider) ou
+l'**oublier**. Le nom choisi s'affiche dans la barre d'outils et sur la tuile
+cardio. Au lancement, l'appli **se reconnecte** d'elle-même aux derniers
+appareils choisis ; les options `--trainer` et `--hr` passent outre.
+
+La liste est enregistrée dans `%APPDATA%\HomeTrainer\appareils.json` sous
+Windows, `~/.config/home-trainer/appareils.json` ailleurs (variable
+`HOME_TRAINER_DEVICES` pour un autre fichier).
+
 ## Capteur cardiaque
 
 ```bash
@@ -195,7 +214,8 @@ pip install -e ".[gui,ant]"            # ANT+ (openant) avec une clé USB ANT+
 home-trainer-gui --hr ble              # première ceinture Bluetooth à portée
 home-trainer-gui --hr ble --hr-address AA:BB:CC:DD:EE:FF
 home-trainer-gui --hr ant              # première ceinture ANT+ (ou --hr-ant-id 12345)
-home-trainer-gui --hr sim              # cardio simulé (défaut), --hr aucun pour le masquer
+home-trainer-gui --hr sim              # cardio simulé, --hr aucun pour le masquer
+home-trainer-gui                       # sans option : la dernière ceinture utilisée (sinon simulé)
 ```
 
 Le capteur se choisit aussi en cours de route avec le bouton **Cardio…**
