@@ -17,6 +17,7 @@ MUTED = "#8b919c"
 ACCENT = "#ffd24a"
 POWER = "#4fc3f7"
 HEART = "#ff5c6c"
+CADENCE = "#b6e36b"
 
 # Zones de Coggan (borne haute en % FTP) et couleurs associées.
 ZONES = [(55, "#7f8c9a"), (76, "#3d8bd9"), (91, "#3fb37f"), (106, "#e7c43a"),
@@ -28,6 +29,37 @@ def zone_color(watts: float | None, ftp: float) -> QColor:
         return QColor("#4a505c")
     pct = watts / ftp * 100
     return QColor(next(color for limit, color in ZONES if pct < limit))
+
+
+def draw_cadence(p: QPainter, area: QRectF, samples, x, labels_left: float) -> None:
+    """Cadence réalisée sur sa propre échelle (0 à 120 tr/min au moins), graduée dans la marge
+    de droite à partir de `labels_left`. Un trou dans les mesures coupe la courbe."""
+    points = [(s.t, s.cadence_rpm) for s in samples]
+    values = [c for _, c in points if c is not None]
+    if len(values) < 2:
+        return
+    hi = max(120, (int(max(values)) // 20 + 1) * 20)
+
+    def yc(rpm: float) -> float:
+        return area.bottom() - rpm / hi * area.height()
+
+    p.setPen(QColor(CADENCE))
+    width = p.device().width() - labels_left - 2
+    for rpm in range(30, hi, 30):
+        p.drawText(QRectF(labels_left, yc(rpm) - 8, width, 16), Qt.AlignLeft | Qt.AlignVCenter, f"{rpm}")
+    p.drawText(QRectF(labels_left, area.top() - 12, width, 14), Qt.AlignLeft | Qt.AlignVCenter, "rpm")
+    path = QPainterPath()
+    drawing = False
+    for t, rpm in points:
+        if rpm is None:
+            drawing = False
+        elif drawing:
+            path.lineTo(x(t), yc(rpm))
+        else:
+            path.moveTo(x(t), yc(rpm))
+            drawing = True
+    p.setPen(QPen(QColor(CADENCE), 1.2))
+    p.drawPath(path)
 
 
 def hms(seconds: float | None) -> str:
@@ -66,7 +98,8 @@ class WorkoutChart(QWidget):
         if s is None or not s.segments:
             return
         ftp = s.ftp or DEFAULT_FTP
-        margin_l, margin_r, margin_t, margin_b = 44, 12, 12, 26
+        # À droite, la marge porte l'échelle de la cadence (pas en aperçu : rien de réalisé).
+        margin_l, margin_r, margin_t, margin_b = 44, 12 if self.preview else 36, 14, 26
         area = QRectF(margin_l, margin_t, self.width() - margin_l - margin_r,
                       self.height() - margin_t - margin_b)
         total = max(s.total_s, 1.0)
@@ -140,6 +173,9 @@ class WorkoutChart(QWidget):
                 path.lineTo(x(sample.t), y(sample.power_w))
             p.setPen(QPen(QColor(POWER), 1.6))
             p.drawPath(path)
+
+        # Cadence, sur sa propre échelle (graduée dans la marge de droite).
+        draw_cadence(p, area, s.samples, x, area.right() + 6)
 
         # Fréquence cardiaque, sur sa propre échelle (graduée à droite).
         heart = [(x_.t, x_.heart_rate_bpm) for x_ in s.samples if x_.heart_rate_bpm]

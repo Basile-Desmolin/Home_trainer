@@ -139,7 +139,7 @@ home-trainer-gui --bricks "10m@150 3x(4m@105% 2m@55%) 10m@110"
 ```
 
 Profil complet de la séance coloré par zones, curseur d'avancement et
-puissance réalisée ; temps restant sur la brique et au total ; puissance,
+puissance réalisée, cadence (échelle en tr/min à droite) et cardio ; temps restant sur la brique et au total ; puissance,
 cible et cadence ; intensité réglable par pas de 1 % (boutons, ou ↑ ↓,
 appui long pour défiler). Espace = démarrer / pause, → = brique suivante.
 
@@ -147,6 +147,10 @@ Bouton **ERG on / off** (ou E) : ERG off, le home trainer passe en
 résistance libre (route plate, selon le poids) ; la séance continue de
 dérouler et la cible reste affichée pour la suivre à la main avec les
 vitesses. ERG on reprend la consigne de la brique en cours.
+
+Pendant une sortie (en cours ou en pause), le PC ne se met pas en veille et
+l'écran ne s'éteint pas (Windows) ; le réglage d'alimentation habituel revient
+dès la sortie terminée.
 
 Le home trainer réel et le simulateur (`ui/power.py`) offrent la même
 interface `PowerSource` (`set_target`, `read`), voir ci-dessous.
@@ -295,7 +299,18 @@ d'elle-même** vers les comptes Strava et Nolio connectés.
 Une sortie se termine :
 
 - en fin de séance ou à l'arrivée d'un parcours, d'elle-même ;
-- avec le bouton **Terminer** (ou Ctrl+T), en séance, en mode libre ou sur un parcours ;
+- avec le bouton **Terminer** (ou Ctrl+T), en séance, en mode libre ou sur un parcours.
+
+Dans ces deux cas, la fenêtre **Enregistrer la sortie** s'ouvre : format
+(**.fit** par défaut, ou .tcx, ou .csv pour un tableur), nom du fichier et
+dossier (celui des sorties du profil, ou un autre avec **Parcourir…** ; il est
+reproposé la fois suivante). **Ne pas enregistrer** abandonne la sortie,
+**Annuler** ramène à la sortie, en pause. Le .fit est celui qui part vers
+Strava / Nolio ; avec un autre format, une copie .fit est gardée dans le
+dossier des sorties du profil pour l'envoi.
+
+Elle est aussi enregistrée d'elle-même, en .fit dans le dossier des sorties :
+
 - en changeant de séance, avec **Recommencer** / **Remettre à zéro**, ou en
   fermant l'appli (la sortie en cours n'est jamais perdue).
 
@@ -304,7 +319,7 @@ pédalage ne l'est pas). Sans vitesse donnée par
 le home trainer, elle est calculée comme sur la route (poids saisi, plat ou
 pente simulée), ce qui donne aussi la distance.
 
-Les fichiers vont dans le dossier `sorties` du profil
+Le dossier proposé est le dossier `sorties` du profil
 (`%APPDATA%\HomeTrainer\profils\<nom>\sorties` sous Windows,
 `~/.config/home-trainer/profils/<nom>/sorties` ailleurs) ; bouton **Ouvrir le dossier des sorties** dans la
 fenêtre **Strava / Nolio…**. Un envoi raté (pas de réseau, appli fermée

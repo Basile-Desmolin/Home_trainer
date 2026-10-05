@@ -76,21 +76,32 @@ class Outbox:
 
     # --- sorties ---------------------------------------------------------
 
-    def add(self, points: list[ActivityPoint], title: str, description: str = "") -> Path:
-        """Enregistre la sortie en .fit et la met en attente d'envoi."""
+    def add(self, points: list[ActivityPoint], title: str, description: str = "",
+            dest: Path | str | None = None) -> Path:
+        """Enregistre la sortie en .fit et la met en attente d'envoi.
+
+        Sans `dest`, le fichier prend un nom libre dans le dossier des sorties ; avec, il
+        est écrit là (remplacé s'il existe) et envoyé depuis là."""
         start = min(p.at for p in points)
-        self.dir.mkdir(parents=True, exist_ok=True)
-        path = self.dir / activity_file_name(start, title)
-        n = 2
-        while path.exists():
-            path = path.with_name(f"{path.stem.rsplit('~', 1)[0]}~{n}.fit")
-            n += 1
+        if dest is None:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            path = self.dir / activity_file_name(start, title)
+            n = 2
+            while path.exists():
+                path = path.with_name(f"{path.stem.rsplit('~', 1)[0]}~{n}.fit")
+                n += 1
+        else:
+            path = Path(dest).absolute()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.dir.mkdir(parents=True, exist_ok=True)  # pour envois.json
         write_activity(points, path)
+        # Hors du dossier des sorties, la clé est le chemin complet (dossier / chemin absolu = ce chemin).
+        key = path.name if path.parent == self.dir.absolute() else str(path)
         with self._lock:
             data = self._read()
             # Nolio attend un identifiant unique par sortie : l'heure de départ convient.
-            data[path.name] = {"title": title, "description": description, "external_id": str(int(start)),
-                               "sent": {}}
+            data[key] = {"title": title, "description": description, "external_id": str(int(start)),
+                         "sent": {}}
             self._write(data)
         return path
 

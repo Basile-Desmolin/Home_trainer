@@ -15,7 +15,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from .chart import ACCENT, DEFAULT_FTP, HEART, MUTED, PANEL, POWER, TEXT, hms, zone_color
+from .chart import ACCENT, CADENCE, DEFAULT_FTP, HEART, MUTED, PANEL, POWER, TEXT, draw_cadence, hms, zone_color
 from .metric import Metric
 from .power import Reading
 from .session import FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, State
@@ -38,7 +38,7 @@ WINDOW_S = 600  # la courbe montre les 10 dernières minutes
 
 
 class FreeRideChart(QWidget):
-    """Courbe en direct des dernières minutes : consigne, puissance et cardio."""
+    """Courbe en direct des dernières minutes : consigne, puissance, cadence et cardio."""
 
     def __init__(self, parent: QWidget | None = None, window_s: float = WINDOW_S) -> None:
         super().__init__(parent)
@@ -59,7 +59,7 @@ class FreeRideChart(QWidget):
         if s is None:
             return
         ftp = s.ftp or DEFAULT_FTP
-        margin_l, margin_r, margin_t, margin_b = 44, 12, 12, 26
+        margin_l, margin_r, margin_t, margin_b = 44, 36, 14, 26  # à droite : échelle de la cadence
         area = QRectF(margin_l, margin_t, self.width() - margin_l - margin_r,
                       self.height() - margin_t - margin_b)
         end = max(s.elapsed_s, self.window_s)
@@ -124,6 +124,9 @@ class FreeRideChart(QWidget):
             p.setPen(QPen(QColor(POWER), 1.6))
             p.drawPath(path)
 
+        # Cadence, sur sa propre échelle (graduée dans la marge de droite).
+        draw_cadence(p, area, samples, x, area.right() + 6)
+
         # Fréquence cardiaque, sur sa propre échelle (graduée à droite).
         heart = [(x_.t, x_.heart_rate_bpm) for x_ in samples if x_.heart_rate_bpm]
         if len(heart) > 1:
@@ -166,7 +169,7 @@ class FreeRidePanel(QWidget):
         self.m_power = Metric("PUISSANCE", 52, POWER)
         self.m_heart = Metric("CARDIO", 52, HEART)
         self.m_time = Metric("TEMPS", 30)
-        self.m_cadence = Metric("CADENCE", 30)
+        self.m_cadence = Metric("CADENCE", 30, CADENCE)
         grid.addWidget(self.m_power, 0, 0)
         grid.addWidget(self._build_target(), 0, 1, 2, 2)
         grid.addWidget(self.m_heart, 0, 3)

@@ -67,6 +67,7 @@ class WorkoutSession:
         self.state = State.READY if self.segments else State.FINISHED
         self.samples: list[Sample] = []
         self.exported = False  # sortie déjà enregistrée en .fit (et envoyée)
+        self.export_asked = False  # fenêtre d'enregistrement déjà ouverte à la fin
 
     # --- commandes -------------------------------------------------------
 
@@ -222,6 +223,7 @@ class FreeRideSession:
         self.elapsed_s = 0.0
         self.samples: list[Sample] = []
         self.exported = False
+        self.export_asked = False
 
     def start(self) -> None:
         if self.state in (State.READY, State.PAUSED):
@@ -305,6 +307,7 @@ class RouteSession:
         self.speed_kmh = 0.0
         self.samples: list[Sample] = []
         self.exported = False
+        self.export_asked = False
 
     def start(self) -> None:
         if self.state in (State.READY, State.PAUSED):
