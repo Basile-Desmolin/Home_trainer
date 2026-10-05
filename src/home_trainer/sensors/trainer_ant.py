@@ -1,4 +1,4 @@
-"""Home trainer ANT+ FE-C (Wahoo KICKR et compatibles) via `openant` et une clé USB ANT+."""
+"""Home trainer ANT+ FE-C (Wahoo, Elite, Tacx… : tout home trainer FE-C) via `openant` et une clé USB ANT+."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class AntTrainer(Trainer):
         super().__init__(TargetThrottle(min_interval_s=1.0, refresh_s=5.0))
         self.device_number = device_number
         self.device_id = str(device_number) if device_number else None
-        self.name = f"Wahoo ANT+ n°{device_number}" if device_number else "Wahoo ANT+"
+        self.name = f"Home trainer ANT+ n°{device_number}" if device_number else "Home trainer ANT+"
         self._node = None
         self._channel = None
 
@@ -72,7 +72,7 @@ class AntTrainer(Trainer):
 
     def _found(self, number: int) -> None:
         self.device_id = str(number)
-        self.name = f"Wahoo ANT+ n°{number}"
+        self.name = f"Home trainer ANT+ n°{number}"
 
     # Sans réponse, la demande de calibration est renvoyée (un message ANT+ peut se perdre).
     calibration_resend_s = 2.0

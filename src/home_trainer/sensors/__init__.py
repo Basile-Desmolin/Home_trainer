@@ -5,7 +5,7 @@
     reading = sensor.latest()                   # HeartRateReading ou None
     sensor.stop()
 
-Le home trainer Wahoo se pilote de la même façon, avec une consigne en plus :
+Le home trainer se pilote de la même façon, avec une consigne en plus :
 
     trainer = open_trainer("ble")               # ou "ant"
     trainer.start()

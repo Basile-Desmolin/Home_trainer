@@ -11,7 +11,8 @@ Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 → ou N = brique suivante, E = ERG on / off, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
 Ctrl+E = modifier, Ctrl+S = enregistrer sous, Ctrl+L = mode libre / séance,
 Ctrl+G = rouler un parcours GPX,
-Ctrl+T = terminer la sortie (enregistrée en .fit, envoyée vers Strava / Nolio).
+Ctrl+T = terminer la sortie (format, nom et dossier au choix ; .fit envoyé vers Strava / Nolio).
+Pendant une sortie, le PC ne se met pas en veille (Windows).
 En mode libre : ↑ ↓ = ±5 W ou ±0,5 %, Page↑ Page↓ = ±25 W ou ±2 %.
 Sur un parcours : ↑ ↓ = difficulté ±10 %.
 """
@@ -33,6 +34,9 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
 from ..bricks import BrickSyntaxError, parse_workout
 from ..devices import DeviceBook, SavedDevice, ant_ident
 from ..formats import FormatError, save_workout
+from ..formats.activity_export import write_ride
+from ..formats.fit_activity import activity_file_name
+from ..keep_awake import KeepAwake
 from ..profiles import Profile, ProfileBook
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Slope, Trainer,
@@ -41,13 +45,14 @@ from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
 from .calibration import CalibrationDialog, can_calibrate
-from .chart import ACCENT, BG, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
+from .chart import ACCENT, BG, CADENCE, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
 from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
 from .loader import load_workout
 from .metric import Metric
 from .profiles import choose_profile
+from .ride_export import DISCARD, RideExport, ask_ride_export
 from .power import PowerSource, SimulatedTrainer, open_power_source, road_speed_kmh
 from .route_ride import RoutePanel
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
@@ -98,6 +103,12 @@ class MainWindow(QMainWindow):
         self._sync.done.connect(self._sent)
         self._send_thread: threading.Thread | None = None
         self._send_again = False
+        # Fenêtre de fin de sortie (remplaçable dans les tests) et derniers choix faits dedans.
+        self.ask_ride_export = ask_ride_export
+        self._export_folder: Path | None = None  # None : dossier des sorties du profil
+        self._export_fmt = "fit"
+        self._asking = False
+        self.keep_awake = KeepAwake()
         self.ftp = ftp
         self.book = book if book is not None else DeviceBook()  # sans fichier : rien n'est mémorisé
         self._remembered: dict[str, tuple] = {}
@@ -213,7 +224,7 @@ class MainWindow(QMainWindow):
         self.m_target = Metric("CIBLE", 52, ACCENT)
         self.m_step = Metric("RESTE SUR LA BRIQUE", 52)
         self.m_total = Metric("RESTE AU TOTAL", 30)
-        self.m_cadence = Metric("CADENCE", 30)
+        self.m_cadence = Metric("CADENCE", 30, CADENCE)
         self.m_heart = Metric("CARDIO", 52, HEART)
         grid.addWidget(self.m_power, 0, 0)
         grid.addWidget(self.m_target, 0, 1)
@@ -516,6 +527,7 @@ class MainWindow(QMainWindow):
                                                          s.state, s.samples)
         self.load(s.workout, end_ride=False)
         self.session.exported = s.exported
+        self.session.export_asked = s.export_asked
         # Garder l'avancement : seule la conversion % FTP → W change.
         self.session.index, self.session.step_elapsed_s, self.session.elapsed_s = index, step_elapsed, elapsed
         self.session.state, self.session.samples = state, samples
@@ -594,6 +606,7 @@ class MainWindow(QMainWindow):
         return saved or sensor.name
 
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        self.keep_awake.set(False)
         self.end_ride(self.session, send=False)
         self.end_ride(self.free, send=False)
         if self.route is not None:
@@ -687,15 +700,17 @@ class MainWindow(QMainWindow):
     # --- sorties : .fit d'activité et envoi vers Strava / Nolio -------------
 
     def finish_ride(self) -> None:
-        """Bouton « Terminer » : la sortie en cours est enregistrée et envoyée, puis on repart de zéro."""
+        """Bouton « Terminer » : la sortie en cours est enregistrée là où on le choisit et envoyée,
+        puis on repart de zéro ; « Annuler » dans la fenêtre ramène à la sortie, en pause."""
         active = self.active
         if active.state is State.RUNNING:
             active.pause()
             self._push_target()
+            self._refresh()
         if len(active.samples) < MIN_RIDE_SAMPLES:
             self.statusBar().showMessage("Rien à enregistrer : la sortie n'a pas commencé", 8000)
-        else:
-            self.end_ride(active)
+        elif not self.save_ride(active):
+            return
         if active is self.free:
             self._reset_free_ride()
         elif active is self.route:
@@ -703,24 +718,77 @@ class MainWindow(QMainWindow):
         else:
             self._reset()
 
-    def end_ride(self, session: WorkoutSession | FreeRideSession | RouteSession, send: bool = True) -> None:
-        """Enregistre la sortie en .fit (une seule fois) puis l'envoie aux comptes connectés."""
+    def save_ride(self, session: WorkoutSession | FreeRideSession | RouteSession) -> bool:
+        """Demande format, nom et dossier puis enregistre ; False si l'utilisateur revient à la sortie."""
         if self.outbox is None or session.exported or len(session.samples) < MIN_RIDE_SAMPLES:
-            return
+            return True
+        title, _ = ride_title(session)
+        start = next((x.at for x in session.samples if x.at is not None), time.time())
+        default = RideExport(self._export_folder or self.outbox.dir,
+                             Path(activity_file_name(start, title)).stem, self._export_fmt)
+        watts = sum(x.power_w for x in session.samples) / len(session.samples)
+        summary = f"{title} · {hms(session.elapsed_s)} · moyenne {watts:.0f} W"
+        choice = self.ask_ride_export(self, default, summary)
+        if choice is None:
+            return False
+        if choice == DISCARD:
+            session.exported = True
+            self.statusBar().showMessage("Sortie non enregistrée", 8000)
+            return True
+        self._export_fmt = choice.fmt
+        self._export_folder = None if Path(choice.folder) == self.outbox.dir else Path(choice.folder)
+        return self.end_ride(session, export=choice)  # en cas d'échec, on reste sur la sortie
+
+    def end_ride(self, session: WorkoutSession | FreeRideSession | RouteSession, send: bool = True,
+                 export: RideExport | None = None) -> bool:
+        """Enregistre la sortie (une seule fois) puis l'envoie aux comptes connectés.
+
+        Sans `export`, en .fit dans le dossier des sorties ; avec, au format, au nom et dans le
+        dossier choisis (et, si ce n'est pas un .fit, une copie .fit dans le dossier des sorties
+        pour Strava / Nolio). False si l'écriture a échoué."""
+        if self.outbox is None or session.exported or len(session.samples) < MIN_RIDE_SAMPLES:
+            return True
         session.exported = True
         title, description = ride_title(session)
+        points = ride_points(session.samples)
         try:
-            path = self.outbox.add(ride_points(session.samples), title, description)
+            if export is None:
+                path = self.outbox.add(points, title, description)
+            elif export.fmt == "fit":
+                path = self.outbox.add(points, title, description, dest=export.path)
+            else:
+                export.path.parent.mkdir(parents=True, exist_ok=True)
+                path = write_ride(points, export.path)
+                self.outbox.add(points, title, description)
         except (OSError, ValueError) as e:
-            QMessageBox.warning(self, "Sortie non enregistrée", f"{self.outbox.dir} : {e}")
-            return
+            session.exported = False  # on pourra réessayer avec « Terminer »
+            where = export.path if export is not None else self.outbox.dir
+            QMessageBox.warning(self, "Sortie non enregistrée", f"{where} : {e}")
+            return False
+        shown = path.name if path.parent == self.outbox.dir.absolute() else str(path)
         if not auto_services(self.accounts):
-            self.statusBar().showMessage(f"Sortie enregistrée : {path.name} (pour l'envoyer vers Strava ou "
+            self.statusBar().showMessage(f"Sortie enregistrée : {shown} (pour l'envoyer vers Strava ou "
                                          f"Nolio, connectez un compte : Strava / Nolio…)", 15000)
         else:
-            self.statusBar().showMessage(f"Sortie enregistrée : {path.name}, envoi en cours…", 15000)
+            self.statusBar().showMessage(f"Sortie enregistrée : {shown}, envoi en cours…", 15000)
         if send:
             self.send_rides()
+        return True
+
+    def _ask_at_end(self, session: WorkoutSession | RouteSession) -> None:
+        """Fin de séance ou arrivée du parcours : la fenêtre d'enregistrement s'ouvre d'elle-même, une fois."""
+        if self._asking or session.exported or session.export_asked:
+            return
+        session.export_asked = True
+        self._asking = True
+
+        def ask() -> None:
+            try:
+                self.save_ride(session)
+            finally:
+                self._asking = False
+
+        QTimer.singleShot(0, ask)  # hors du tic de l'horloge : la fenêtre est modale
 
     def send_rides(self, wait_s: float = 0) -> None:
         """Envoie en tâche de fond ce qui attend ; `wait_s` > 0 attend la fin (fermeture de l'appli)."""
@@ -773,6 +841,7 @@ class MainWindow(QMainWindow):
         self.profile = profile
         self.accounts = AccountBook.load(self.profiles.accounts_path(profile))
         self.outbox = Outbox(self.profiles.rides_dir(profile))
+        self._export_folder = None
         if changed:  # on repart de zéro (rien à enregistrer : c'est déjà fait)
             self._reset_free_ride()
             self._reset_route()
@@ -817,9 +886,11 @@ class MainWindow(QMainWindow):
                 active.ride(dt, reading.power_w)
                 if active.state is State.FINISHED:
                     self._push_target()  # arrivée : résistance libre
-        for session in (self.session, self.route):  # fin de séance ou arrivée : enregistrée et envoyée d'elle-même
+        for session in (self.session, self.route):  # fin de séance ou arrivée : fenêtre d'enregistrement
             if session is not None and session.state is State.FINISHED:
-                self.end_ride(session)
+                self._ask_at_end(session)
+        # Pas de veille tant qu'une sortie est en cours, même en pause.
+        self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
         self._refresh()
 
     def _speed(self, reading) -> float:
@@ -910,7 +981,8 @@ class MainWindow(QMainWindow):
             metric.set("Off", f"{self._display_name('hr', sensor)} : {state}")
 
 
-FINISH_TIP = ("Terminer la sortie : elle est enregistrée en .fit et envoyée vers Strava / Nolio (Ctrl+T)")
+FINISH_TIP = ("Terminer la sortie : choix du format (.fit par défaut), du nom et du dossier ; "
+              "le .fit part vers Strava / Nolio (Ctrl+T)")
 
 
 class _SyncSignals(QObject):
@@ -1141,14 +1213,14 @@ class HeartRateDialog(SensorDialog):
 
 
 class TrainerDialog(SensorDialog):
-    """Choix du home trainer : simulé, Wahoo en Bluetooth ou en ANT+."""
+    """Choix du home trainer : simulé, en Bluetooth ou en ANT+ (toutes marques)."""
 
     TITLE = "Home trainer"
     ROLE = "trainer"
-    KINDS = [("Simulé", "sim"), ("Wahoo Bluetooth", "ble"), ("Wahoo ANT+ (clé USB)", "ant")]
+    KINDS = [("Simulé", "sim"), ("Bluetooth (FTMS)", "ble"), ("ANT+ FE-C (clé USB)", "ant")]
     SIMULATED_TEXT = "Puissance imitée : rejoint la consigne en quelques secondes."
-    SCAN_TEXT = ("Recherche des home trainers Bluetooth (5 s)… Pédalez pour réveiller le Wahoo, "
-                 "et fermez les autres applis qui pourraient s'y connecter (Wahoo, Zwift…).")
+    SCAN_TEXT = ("Recherche des home trainers Bluetooth (5 s)… Pédalez pour réveiller le home trainer, "
+                 "et fermez les autres applis qui pourraient s'y connecter (Zwift, appli de la marque…).")
     ANY_DEVICE = "Premier home trainer trouvé"
 
     def __init__(self, book: DeviceBook, parent: QWidget | None = None, *, current: PowerSource | None = None,
@@ -1227,7 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="poids du cycliste en kg, pour la pente simulée (remplace celui du profil)")
     parser.add_argument("--bricks", help="séance en notation briques")
     parser.add_argument("--trainer", choices=["sim", "ble", "ant"],
-                        help="home trainer : simulé, Wahoo Bluetooth ou Wahoo ANT+ "
+                        help="home trainer : simulé, Bluetooth (FTMS) ou ANT+ (FE-C) "
                              "(défaut : le dernier utilisé, sinon simulé)")
     parser.add_argument("--trainer-address", help="adresse Bluetooth du home trainer (sinon le premier trouvé)")
     parser.add_argument("--trainer-ant-id", type=int, default=0,

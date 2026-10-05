@@ -1,7 +1,7 @@
 # home-trainer
 
-Logiciel desktop (Python, multiplateforme) pour piloter un home trainer Wahoo
-en Bluetooth ou ANT+, lire des séances `.zwo`, `.erg`, `.mrc` (et `.fit`) et
+Logiciel desktop (Python, multiplateforme) pour piloter un home trainer
+connecté (Wahoo, Elite, Tacx, Saris… : Bluetooth FTMS ou ANT+ FE-C), lire des séances `.zwo`, `.erg`, `.mrc` (et `.fit`) et
 en composer en briques « x min à y watts ».
 
 ## État
@@ -18,7 +18,7 @@ en composer en briques « x min à y watts ».
 | Mode libre : ERG réglé à la main par pas de 5 W, ou pente simulée selon le poids, courbe en direct | ✅ `ui/free_ride.py` |
 | Parcours GPX : pente de la route simulée selon la distance parcourue, profil, carte | ✅ `route.py`, `ui/route_ride.py` |
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
-| Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
+| Pilotage du home trainer, toutes marques (Bluetooth FTMS + ancien protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 | Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
 | Profils de cyclistes (FTP, poids, comptes Strava / Nolio, sorties), choisis au lancement | ✅ `profiles.py`, `ui/profiles.py` |
 | Chaque sortie enregistrée en `.fit` d'activité, envoi automatique vers Strava et Nolio | ✅ `formats/fit_activity.py`, `sync/` |
@@ -139,7 +139,7 @@ home-trainer-gui --bricks "10m@150 3x(4m@105% 2m@55%) 10m@110"
 ```
 
 Profil complet de la séance coloré par zones, curseur d'avancement et
-puissance réalisée ; temps restant sur la brique et au total ; puissance,
+puissance réalisée, cadence (échelle en tr/min à droite) et cardio ; temps restant sur la brique et au total ; puissance,
 cible et cadence ; intensité réglable par pas de 1 % (boutons, ou ↑ ↓,
 appui long pour défiler). Espace = démarrer / pause, → = brique suivante.
 
@@ -147,6 +147,10 @@ Bouton **ERG on / off** (ou E) : ERG off, le home trainer passe en
 résistance libre (route plate, selon le poids) ; la séance continue de
 dérouler et la cible reste affichée pour la suivre à la main avec les
 vitesses. ERG on reprend la consigne de la brique en cours.
+
+Pendant une sortie (en cours ou en pause), le PC ne se met pas en veille et
+l'écran ne s'éteint pas (Windows) ; le réglage d'alimentation habituel revient
+dès la sortie terminée.
 
 Le home trainer réel et le simulateur (`ui/power.py`) offrent la même
 interface `PowerSource` (`set_target`, `read`), voir ci-dessous.
@@ -206,7 +210,7 @@ saisi à côté de la FTP.
 
 ![Parcours GPX](docs/parcours-gpx.png)
 
-## Pilotage du home trainer Wahoo
+## Pilotage du home trainer
 
 ```bash
 pip install -e ".[gui,ble]"            # Bluetooth (bleak)
@@ -219,8 +223,8 @@ home-trainer-gui                       # sans option : le dernier home trainer u
 ```
 
 Il se choisit aussi avec le bouton **Home trainer…** (recherche Bluetooth).
-Pédalez pour réveiller le Wahoo et fermez les autres applis qui pourraient
-le piloter (Wahoo, Zwift…) : un seul logiciel à la fois peut en prendre le
+Pédalez pour réveiller le home trainer et fermez les autres applis qui pourraient
+le piloter (Zwift, appli de la marque…) : un seul logiciel à la fois peut en prendre le
 contrôle. L'état de la connexion s'affiche à droite de la barre d'outils.
 
 - En séance, chaque brique est envoyée en **mode ERG** : le home trainer
@@ -230,7 +234,7 @@ contrôle. L'état de la connexion s'affiche à droite de la barre d'outils.
 - Avant le départ, en pause et en fin de séance, le home trainer passe en
   **résistance libre** (simulation d'une route plate) ; de même quand on
   quitte l'appli, pour ne pas rester bloqué sur la dernière consigne.
-- Bluetooth : protocole standard **FTMS** (KICKR, KICKR CORE, SNAP… à jour),
+- Bluetooth : protocole standard **FTMS** (Wahoo KICKR à jour, Elite, Tacx, Saris…),
   et en repli le protocole **Wahoo** des anciens firmwares (puissance par le
   service Cycling Power). ANT+ : profil **FE-C**, consigne renvoyée toutes
   les 5 s au cas où un message se perdrait.
@@ -295,7 +299,18 @@ d'elle-même** vers les comptes Strava et Nolio connectés.
 Une sortie se termine :
 
 - en fin de séance ou à l'arrivée d'un parcours, d'elle-même ;
-- avec le bouton **Terminer** (ou Ctrl+T), en séance, en mode libre ou sur un parcours ;
+- avec le bouton **Terminer** (ou Ctrl+T), en séance, en mode libre ou sur un parcours.
+
+Dans ces deux cas, la fenêtre **Enregistrer la sortie** s'ouvre : format
+(**.fit** par défaut, ou .tcx, ou .csv pour un tableur), nom du fichier et
+dossier (celui des sorties du profil, ou un autre avec **Parcourir…** ; il est
+reproposé la fois suivante). **Ne pas enregistrer** abandonne la sortie,
+**Annuler** ramène à la sortie, en pause. Le .fit est celui qui part vers
+Strava / Nolio ; avec un autre format, une copie .fit est gardée dans le
+dossier des sorties du profil pour l'envoi.
+
+Elle est aussi enregistrée d'elle-même, en .fit dans le dossier des sorties :
+
 - en changeant de séance, avec **Recommencer** / **Remettre à zéro**, ou en
   fermant l'appli (la sortie en cours n'est jamais perdue).
 
@@ -304,7 +319,7 @@ pédalage ne l'est pas). Sans vitesse donnée par
 le home trainer, elle est calculée comme sur la route (poids saisi, plat ou
 pente simulée), ce qui donne aussi la distance.
 
-Les fichiers vont dans le dossier `sorties` du profil
+Le dossier proposé est le dossier `sorties` du profil
 (`%APPDATA%\HomeTrainer\profils\<nom>\sorties` sous Windows,
 `~/.config/home-trainer/profils/<nom>/sorties` ailleurs) ; bouton **Ouvrir le dossier des sorties** dans la
 fenêtre **Strava / Nolio…**. Un envoi raté (pas de réseau, appli fermée
@@ -380,7 +395,7 @@ La fréquence n'est jamais estimée à partir de la puissance.
 
 `home_trainer.sensors.BackgroundSensor` est le socle commun : connexion
 dans un fil dédié, reconnexion, état lisible, dernière mesure (`latest()`)
-et péremption d'une mesure trop ancienne. Le pilote Wahoo s'en sert aussi.
+et péremption d'une mesure trop ancienne. Le pilote du home trainer s'en sert aussi.
 Les trames Bluetooth et ANT+ sont décodées par des fonctions pures, testées
 sans matériel (`tests/test_sensors.py`).
 

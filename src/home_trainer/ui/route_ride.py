@@ -15,7 +15,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
-from .chart import ACCENT, DEFAULT_FTP, HEART, MUTED, PANEL, POWER, TEXT, hms
+from .chart import ACCENT, CADENCE, DEFAULT_FTP, HEART, MUTED, PANEL, POWER, TEXT, hms
 from .free_ride import grade_color, grade_text
 from .metric import Metric
 from .power import Reading
@@ -208,7 +208,7 @@ class RoutePanel(QWidget):
         self.m_power = Metric("PUISSANCE", 44, POWER)
         self.m_heart = Metric("CARDIO", 44, HEART)
         self.m_remaining = Metric("RESTE", 44)
-        self.m_cadence = Metric("CADENCE", 26)
+        self.m_cadence = Metric("CADENCE", 26, CADENCE)
         self.m_speed = Metric("VITESSE", 26)
         self.m_time = Metric("TEMPS", 26)
         grid.addWidget(self.m_power, 0, 0)
