@@ -3,7 +3,7 @@ et mode libre (sans séance : puissance ERG réglée à la main par pas de 5 W,
 ou pente simulée par pas de 0,5 % selon le poids saisi à côté de la FTP),
 et parcours GPX (la pente de la route suit la distance parcourue).
 
-    home-trainer-gui [seance.erg | parcours.gpx] [--ftp 250] [--weight 70] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
+    home-trainer-gui [seance.erg | parcours.gpx] [--profile Basile] [--ftp 250] [--weight 70] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
                      [--trainer sim|ble|ant] [--trainer-address AA:BB:…] [--trainer-ant-id 12345]
                      [--hr ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
 
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBo
 from ..bricks import BrickSyntaxError, parse_workout
 from ..devices import DeviceBook, SavedDevice, ant_ident
 from ..formats import FormatError, save_workout
+from ..profiles import Profile, ProfileBook
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Slope, Trainer,
                        open_heart_rate_sensor)
@@ -46,6 +47,7 @@ from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
 from .loader import load_workout
 from .metric import Metric
+from .profiles import choose_profile
 from .power import PowerSource, SimulatedTrainer, open_power_source, road_speed_kmh
 from .route_ride import RoutePanel
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
@@ -83,8 +85,12 @@ class MainWindow(QMainWindow):
                  source: PowerSource | None = None,
                  heart_rate: BackgroundSensor[HeartRateReading] | None = None,
                  book: DeviceBook | None = None, accounts: AccountBook | None = None,
-                 outbox: Outbox | None = None) -> None:
+                 outbox: Outbox | None = None, profiles: ProfileBook | None = None,
+                 profile: Profile | None = None) -> None:
         super().__init__()
+        # Avec un profil, ses comptes et son dossier des sorties remplacent `accounts` et `outbox`.
+        self.profiles = profiles if profiles is not None else ProfileBook()
+        self.profile: Profile | None = None
         # Sans dossier des sorties (tests), les sorties ne sont ni enregistrées ni envoyées.
         self.accounts = accounts if accounts is not None else AccountBook()
         self.outbox = outbox
@@ -117,7 +123,10 @@ class MainWindow(QMainWindow):
         self.load(workout)
         self.set_power_source(self.source)
         self.set_heart_rate_sensor(heart_rate)
-        self.send_rides()  # sorties restées en attente la dernière fois
+        if profile is not None:
+            self.set_profile(profile)  # envoie aussi les sorties restées en attente
+        else:
+            self.send_rides()  # sorties restées en attente la dernière fois
 
     # --- construction ----------------------------------------------------
 
@@ -142,7 +151,15 @@ class MainWindow(QMainWindow):
             action.setToolTip(tip)
             action.triggered.connect(slot)
             bar.addAction(action)
-        bar.addSeparator()
+        # Deuxième rangée : qui roule, sur quoi, avec quels réglages.
+        self.addToolBarBreak()
+        bar = QToolBar("Cycliste et appareils")
+        bar.setMovable(False)
+        self.addToolBar(bar)
+        self.profile_action = QAction("Profil…", self)
+        self.profile_action.setToolTip("Changer de cycliste : FTP, poids, comptes Strava / Nolio et sorties")
+        self.profile_action.triggered.connect(self._choose_profile)
+        bar.addAction(self.profile_action)
         trainer_action = QAction("Home trainer…", self)
         trainer_action.triggered.connect(self._choose_trainer)
         bar.addAction(trainer_action)
@@ -383,6 +400,9 @@ class MainWindow(QMainWindow):
             self._refresh()
 
     def _weight_changed(self, kg: float) -> None:
+        if self.profile is not None and self.profile.weight_kg != kg:
+            self.profile.weight_kg = kg
+            self.profiles.save()
         self.free.rider_kg = kg
         self.session.rider_kg = kg
         if self.route is not None:
@@ -485,6 +505,9 @@ class MainWindow(QMainWindow):
         if self.ftp_box.value() == self.ftp:
             return
         self.ftp = self.ftp_box.value()
+        if self.profile is not None:
+            self.profile.ftp = int(self.ftp)
+            self.profiles.save()
         self.free.ftp = self.ftp
         if self.route is not None:
             self.route.ftp = self.ftp
@@ -670,7 +693,7 @@ class MainWindow(QMainWindow):
             active.pause()
             self._push_target()
         if len(active.samples) < MIN_RIDE_SAMPLES:
-            self.statusBar().showMessage("Sortie trop courte pour être enregistrée (moins d'une minute)", 8000)
+            self.statusBar().showMessage("Rien à enregistrer : la sortie n'a pas commencé", 8000)
         else:
             self.end_ride(active)
         if active is self.free:
@@ -735,6 +758,36 @@ class MainWindow(QMainWindow):
         if self._send_again:
             self._send_again = False
             self.send_rides()
+
+    # --- profils -----------------------------------------------------------
+
+    def set_profile(self, profile: Profile) -> None:
+        """Roule avec ce profil : sa FTP, son poids, ses comptes et son dossier des sorties.
+        Ce qui roulait pour le profil d'avant est enregistré dans ses sorties à lui."""
+        changed = self.profile is not None and self.profile.id != profile.id
+        if changed:
+            for session in (self.session, self.free, self.route):
+                if session is not None:
+                    session.pause()
+                    self.end_ride(session)
+        self.profile = profile
+        self.accounts = AccountBook.load(self.profiles.accounts_path(profile))
+        self.outbox = Outbox(self.profiles.rides_dir(profile))
+        if changed:  # on repart de zéro (rien à enregistrer : c'est déjà fait)
+            self._reset_free_ride()
+            self._reset_route()
+            self.load(self.session.workout)
+        self.ftp_box.setValue(int(profile.ftp))
+        self._ftp_changed()
+        self.weight_box.setValue(profile.weight_kg)
+        self.profile_action.setText(f"Profil : {profile.name}")
+        self.statusBar().showMessage(f"Profil : {profile.name}", 5000)
+        self.send_rides()
+
+    def _choose_profile(self) -> None:
+        profile = choose_profile(self.profiles, self.profile, self)
+        if profile is not None:
+            self.set_profile(profile)
 
     def _choose_accounts(self) -> None:
         outbox = self.outbox if self.outbox is not None else Outbox()
@@ -1168,8 +1221,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="home-trainer-gui", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("file", nargs="?", help="séance .erg, .mrc, .zwo ou .fit, ou parcours .gpx")
-    parser.add_argument("--ftp", type=float, default=DEFAULT_FTP)
-    parser.add_argument("--weight", type=float, help="poids du cycliste en kg, pour la pente simulée")
+    parser.add_argument("--profile", help="profil du cycliste (créé s'il n'existe pas) ; sinon choisi au lancement")
+    parser.add_argument("--ftp", type=float, help="FTP en watts (remplace celle du profil)")
+    parser.add_argument("--weight", type=float,
+                        help="poids du cycliste en kg, pour la pente simulée (remplace celui du profil)")
     parser.add_argument("--bricks", help="séance en notation briques")
     parser.add_argument("--trainer", choices=["sim", "ble", "ant"],
                         help="home trainer : simulé, Wahoo Bluetooth ou Wahoo ANT+ "
@@ -1193,7 +1248,16 @@ def main(argv: list[str] | None = None) -> int:
         app.setWindowIcon(QIcon(str(ICON)))
     # Sans option, on rebranche les appareils de la dernière fois (mémorisés dans le profil utilisateur).
     book = DeviceBook.load()
-    accounts = AccountBook.load()
+    profiles = ProfileBook.load()
+    profiles.migrate_legacy()  # comptes et sorties d'avant les profils → premier profil
+    if args.profile:
+        profile = profiles.find(args.profile) or profiles.create(args.profile)
+        profiles.last = profile.id
+        profiles.save()
+    else:
+        profile = profiles.startup_profile() or choose_profile(profiles, startup=True)
+    if profile is None:  # « Quitter » sur le choix du profil
+        return 0
     if args.hr is None:
         hr_kind, hr_address, hr_number = book.startup_choice("hr", ("ble", "ant", None), default=None)
     else:
@@ -1213,9 +1277,12 @@ def main(argv: list[str] | None = None) -> int:
         # Lancée depuis une icône, l'appli n'a pas de console : les erreurs s'affichent dans une fenêtre.
         QMessageBox.warning(None, "Briques invalides", str(e))
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
-    window = MainWindow(workout, args.ftp, source=source, heart_rate=heart_rate, book=book,
-                        accounts=accounts, outbox=Outbox())
+    window = MainWindow(workout, profile.ftp, source=source, heart_rate=heart_rate, book=book,
+                        profiles=profiles, profile=profile)
     window.resize(1240, 760)
+    if args.ftp:
+        window.ftp_box.setValue(int(args.ftp))
+        window._ftp_changed()
     if args.weight:
         window.weight_box.setValue(args.weight)
     window.set_library(Library.load(documents=documents_folder()))

@@ -55,11 +55,16 @@ def test_finish_button_saves_free_ride_and_resets(window):
     assert entry["title"] == "Mode libre"
 
 
-def test_short_ride_is_not_saved(window):
+def test_short_ride_is_saved(window):
     pedal(window.session, 30)
     window.finish_button.click()
-    assert not window.outbox.dir.exists() or not list(window.outbox.dir.glob("*.fit"))
+    assert len(list(window.outbox.dir.glob("*.fit"))) == 1
     assert window.session.samples == []
+
+
+def test_ride_without_pedaling_is_not_saved(window):
+    window.finish_button.click()
+    assert not window.outbox.dir.exists() or not list(window.outbox.dir.glob("*.fit"))
 
 
 def test_speed_is_estimated_without_trainer_speed(window):
@@ -88,3 +93,9 @@ def test_finish_button_saves_route_ride(window):
     [entry] = window.outbox.entries().values()
     assert entry["title"] == "Col test" and "arrêté avant l'arrivée" in entry["description"]
     assert window.route.samples == []
+
+
+def test_one_second_ride_is_saved(window):
+    pedal(window.session, 1)
+    window.finish_button.click()
+    assert len(list(window.outbox.dir.glob("*.fit"))) == 1
