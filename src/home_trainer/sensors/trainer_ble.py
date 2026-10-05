@@ -1,4 +1,4 @@
-"""Home trainer Bluetooth (Wahoo KICKR et compatibles) via `bleak`.
+"""Home trainer Bluetooth (FTMS : Wahoo, Elite, Tacx, Saris…) via `bleak`.
 
 Le protocole standard FTMS est utilisé quand le home trainer le propose ;
 sinon, on se rabat sur le protocole propriétaire Wahoo des anciens
@@ -37,7 +37,7 @@ class BleTrainer(Trainer):
         super().__init__(TargetThrottle(min_interval_s=1.0))
         self.address = address
         self.device_id = address
-        self.name = f"Wahoo Bluetooth {name or address or ''}".strip()
+        self.name = name or f"Home trainer Bluetooth {address or ''}".strip()
         self.protocol: str | None = None  # "FTMS" ou "Wahoo" une fois connecté
 
     def _run(self, stop: threading.Event) -> None:
@@ -57,7 +57,7 @@ class BleTrainer(Trainer):
         if device is None:
             self._set_state(SensorState.SEARCHING, "aucun home trainer à portée, pédalez pour le réveiller")
             return
-        self.name = f"Wahoo Bluetooth {device.name or device.address}"
+        self.name = device.name or f"Home trainer Bluetooth {device.address}"
         self.device_id = device.address
         disconnected = asyncio.Event()
         async with bleak.BleakClient(device, disconnected_callback=lambda _c: disconnected.set()) as client:

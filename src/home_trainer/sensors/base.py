@@ -1,6 +1,6 @@
 """Socle commun des capteurs : connexion en tâche de fond, état, dernière mesure.
 
-Un capteur (cardio Bluetooth ou ANT+, plus tard le home trainer Wahoo) tourne
+Un capteur (cardio Bluetooth ou ANT+, le home trainer) tourne
 dans son propre fil d'exécution : la radio ne bloque jamais l'interface. Il
 publie ses mesures avec `_publish`, et l'interface lit la plus récente avec
 `latest()` à son rythme. Une mesure trop vieille (capteur décroché, sangle

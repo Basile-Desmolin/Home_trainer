@@ -1,7 +1,7 @@
 """Sources de puissance : ce que l'interface attend d'un home trainer.
 
-Le pilotage réel (`home_trainer.sensors.open_trainer`, Wahoo en Bluetooth
-FTMS ou ANT+ FE-C) et `SimulatedTrainer` offrent la même interface. Le
+Le pilotage réel (`home_trainer.sensors.open_trainer`, Bluetooth FTMS
+ou ANT+ FE-C) et `SimulatedTrainer` offrent la même interface. Le
 simulateur imite un home trainer en mode ERG : la puissance mesurée rejoint
 la consigne en quelques secondes, avec un peu de bruit de pédalage. En pente
 (`Slope`), il imite un cycliste qui appuie plus fort quand ça monte : sa

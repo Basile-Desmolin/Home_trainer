@@ -15,7 +15,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  $l.TargetPath = '%ROOT%\.venv\Scripts\home-trainer-gui.exe';" ^
   "  $l.WorkingDirectory = '%ROOT%';" ^
   "  $l.IconLocation = '%ROOT%\src\home_trainer\ui\assets\icon.ico';" ^
-  "  $l.Description = 'Home trainer - seances et pilotage Wahoo';" ^
+  "  $l.Description = 'Home trainer - seances et pilotage du home trainer';" ^
   "  $l.Save() }" || goto :erreur
 echo.
 echo Raccourci "Home trainer" cree sur le Bureau et dans le menu Demarrer.

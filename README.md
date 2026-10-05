@@ -1,7 +1,7 @@
 # home-trainer
 
-Logiciel desktop (Python, multiplateforme) pour piloter un home trainer Wahoo
-en Bluetooth ou ANT+, lire des séances `.zwo`, `.erg`, `.mrc` (et `.fit`) et
+Logiciel desktop (Python, multiplateforme) pour piloter un home trainer
+connecté (Wahoo, Elite, Tacx, Saris… : Bluetooth FTMS ou ANT+ FE-C), lire des séances `.zwo`, `.erg`, `.mrc` (et `.fit`) et
 en composer en briques « x min à y watts ».
 
 ## État
@@ -18,7 +18,7 @@ en composer en briques « x min à y watts ».
 | Mode libre : ERG réglé à la main par pas de 5 W, ou pente simulée selon le poids, courbe en direct | ✅ `ui/free_ride.py` |
 | Parcours GPX : pente de la route simulée selon la distance parcourue, profil, carte | ✅ `route.py`, `ui/route_ride.py` |
 | Appli Windows avec icône (`HomeTrainer.exe`, raccourci) | ✅ `packaging/` |
-| Pilotage Wahoo (Bluetooth FTMS + protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
+| Pilotage du home trainer, toutes marques (Bluetooth FTMS + ancien protocole Wahoo, ANT+ FE-C), mode ERG | ✅ `src/home_trainer/sensors/trainer*.py`, pas encore essayé sur le vrai matériel |
 | Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
 | Profils de cyclistes (FTP, poids, comptes Strava / Nolio, sorties), choisis au lancement | ✅ `profiles.py`, `ui/profiles.py` |
 | Chaque sortie enregistrée en `.fit` d'activité, envoi automatique vers Strava et Nolio | ✅ `formats/fit_activity.py`, `sync/` |
@@ -210,7 +210,7 @@ saisi à côté de la FTP.
 
 ![Parcours GPX](docs/parcours-gpx.png)
 
-## Pilotage du home trainer Wahoo
+## Pilotage du home trainer
 
 ```bash
 pip install -e ".[gui,ble]"            # Bluetooth (bleak)
@@ -223,8 +223,8 @@ home-trainer-gui                       # sans option : le dernier home trainer u
 ```
 
 Il se choisit aussi avec le bouton **Home trainer…** (recherche Bluetooth).
-Pédalez pour réveiller le Wahoo et fermez les autres applis qui pourraient
-le piloter (Wahoo, Zwift…) : un seul logiciel à la fois peut en prendre le
+Pédalez pour réveiller le home trainer et fermez les autres applis qui pourraient
+le piloter (Zwift, appli de la marque…) : un seul logiciel à la fois peut en prendre le
 contrôle. L'état de la connexion s'affiche à droite de la barre d'outils.
 
 - En séance, chaque brique est envoyée en **mode ERG** : le home trainer
@@ -234,7 +234,7 @@ contrôle. L'état de la connexion s'affiche à droite de la barre d'outils.
 - Avant le départ, en pause et en fin de séance, le home trainer passe en
   **résistance libre** (simulation d'une route plate) ; de même quand on
   quitte l'appli, pour ne pas rester bloqué sur la dernière consigne.
-- Bluetooth : protocole standard **FTMS** (KICKR, KICKR CORE, SNAP… à jour),
+- Bluetooth : protocole standard **FTMS** (Wahoo KICKR à jour, Elite, Tacx, Saris…),
   et en repli le protocole **Wahoo** des anciens firmwares (puissance par le
   service Cycling Power). ANT+ : profil **FE-C**, consigne renvoyée toutes
   les 5 s au cas où un message se perdrait.
@@ -395,7 +395,7 @@ La fréquence n'est jamais estimée à partir de la puissance.
 
 `home_trainer.sensors.BackgroundSensor` est le socle commun : connexion
 dans un fil dédié, reconnexion, état lisible, dernière mesure (`latest()`)
-et péremption d'une mesure trop ancienne. Le pilote Wahoo s'en sert aussi.
+et péremption d'une mesure trop ancienne. Le pilote du home trainer s'en sert aussi.
 Les trames Bluetooth et ANT+ sont décodées par des fonctions pures, testées
 sans matériel (`tests/test_sensors.py`).
 

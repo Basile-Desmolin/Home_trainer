@@ -1213,14 +1213,14 @@ class HeartRateDialog(SensorDialog):
 
 
 class TrainerDialog(SensorDialog):
-    """Choix du home trainer : simulé, Wahoo en Bluetooth ou en ANT+."""
+    """Choix du home trainer : simulé, en Bluetooth ou en ANT+ (toutes marques)."""
 
     TITLE = "Home trainer"
     ROLE = "trainer"
-    KINDS = [("Simulé", "sim"), ("Wahoo Bluetooth", "ble"), ("Wahoo ANT+ (clé USB)", "ant")]
+    KINDS = [("Simulé", "sim"), ("Bluetooth (FTMS)", "ble"), ("ANT+ FE-C (clé USB)", "ant")]
     SIMULATED_TEXT = "Puissance imitée : rejoint la consigne en quelques secondes."
-    SCAN_TEXT = ("Recherche des home trainers Bluetooth (5 s)… Pédalez pour réveiller le Wahoo, "
-                 "et fermez les autres applis qui pourraient s'y connecter (Wahoo, Zwift…).")
+    SCAN_TEXT = ("Recherche des home trainers Bluetooth (5 s)… Pédalez pour réveiller le home trainer, "
+                 "et fermez les autres applis qui pourraient s'y connecter (Zwift, appli de la marque…).")
     ANY_DEVICE = "Premier home trainer trouvé"
 
     def __init__(self, book: DeviceBook, parent: QWidget | None = None, *, current: PowerSource | None = None,
@@ -1299,7 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="poids du cycliste en kg, pour la pente simulée (remplace celui du profil)")
     parser.add_argument("--bricks", help="séance en notation briques")
     parser.add_argument("--trainer", choices=["sim", "ble", "ant"],
-                        help="home trainer : simulé, Wahoo Bluetooth ou Wahoo ANT+ "
+                        help="home trainer : simulé, Bluetooth (FTMS) ou ANT+ (FE-C) "
                              "(défaut : le dernier utilisé, sinon simulé)")
     parser.add_argument("--trainer-address", help="adresse Bluetooth du home trainer (sinon le premier trouvé)")
     parser.add_argument("--trainer-ant-id", type=int, default=0,
