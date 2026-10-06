@@ -113,6 +113,16 @@ class WorkoutChart(QWidget):
         def y(w: float) -> float:
             return area.bottom() - w / peak * area.height()
 
+        # Échelle de la fréquence cardiaque (cibles d'une séance en FC et FC mesurée).
+        heart = [(x_.t, x_.heart_rate_bpm) for x_ in s.samples if x_.heart_rate_bpm]
+        bpms = [b for _, b in heart] + [seg.target_bpm(t) for seg in s.segments if seg.step.heart_rate
+                                         for t in (0, seg.duration_s or 0)]
+        lo = min([60] + [b - 5 for b in bpms])
+        hi = max([200] + [b + 5 for b in bpms])
+
+        def yh(bpm: float) -> float:
+            return area.bottom() - (bpm - lo) / (hi - lo) * area.height()
+
         # Graduations : FTP et axe du temps.
         p.setFont(QFont(self.font().family(), 8))
         p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
@@ -131,22 +141,28 @@ class WorkoutChart(QWidget):
             if not seg.duration_s:
                 continue
             x0, x1 = x(seg.start_s), x(seg.start_s + seg.duration_s)
-            w0 = seg.target_w(0) or 0
-            w1 = seg.target_w(seg.duration_s) or 0
             path = QPainterPath(QPointF(x0, area.bottom()))
-            path.lineTo(x0, y(max(w0, peak * 0.03)))
-            path.lineTo(x1, y(max(w1, peak * 0.03)))
+            if seg.low_w is None and seg.step.heart_rate is not None:  # cible en FC, sans puissance
+                path.lineTo(x0, yh(seg.target_bpm(0)))
+                path.lineTo(x1, yh(seg.target_bpm(seg.duration_s)))
+                color = QColor(HEART)
+                color.setAlpha(150)
+            else:
+                w0 = seg.target_w(0) or 0
+                w1 = seg.target_w(seg.duration_s) or 0
+                path.lineTo(x0, y(max(w0, peak * 0.03)))
+                path.lineTo(x1, y(max(w1, peak * 0.03)))
+                color = zone_color(seg.target_w(seg.duration_s / 2), ftp)
             path.lineTo(x1, area.bottom())
             path.closeSubpath()
-            color = zone_color(seg.target_w(seg.duration_s / 2), ftp)
             if self.preview:
                 current = any(seg.step is step for step in self.highlight)
             else:
                 current = i == s.index
                 if i < s.index:
-                    color.setAlpha(90)
+                    color.setAlpha(min(color.alpha(), 90))
                 elif i > s.index:
-                    color.setAlpha(190)
+                    color.setAlpha(min(color.alpha(), 190))
             p.fillPath(path, color)
             if current:
                 p.setPen(QPen(QColor(TEXT), 2))
@@ -178,18 +194,12 @@ class WorkoutChart(QWidget):
         draw_cadence(p, area, s.samples, x, area.right() + 6)
 
         # Fréquence cardiaque, sur sa propre échelle (graduée à droite).
-        heart = [(x_.t, x_.heart_rate_bpm) for x_ in s.samples if x_.heart_rate_bpm]
-        if len(heart) > 1:
-            lo = min(60, min(b for _, b in heart) - 5)
-            hi = max(200, max(b for _, b in heart) + 5)
-
-            def yh(bpm: float) -> float:
-                return area.bottom() - (bpm - lo) / (hi - lo) * area.height()
-
+        if len(heart) > 1 or any(seg.low_w is None and seg.step.heart_rate for seg in s.segments):
             p.setPen(QColor(HEART))
             for bpm in range(int(lo // 20 + 1) * 20, int(hi), 40):
                 p.drawText(QRectF(area.right() - 40, yh(bpm) - 8, 38, 16), Qt.AlignRight | Qt.AlignVCenter,
                            f"{bpm}")
+        if len(heart) > 1:
             path = QPainterPath(QPointF(x(heart[0][0]), yh(heart[0][1])))
             for t_, bpm in heart[1:]:
                 path.lineTo(x(t_), yh(bpm))

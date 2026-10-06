@@ -27,10 +27,11 @@ def merge_steady(items: list[Item]) -> list[Item]:
         prev = out[-1] if out else None
         if (isinstance(prev, Step) and isinstance(step, Step) and not prev.is_ramp and not step.is_ramp
                 and prev.duration_s is not None and step.duration_s is not None
-                and (prev.power, prev.name, prev.intensity, prev.notes)
-                == (step.power, step.name, step.intensity, step.notes)):
+                and prev.heart_rate_end is None and step.heart_rate_end is None
+                and (prev.power, prev.name, prev.intensity, prev.notes, prev.heart_rate)
+                == (step.power, step.name, step.intensity, step.notes, step.heart_rate)):
             out[-1] = Step(prev.duration_s + step.duration_s, prev.power, prev.name,
-                           prev.intensity, prev.notes)
+                           prev.intensity, prev.notes, heart_rate=prev.heart_rate)
         else:
             out.append(step)
     return out
