@@ -34,6 +34,8 @@ def decode_workout(data: bytes, ext: str, warnings: list[str] | None = None,
 def encode_workout(workout: Workout, ext: str, ftp: float | None = None) -> bytes:
     """Encode la séance. `ftp` sert à convertir watts et % FTP quand le format l'exige."""
     ext = _check_ext(ext)
+    if workout.uses_heart_rate and not workout.has_power_targets and ext != ".erg":
+        raise FormatError("séance en fréquence cardiaque : seul le format .erg sait l'enregistrer")
     if ext == ".zwo":
         return zwo.encode(workout, ftp)
     if ext == ".erg":

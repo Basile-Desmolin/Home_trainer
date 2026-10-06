@@ -148,6 +148,15 @@ résistance libre (route plate, selon le poids) ; la séance continue de
 dérouler et la cible reste affichée pour la suivre à la main avec les
 vitesses. ERG on reprend la consigne de la brique en cours.
 
+**Séances en fréquence cardiaque** : certains `.erg` donnent les cibles en FC
+(`MINUTES HR`, `BPM`, `HEARTRATE`…). À l'ouverture, une fenêtre propose :
+- **Sans ERG** : résistance libre, la FC cible s'affiche (en bpm) et l'on
+  règle l'effort avec les vitesses ;
+- **En puissance** : chaque cible de FC devient un % FTP d'après la **FC max**
+  (gardée dans le profil). La FC au seuil est estimée à 90 % de la FC max et
+  les zones de FC de Coggan sont reliées aux zones de puissance
+  (`heart_zones.py`) ; la FC cible reste affichée sous la cible en watts.
+
 Pendant une sortie (en cours ou en pause), le PC ne se met pas en veille et
 l'écran ne s'éteint pas (Windows) ; le réglage d'alimentation habituel revient
 dès la sortie terminée.
@@ -404,7 +413,7 @@ sans matériel (`tests/test_sensors.py`).
 | Extension | Puissance | Ce qui se perd à l'écriture |
 | --- | --- | --- |
 | `.zwo` (Zwift) | % FTP | plages (→ valeur moyenne) ; répétitions autres que on/off dépliées |
-| `.erg` | watts | répétitions dépliées, plages (→ moyenne), noms |
+| `.erg` | watts (ou FC en bpm) | répétitions dépliées, plages (→ moyenne), noms |
 | `.mrc` | % FTP | idem `.erg` |
 | `.fit` | watts ou % FTP | rampes écrites en paliers d'une minute |
 

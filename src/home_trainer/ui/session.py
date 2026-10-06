@@ -166,6 +166,12 @@ class WorkoutSession:
         return None if seg is None else seg.target_w(self.step_elapsed_s)
 
     @property
+    def target_bpm(self) -> float | None:
+        """FC cible de la brique en cours, pour une séance donnée en fréquence cardiaque."""
+        seg = self.segment
+        return None if seg is None else seg.target_bpm(self.step_elapsed_s)
+
+    @property
     def target_w(self) -> float | None:
         base = self.base_target_w
         return None if base is None else base * self.intensity_pct / 100
