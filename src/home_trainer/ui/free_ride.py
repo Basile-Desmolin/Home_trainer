@@ -11,12 +11,12 @@ porte la logique, testée sans Qt).
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from .chart import (ACCENT, CADENCE, DEFAULT_FTP, HEART, MUTED, TEXT, draw_cadence, draw_cursor, draw_power, hms,
-                    paint_panel, zone_color)
+from .chart import (ACCENT, CADENCE, DEFAULT_FTP, HEART, HEART_SMOOTH_S, MUTED, TEXT, draw_cadence, draw_cursor,
+                    draw_power, hms, paint_panel, smooth, trace, zone_color)
 from .gauges import ZoneBar
 from .metric import Metric
 from .power import Reading
@@ -118,7 +118,7 @@ class FreeRideChart(QWidget):
                        grade_text(s.grade_pct))
 
         # Puissance réalisée.
-        draw_power(p, [(x(x_.t), y(x_.power_w)) for x_ in samples])
+        draw_power(p, samples, x, y)
 
         # Cadence, sur sa propre échelle (graduée dans la marge de droite).
         draw_cadence(p, area, samples, x, area.right() + 6)
@@ -136,11 +136,8 @@ class FreeRideChart(QWidget):
             for bpm in range(int(lo // 20 + 1) * 20, int(hi), 40):
                 p.drawText(QRectF(area.right() - 40, yh(bpm) - 8, 38, 16), Qt.AlignRight | Qt.AlignVCenter,
                            f"{bpm}")
-            path = QPainterPath(QPointF(x(heart[0][0]), yh(heart[0][1])))
-            for t_, bpm in heart[1:]:
-                path.lineTo(x(t_), yh(bpm))
             p.setPen(QPen(QColor(HEART), 1.4))
-            p.drawPath(path)
+            p.drawPath(trace(smooth(heart, HEART_SMOOTH_S), x, yh))
 
         # Instant présent.
         last = samples[-1] if samples else None
