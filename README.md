@@ -22,7 +22,7 @@ en composer en briques « x min à y watts ».
 | Appareils mémorisés, renommables, reconnexion au lancement | ✅ `src/home_trainer/devices.py` |
 | Profils de cyclistes (FTP, poids, comptes Strava / Nolio, sorties), choisis au lancement | ✅ `profiles.py`, `ui/profiles.py` |
 | Chaque sortie enregistrée en `.fit` d'activité, envoi automatique vers Strava et Nolio | ✅ `formats/fit_activity.py`, `sync/` |
-| Calibration (spindown) guidée : *Home trainer…* → *Calibrer…* (FTMS, protocole Wahoo, ANT+ FE-C) | ✅ `ui/calibration.py`, pas encore essayée sur le vrai matériel |
+| Calibration (spindown) guidée : pastille *Home trainer* → *Calibrer…* (FTMS, protocole Wahoo, ANT+ FE-C) | ✅ `ui/calibration.py`, pas encore essayée sur le vrai matériel |
 
 ## Lancer l'appli sous Windows (icône)
 
@@ -43,7 +43,7 @@ sur le Bureau et dans le menu Démarrer. Pour fabriquer soi-même le `.exe` :
 
 ## Bibliothèque des séances
 
-Bouton **Bibliothèque…** (Ctrl+B) : toutes les séances `.zwo`, `.mrc`, `.erg`
+Onglet **Bibliothèque** (Ctrl+B) : toutes les séances `.zwo`, `.mrc`, `.erg`
 et `.fit` d'un dossier et de ses sous-dossiers, avec leur durée, un petit
 profil et un TSS approché. La recherche ignore majuscules et accents et porte
 sur le nom, le sous-dossier et la description ; un menu filtre par durée. Un
@@ -111,10 +111,16 @@ mode ERG.
 
 ## Interface graphique
 
-Barre d'outils : **Nouvelle…** (Ctrl+N) et **Modifier…** (Ctrl+E) ouvrent
-l'éditeur de séance, **Ouvrir…** (Ctrl+O) lit un `.zwo`, `.mrc`, `.erg` ou
-`.fit`, **Enregistrer sous…** (Ctrl+S) écrit la séance affichée dans l'un de
-ces formats (choisi dans la liste « Type »).
+Bandeau du haut : à gauche les onglets **Séance**, **Libre** et **Parcours**,
+la **Bibliothèque** et le menu **Fichier** ; à droite, en pastilles, le home
+trainer et le cardio (point vert : connecté, orange : connexion en cours ou
+signal perdu, gris : simulé ou aucun ; un clic pour en changer), la **FTP** et
+le **poids** (à taper ou à la molette) et le **profil**.
+
+Menu **Fichier** : **Nouvelle séance…** (Ctrl+N) et **Modifier la séance…**
+(Ctrl+E) ouvrent l'éditeur de séance, **Ouvrir…** (Ctrl+O) lit un `.zwo`,
+`.mrc`, `.erg` ou `.fit`, **Enregistrer sous…** (Ctrl+S) écrit la séance
+affichée dans l'un de ces formats (choisi dans la liste « Type »).
 
 ![Éditeur de séance](docs/editeur.png)
 
@@ -138,10 +144,21 @@ home-trainer-gui tests/data/velo-route.erg --ftp 250
 home-trainer-gui --bricks "10m@150 3x(4m@105% 2m@55%) 10m@110"
 ```
 
-Profil complet de la séance coloré par zones, curseur d'avancement et
-puissance réalisée, cadence (échelle en tr/min à droite) et cardio ; temps restant sur la brique et au total ; puissance,
-cible et cadence ; intensité réglable par pas de 1 % (boutons, ou ↑ ↓,
-appui long pour défiler). Espace = démarrer / pause, → = brique suivante.
+![Séance](docs/interface.png)
+
+Profil complet de la séance coloré par zones (briques passées estompées, brique
+en cours cerclée de blanc), curseur d'avancement et puissance réalisée, cadence
+(échelle en tr/min à droite) et cardio. Les cartes Puissance et Cible prennent
+la couleur de la zone de la brique en cours, la cible affiche sa zone
+(« Z4 · Seuil · 95 % FTP ») et la suivante, un anneau se vide avec le temps
+restant sur la brique, et la barre des 7 zones sous la puissance allume celle
+où l'on roule. Temps restant au total, cadence, cardio ; intensité réglable
+par pas de 1 % (boutons, ou ↑ ↓, appui long pour défiler). Espace = démarrer
+/ pause, → = brique suivante.
+
+Les chiffres sont en Barlow Condensed et l'interface en Barlow (polices
+libres, licence OFL, embarquées dans `ui/assets/fonts`) ; couleurs, feuille
+de style et icônes des boutons sont dans `ui/theme.py`.
 
 Bouton **ERG on / off** (ou E) : ERG off, le home trainer passe en
 résistance libre (route plate, selon le poids) ; la séance continue de
@@ -158,7 +175,7 @@ La logique de déroulé (`ui/session.py`) ne dépend pas de Qt et est testée.
 
 ### Mode libre
 
-Bouton **Mode libre** (ou Ctrl+L) : pas de séance, on règle la consigne ERG
+Onglet **Libre**, bouton **Mode libre** (ou Ctrl+L) : pas de séance, on règle la consigne ERG
 à la main, en direct, par pas de 5 W (boutons −5 / +5, ou ↑ ↓) et de 25 W
 (boutons −25 / +25, ou Page↑ Page↓), appui long pour défiler. Elle part de
 60 % de la FTP. Puissance, moyenne, cadence, cardio et temps s'affichent,
@@ -222,10 +239,10 @@ home-trainer-gui --trainer sim         # home trainer simulé
 home-trainer-gui                       # sans option : le dernier home trainer utilisé (sinon simulé)
 ```
 
-Il se choisit aussi avec le bouton **Home trainer…** (recherche Bluetooth).
+Il se choisit aussi d'un clic sur la pastille du home trainer, en haut à droite (recherche Bluetooth).
 Pédalez pour réveiller le home trainer et fermez les autres applis qui pourraient
 le piloter (Zwift, appli de la marque…) : un seul logiciel à la fois peut en prendre le
-contrôle. L'état de la connexion s'affiche à droite de la barre d'outils.
+contrôle. L'état de la connexion s'affiche dans cette pastille.
 
 - En séance, chaque brique est envoyée en **mode ERG** : le home trainer
   règle la résistance pour tenir la cible, quelle que soit la cadence. Les
@@ -250,10 +267,10 @@ Les trames sont encodées et décodées par des fonctions pures
 
 Chaque home trainer ou ceinture cardio qui se connecte est **mémorisé** avec
 son adresse Bluetooth ou son numéro ANT+ (même choisi en « premier trouvé ») :
-il apparaît ensuite en tête de la liste **Appareil** des boutons
-**Home trainer…** et **Cardio…**. En le choisissant, on peut le **renommer**
+il apparaît ensuite en tête de la liste **Appareil** des pastilles
+home trainer et cardio. En le choisissant, on peut le **renommer**
 (« Kickr du salon », « Ceinture Polar »…, Entrée pour valider) ou
-l'**oublier**. Le nom choisi s'affiche dans la barre d'outils et sur la tuile
+l'**oublier**. Le nom choisi s'affiche dans la pastille et sur la tuile
 cardio. Au lancement, l'appli **se reconnecte** d'elle-même aux derniers
 appareils choisis ; les options `--trainer` et `--hr` passent outre.
 
@@ -269,12 +286,12 @@ Au lancement, l'appli demande **qui roule** : on choisit un profil ou on en
 crée un (**Nouveau** : nom, FTP, poids). Chaque profil a sa propre **FTP**,
 son **poids**, ses **comptes Strava / Nolio** et ses **sorties** (avec leurs
 envois en attente) ; les appareils mémorisés et le dossier de la bibliothèque
-sont communs. FTP et poids changés dans la barre d'outils (ou dans l'éditeur)
+sont communs. FTP et poids changés dans leurs pastilles (ou dans l'éditeur)
 sont gardés dans le profil.
 
 - **Se souvenir de mon choix** : l'appli reprend directement le dernier
-  profil, sans demander. Pour changer de cycliste ou décocher, bouton
-  **Profil : …** dans la barre d'outils. En changeant de profil, la sortie en
+  profil, sans demander. Pour changer de cycliste ou décocher, pastille
+  **Profil : …** en haut à droite, **Changer de cycliste…**. En changeant de profil, la sortie en
   cours est enregistrée pour le profil d'avant.
 - `home-trainer-gui --profile Camille` choisit (ou crée) le profil sans
   demander ; `--ftp` et `--weight` changent alors ses valeurs.
@@ -339,7 +356,7 @@ sienne, gratuitement, en deux minutes.
    **Domaine du rappel d'autorisation : `localhost`**. Strava demande ensuite
    une icône (n'importe quelle image).
 3. Copier le **Client ID** et le **Client Secret** affichés dans la fenêtre
-   **Strava / Nolio…** de l'appli, puis **Se connecter** : le navigateur
+   **Strava / Nolio…** de l'appli (pastille **Profil** → **Comptes Strava / Nolio…**), puis **Se connecter** : le navigateur
    s'ouvre sur Strava, accepter « Importer des activités ». C'est fini, la
    page indique « Connexion réussie ».
 
@@ -380,7 +397,7 @@ home-trainer-gui --hr aucun            # sans ceinture cardio
 home-trainer-gui                       # sans option : la dernière ceinture utilisée (sinon aucune)
 ```
 
-Le capteur se choisit aussi en cours de route avec le bouton **Cardio…**
+Le capteur se choisit aussi en cours de route d'un clic sur la pastille cardio
 (recherche des ceintures Bluetooth à portée). La fréquence s'affiche en
 grand avec la moyenne de la séance, et sa courbe se superpose au profil
 (échelle en bpm à droite). Sans ceinture, ou tant qu'aucune fréquence

@@ -11,15 +11,17 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
-from .chart import ACCENT, CADENCE, DEFAULT_FTP, HEART, MUTED, PANEL, POWER, TEXT, hms
+from .chart import ACCENT, CADENCE, DEFAULT_FTP, HEART, MUTED, TEXT, hms, paint_panel
 from .free_ride import grade_color, grade_text
+from .gauges import ZoneBar
 from .metric import Metric
 from .power import Reading
 from .session import DIFFICULTY_STEP, RouteSession, State
+from .theme import icon, keycaps, number_font, zone_index
 
 AHEAD_M = 2000.0  # le zoom montre les 2 km à venir
 BEHIND_M = 200.0
@@ -63,8 +65,7 @@ class RouteProfile(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802 (API Qt)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(PANEL))
+        paint_panel(p, self)
         s = self.session
         if s is None:
             return
@@ -114,7 +115,6 @@ class RouteProfile(QWidget):
         p.drawPath(path)
 
         # Graduations : altitude à gauche, kilomètres en bas.
-        p.setFont(QFont(self.font().family(), 8))
         p.setPen(QColor(MUTED))
         for ele in (lo + (hi - lo) * 0.1, lo + (hi - lo) * 0.9):
             p.drawText(QRectF(0, y(ele) - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, f"{ele:.0f} m")
@@ -151,8 +151,7 @@ class RouteMap(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802 (API Qt)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(PANEL))
+        paint_panel(p, self)
         s = self.session
         if s is None:
             return
@@ -205,7 +204,9 @@ class RoutePanel(QWidget):
 
         grid = QGridLayout()
         grid.setSpacing(10)
-        self.m_power = Metric("PUISSANCE", 44, POWER)
+        self.m_power = Metric("PUISSANCE", 44)
+        self.power_zones = ZoneBar()
+        self.m_power.add(self.power_zones)
         self.m_heart = Metric("CARDIO", 44, HEART)
         self.m_remaining = Metric("RESTE", 44)
         self.m_cadence = Metric("CADENCE", 26, CADENCE)
@@ -237,17 +238,21 @@ class RoutePanel(QWidget):
         layout.addWidget(self.profile, 2)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         self.play_button = QPushButton("Démarrer")
         self.play_button.setObjectName("play")
         self.reset_button = QPushButton("Recommencer")
+        self.reset_button.setIcon(icon("restart"))
         self.finish_button = QPushButton("Terminer")
+        self.finish_button.setIcon(icon("flag"))
         self.back_button = QPushButton("Retour à la séance")
+        self.back_button.setIcon(icon("back"))
         for b in (self.play_button, self.reset_button, self.finish_button, self.back_button):
             b.setFocusPolicy(Qt.NoFocus)
+            b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
         buttons.addStretch(1)
-        hint = QLabel("Espace : pause   ↑ ↓ : difficulté ±10 %")
-        hint.setObjectName("metricSub")
+        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] difficulté ±10 %"))
         buttons.addWidget(hint)
         layout.addLayout(buttons)
 
@@ -261,10 +266,7 @@ class RoutePanel(QWidget):
         title.setObjectName("metricTitle")
         layout.addWidget(title)
         self.grade_label = QLabel("—")
-        font = QFont()
-        font.setPointSize(52)
-        font.setBold(True)
-        self.grade_label.setFont(font)
+        self.grade_label.setFont(number_font(72))
         self.grade_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.grade_label, 1)
         self.grade_sub = QLabel("")
@@ -305,6 +307,8 @@ class RoutePanel(QWidget):
         if average is not None:
             sub += f"{' · ' if sub else ''}moy. {average:.0f} W"
         self.m_power.set(f"{r.power_w:.0f} W" if r else "—", sub)
+        self.power_zones.set_zone(zone_index(r.power_w if r else None, ftp))
+        self.m_power.set_tint(route_grade_color(session.grade_pct) if session.state is State.RUNNING else None)
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
 
         grade = session.grade_pct
@@ -332,5 +336,6 @@ class RoutePanel(QWidget):
         }.get(session.state, ""))
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(session.state, "Démarrer"))
+        self.play_button.setIcon(icon("pause" if session.state is State.RUNNING else "play", "#18191c"))
         for chart in (self.ahead, self.profile, self.map):
             chart.update()

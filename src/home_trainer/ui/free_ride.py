@@ -11,14 +11,17 @@ porte la logique, testée sans Qt).
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from .chart import ACCENT, CADENCE, DEFAULT_FTP, HEART, MUTED, PANEL, POWER, TEXT, draw_cadence, hms, zone_color
+from .chart import (ACCENT, CADENCE, DEFAULT_FTP, HEART, MUTED, TEXT, draw_cadence, draw_cursor, draw_power, hms,
+                    paint_panel, zone_color)
+from .gauges import ZoneBar
 from .metric import Metric
 from .power import Reading
 from .session import FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, State
+from .theme import icon, keycaps, number_font, zone_index
 
 BIG_STEP_W = 25
 BIG_STEP_PCT = 2.0
@@ -53,8 +56,7 @@ class FreeRideChart(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802 (API Qt)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(PANEL))
+        paint_panel(p, self)
         s = self.session
         if s is None:
             return
@@ -82,7 +84,6 @@ class FreeRideChart(QWidget):
             return area.bottom() - (grade - g_lo) / (g_hi - g_lo) * area.height() * 0.6
 
         # Graduations : FTP et axe du temps (une marque par minute).
-        p.setFont(QFont(self.font().family(), 8))
         p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
         p.drawLine(QPointF(area.left(), y(ftp)), QPointF(area.right(), y(ftp)))
         p.drawText(QRectF(0, y(ftp) - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, "FTP")
@@ -117,12 +118,7 @@ class FreeRideChart(QWidget):
                        grade_text(s.grade_pct))
 
         # Puissance réalisée.
-        if len(samples) > 1:
-            path = QPainterPath(QPointF(x(samples[0].t), y(samples[0].power_w)))
-            for sample in samples[1:]:
-                path.lineTo(x(sample.t), y(sample.power_w))
-            p.setPen(QPen(QColor(POWER), 1.6))
-            p.drawPath(path)
+        draw_power(p, [(x(x_.t), y(x_.power_w)) for x_ in samples])
 
         # Cadence, sur sa propre échelle (graduée dans la marge de droite).
         draw_cadence(p, area, samples, x, area.right() + 6)
@@ -147,8 +143,9 @@ class FreeRideChart(QWidget):
             p.drawPath(path)
 
         # Instant présent.
-        p.setPen(QPen(QColor(TEXT), 2))
-        p.drawLine(QPointF(x(now), area.top()), QPointF(x(now), area.bottom()))
+        last = samples[-1] if samples else None
+        draw_cursor(p, x(now), area.top(), area.bottom(),
+                    y(last.power_w) if last is not None and abs(x(last.t) - x(now)) < 6 else None)
 
 
 class FreeRidePanel(QWidget):
@@ -166,8 +163,10 @@ class FreeRidePanel(QWidget):
 
         grid = QGridLayout()
         grid.setSpacing(10)
-        self.m_power = Metric("PUISSANCE", 52, POWER)
-        self.m_heart = Metric("CARDIO", 52, HEART)
+        self.m_power = Metric("PUISSANCE", 52)
+        self.power_zones = ZoneBar()
+        self.m_power.add(self.power_zones)
+        self.m_heart = Metric("CARDIO", 40, HEART)
         self.m_time = Metric("TEMPS", 30)
         self.m_cadence = Metric("CADENCE", 30, CADENCE)
         grid.addWidget(self.m_power, 0, 0)
@@ -187,17 +186,21 @@ class FreeRidePanel(QWidget):
         layout.addWidget(self.chart, 1)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         self.play_button = QPushButton("Démarrer")
         self.play_button.setObjectName("play")
         self.reset_button = QPushButton("Remettre à zéro")
+        self.reset_button.setIcon(icon("restart"))
         self.finish_button = QPushButton("Terminer")
+        self.finish_button.setIcon(icon("flag"))
         self.back_button = QPushButton("Retour à la séance")
+        self.back_button.setIcon(icon("back"))
         for b in (self.play_button, self.reset_button, self.finish_button, self.back_button):
             b.setFocusPolicy(Qt.NoFocus)
+            b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
         buttons.addStretch(1)
         self.hint = QLabel()
-        self.hint.setObjectName("metricSub")
         buttons.addWidget(self.hint)
         layout.addLayout(buttons)
         self._set_mode_labels(FreeMode.ERG)
@@ -228,12 +231,8 @@ class FreeRidePanel(QWidget):
         self.mode_buttons[FreeMode.ERG].setChecked(True)
         layout.addLayout(top)
         self.target_label = QLabel("—")
-        font = QFont()
-        font.setPointSize(64)
-        font.setBold(True)
-        self.target_label.setFont(font)
+        self.target_label.setFont(number_font(84))
         self.target_label.setAlignment(Qt.AlignCenter)
-        self.target_label.setStyleSheet(f"color: {ACCENT};")
         layout.addWidget(self.target_label, 1)
         self.target_sub = QLabel("")
         self.target_sub.setObjectName("metricSub")
@@ -268,8 +267,8 @@ class FreeRidePanel(QWidget):
                 step = BIG_STEP_PCT if big else GRADE_STEP_PCT
                 text = ("+" if direction > 0 else "−") + grade_text(step).replace(" ", "\u202f")
             b.setText(text.replace("-", "−"))
-        self.hint.setText("Espace : pause   ↑ ↓ : ±5 W   Pg↑ Pg↓ : ±25 W" if erg
-                          else "Espace : pause   ↑ ↓ : ±0,5 %   Pg↑ Pg↓ : ±2 %")
+        self.hint.setText(keycaps("[Espace] pause   [↑] [↓] ±5 W   [Pg↑] [Pg↓] ±25 W" if erg
+                                  else "[Espace] pause   [↑] [↓] ±0,5 %   [Pg↑] [Pg↓] ±2 %"))
 
     def refresh(self, session: FreeRideSession, reading: Reading | None) -> None:
         ftp = session.ftp or DEFAULT_FTP
@@ -279,7 +278,13 @@ class FreeRidePanel(QWidget):
         if average is not None:
             sub += f"{' · ' if sub else ''}moy. {average:.0f} W"
         self.m_power.set(f"{r.power_w:.0f} W" if r else "—", sub)
+        self.power_zones.set_zone(zone_index(r.power_w if r else None, ftp))
         erg = session.mode is FreeMode.ERG
+        # En ERG, la carte prend la couleur de la zone de la consigne ; en pente, celle de la pente.
+        color = zone_color(session.target_w, ftp) if erg else grade_color(session.grade_pct)
+        self.m_power.set_tint(color if session.state is State.RUNNING else None)
+        dim = erg and zone_index(session.target_w, ftp) == 0  # récup (grise) : chiffres en blanc
+        self.target_label.setStyleSheet(f"color: {TEXT if dim else color.name()};")
         self._set_mode_labels(session.mode)
         if erg:
             self.target_label.setText(f"{session.target_w} W")
@@ -300,4 +305,5 @@ class FreeRidePanel(QWidget):
         }.get(session.state, ""))
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre"}.get(session.state,
                                                                                          "Démarrer"))
+        self.play_button.setIcon(icon("pause" if session.state is State.RUNNING else "play", "#18191c"))
         self.chart.update()

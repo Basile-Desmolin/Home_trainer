@@ -3,25 +3,15 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .session import WorkoutSession
+from .theme import (ACCENT, BG, CADENCE, HEART, MUTED, PANEL, POWER, TEXT, ZONES,  # noqa: F401 (réexportés)
+                    ui_font)
 
 DEFAULT_FTP = 250
-
-BG = "#16181d"
-PANEL = "#20242c"
-TEXT = "#e8eaed"
-MUTED = "#8b919c"
-ACCENT = "#ffd24a"
-POWER = "#4fc3f7"
-HEART = "#ff5c6c"
-CADENCE = "#b6e36b"
-
-# Zones de Coggan (borne haute en % FTP) et couleurs associées.
-ZONES = [(55, "#7f8c9a"), (76, "#3d8bd9"), (91, "#3fb37f"), (106, "#e7c43a"),
-         (121, "#f08a2c"), (151, "#e5484d"), (10_000, "#b84ae0")]
+RADIUS = 12  # coins des cartes et des graphiques
 
 
 def zone_color(watts: float | None, ftp: float) -> QColor:
@@ -62,6 +52,59 @@ def draw_cadence(p: QPainter, area: QRectF, samples, x, labels_left: float) -> N
     p.drawPath(path)
 
 
+def paint_panel(p: QPainter, widget: QWidget) -> None:
+    """Fond d'un graphique : carte aux coins arrondis, comme les mesures."""
+    p.setRenderHint(QPainter.Antialiasing)
+    p.fillRect(widget.rect(), QColor(BG))
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(PANEL))
+    p.drawRoundedRect(QRectF(widget.rect()), RADIUS, RADIUS)
+    p.setBrush(Qt.NoBrush)
+    p.setFont(ui_font(8.5))
+
+
+def block_path(x0: float, x1: float, top0: float, top1: float, bottom: float, radius: float = 4) -> QPainterPath:
+    """Brique : rectangle (ou trapèze pour une rampe) aux coins du haut arrondis."""
+    r = max(0.0, min(radius, (x1 - x0) / 2, (bottom - max(top0, top1)) / 2))
+    path = QPainterPath(QPointF(x0, bottom))
+    if r == 0:
+        path.lineTo(x0, top0)
+        path.lineTo(x1, top1)
+    else:
+        slope = (top1 - top0) / (x1 - x0)
+        path.lineTo(x0, top0 + r)
+        path.quadTo(x0, top0, x0 + r, top0 + slope * r)
+        path.lineTo(x1 - r, top1 - slope * r)
+        path.quadTo(x1, top1, x1, top1 + r)
+    path.lineTo(x1, bottom)
+    path.closeSubpath()
+    return path
+
+
+def draw_power(p: QPainter, points: list[tuple[float, float]]) -> None:
+    """Puissance réalisée."""
+    if len(points) < 2:
+        return
+    path = QPainterPath(QPointF(*points[0]))
+    for point in points[1:]:
+        path.lineTo(*point)
+    pen = QPen(QColor(POWER), 2)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.drawPath(path)
+
+
+def draw_cursor(p: QPainter, x: float, top: float, bottom: float, power_y: float | None) -> None:
+    """Instant présent : trait blanc, et un point sur la dernière puissance mesurée."""
+    p.setPen(QPen(QColor(TEXT), 2))
+    p.drawLine(QPointF(x, top), QPointF(x, bottom))
+    if power_y is not None:
+        p.setPen(QPen(QColor(PANEL), 2))
+        p.setBrush(QColor(POWER))
+        p.drawEllipse(QPointF(x, power_y), 5, 5)
+        p.setBrush(Qt.NoBrush)
+
+
 def hms(seconds: float | None) -> str:
     if seconds is None:
         return "—"
@@ -92,8 +135,7 @@ class WorkoutChart(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802 (API Qt)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(PANEL))
+        paint_panel(p, self)
         s = self.session
         if s is None or not s.segments:
             return
@@ -114,7 +156,6 @@ class WorkoutChart(QWidget):
             return area.bottom() - w / peak * area.height()
 
         # Graduations : FTP et axe du temps.
-        p.setFont(QFont(self.font().family(), 8))
         p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
         p.drawLine(QPointF(area.left(), y(ftp)), QPointF(area.right(), y(ftp)))
         p.drawText(QRectF(0, y(ftp) - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, "FTP")
@@ -125,28 +166,27 @@ class WorkoutChart(QWidget):
             p.drawText(QRectF(x(t) - 30, area.bottom() + 4, 60, 18), Qt.AlignHCenter, hms(t))
             t += step
 
-        # Briques (rampes = trapèzes), passées assombries, en cours mise en avant.
+        # Briques (rampes = trapèzes) aux coins arrondis : passées estompées, à venir un peu
+        # adoucies, en cours pleine couleur et cerclée de blanc.
         position = s.position_s
         for i, seg in enumerate(s.segments):
             if not seg.duration_s:
                 continue
             x0, x1 = x(seg.start_s), x(seg.start_s + seg.duration_s)
+            gap = 1.0 if x1 - x0 > 4 else 0.0
             w0 = seg.target_w(0) or 0
             w1 = seg.target_w(seg.duration_s) or 0
-            path = QPainterPath(QPointF(x0, area.bottom()))
-            path.lineTo(x0, y(max(w0, peak * 0.03)))
-            path.lineTo(x1, y(max(w1, peak * 0.03)))
-            path.lineTo(x1, area.bottom())
-            path.closeSubpath()
+            path = block_path(x0 + gap, x1 - gap, y(max(w0, peak * 0.03)), y(max(w1, peak * 0.03)),
+                              area.bottom())
             color = zone_color(seg.target_w(seg.duration_s / 2), ftp)
             if self.preview:
                 current = any(seg.step is step for step in self.highlight)
             else:
                 current = i == s.index
                 if i < s.index:
-                    color.setAlpha(90)
+                    color.setAlpha(70)
                 elif i > s.index:
-                    color.setAlpha(190)
+                    color.setAlpha(200)
             p.fillPath(path, color)
             if current:
                 p.setPen(QPen(QColor(TEXT), 2))
@@ -167,12 +207,7 @@ class WorkoutChart(QWidget):
                 p.drawLine(QPointF(x(start), y(a)), QPointF(x(seg.start_s + seg.duration_s), y(b)))
 
         # Puissance réalisée.
-        if len(s.samples) > 1:
-            path = QPainterPath(QPointF(x(s.samples[0].t), y(s.samples[0].power_w)))
-            for sample in s.samples[1:]:
-                path.lineTo(x(sample.t), y(sample.power_w))
-            p.setPen(QPen(QColor(POWER), 1.6))
-            p.drawPath(path)
+        draw_power(p, [(x(x_.t), y(x_.power_w)) for x_ in s.samples])
 
         # Cadence, sur sa propre échelle (graduée dans la marge de droite).
         draw_cadence(p, area, s.samples, x, area.right() + 6)
@@ -199,5 +234,6 @@ class WorkoutChart(QWidget):
         # Curseur de position.
         if self.preview:
             return
-        p.setPen(QPen(QColor(TEXT), 2))
-        p.drawLine(QPointF(x(position), area.top()), QPointF(x(position), area.bottom()))
+        last = s.samples[-1] if s.samples else None
+        draw_cursor(p, x(position), area.top(), area.bottom(),
+                    y(last.power_w) if last is not None and abs(x(last.t) - x(position)) < 6 else None)

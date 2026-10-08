@@ -28,7 +28,7 @@ home-trainer-gui = "home_trainer.ui.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"home_trainer.ui" = ["assets/*"]
+"home_trainer.ui" = ["assets/*", "assets/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
