@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from .theme import TEXT, number_font, tinted_card
 
 # Unité détachée de la valeur et affichée en petit : « 238 W » → « 238 » + « W ».
-UNITS = ("W", "km", "%", "bpm", "km/h", "tr/min")
+UNITS = ("W", "km", "%", "bpm", "rpm", "km/h", "tr/min")
 
 
 def split_unit(text: str) -> tuple[str, str]:

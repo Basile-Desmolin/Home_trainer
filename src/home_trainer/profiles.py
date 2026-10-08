@@ -43,6 +43,7 @@ class Profile:
     name: str
     ftp: int = DEFAULT_FTP
     weight_kg: float = DEFAULT_WEIGHT_KG
+    hr_max: int | None = None  # FC max, demandée à la première séance en fréquence cardiaque
 
 
 def _slug(name: str) -> str:
