@@ -37,8 +37,10 @@ from ..formats import FormatError, save_workout
 from ..formats.activity_export import write_ride
 from ..formats.fit_activity import activity_file_name
 from ..heart_zones import to_power
+from ..history import FILE_NAME as HISTORY_FILE, RideHistory
 from ..keep_awake import KeepAwake
 from ..profiles import Profile, ProfileBook
+from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Slope, Trainer,
                        open_heart_rate_sensor)
@@ -54,6 +56,7 @@ from .heart_rate_mode import ask_heart_rate_mode
 from .loader import load_workout
 from .metric import Metric
 from .profiles import choose_profile
+from .history import HistoryDialog
 from .ride_export import DISCARD, RideExport, ask_ride_export
 from .power import PowerSource, SimulatedTrainer, open_power_source, road_speed_kmh
 from .route_ride import RoutePanel
@@ -182,6 +185,11 @@ class MainWindow(QMainWindow):
         self.profile_action.setToolTip("Changer de cycliste : FTP, poids, comptes Strava / Nolio et sorties")
         self.profile_action.triggered.connect(self._choose_profile)
         bar.addAction(self.profile_action)
+        history_action = QAction("Historique…", self)
+        history_action.setShortcut(QKeySequence("Ctrl+H"))
+        history_action.setToolTip("Sorties du profil avec leur bilan, totaux par semaine, forme et records")
+        history_action.triggered.connect(self._open_history)
+        bar.addAction(history_action)
         trainer_action = QAction("Home trainer…", self)
         trainer_action.triggered.connect(self._choose_trainer)
         bar.addAction(trainer_action)
@@ -759,8 +767,10 @@ class MainWindow(QMainWindow):
         start = next((x.at for x in session.samples if x.at is not None), time.time())
         default = RideExport(self._export_folder or self.outbox.dir,
                              Path(activity_file_name(start, title)).stem, self._export_fmt)
-        watts = sum(x.power_w for x in session.samples) / len(session.samples)
-        summary = f"{title} · {hms(session.elapsed_s)} · moyenne {watts:.0f} W"
+        summary = self.ride_summary(session)
+        history = self.ride_history()
+        if history is not None:
+            history.mark_records(summary)
         choice = self.ask_ride_export(self, default, summary)
         if choice is None:
             return False
@@ -799,6 +809,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Sortie non enregistrée", f"{where} : {e}")
             return False
         shown = path.name if path.parent == self.outbox.dir.absolute() else str(path)
+        history = self.ride_history()
+        if history is not None:
+            summary = self.ride_summary(session)
+            summary.file = str(Path(path).absolute())
+            history.add(summary)
         if not auto_services(self.accounts):
             self.statusBar().showMessage(f"Sortie enregistrée : {shown} (pour l'envoyer vers Strava ou "
                                          f"Nolio, connectez un compte : Strava / Nolio…)", 15000)
@@ -807,6 +822,25 @@ class MainWindow(QMainWindow):
         if send:
             self.send_rides()
         return True
+
+    def ride_summary(self, session: WorkoutSession | FreeRideSession | RouteSession) -> RideSummary:
+        """Bilan de la sortie : chiffres, temps par zone, meilleures puissances."""
+        title, _ = ride_title(session)
+        start = next((x.at for x in session.samples if x.at is not None), time.time())
+        return summarize(session.samples, self.ftp, title, start)
+
+    def ride_history(self) -> RideHistory | None:
+        """Historique du profil, dans son dossier des sorties (None sans dossier des sorties)."""
+        if self.outbox is None:
+            return None
+        return RideHistory.load(self.outbox.dir / HISTORY_FILE)
+
+    def _open_history(self) -> None:
+        history = self.ride_history()
+        if history is None:
+            self.statusBar().showMessage("Pas d'historique : les sorties ne sont pas enregistrées", 8000)
+            return
+        HistoryDialog(history, self.profile.name if self.profile else "", self).exec()
 
     def _ask_at_end(self, session: WorkoutSession | RouteSession) -> None:
         """Fin de séance ou arrivée du parcours : la fenêtre d'enregistrement s'ouvre d'elle-même, une fois."""
