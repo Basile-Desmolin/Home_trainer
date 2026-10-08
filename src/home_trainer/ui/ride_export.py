@@ -1,4 +1,4 @@
-"""Fenêtre « Enregistrer la sortie » à la fin d'une sortie : format, nom et dossier.
+"""Fenêtre « Enregistrer la sortie » à la fin d'une sortie : son bilan, puis format, nom et dossier.
 
 « Enregistrer » écrit le fichier ; « Ne pas enregistrer » abandonne la sortie
 (après confirmation) ; « Annuler » ramène à la sortie, rien n'est perdu.
@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
                                QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget)
 
 from ..formats.activity_export import RIDE_FORMATS
+from ..ride_stats import RideSummary
+from .ride_summary import SummaryPanel
 
 DISCARD = "discard"  # réponse « Ne pas enregistrer »
 FORBIDDEN = '<>:"/\\|?*'  # caractères refusés dans un nom de fichier sous Windows
@@ -40,13 +42,19 @@ def clean_name(text: str) -> str:
 
 
 class RideExportDialog(QDialog):
-    def __init__(self, default: RideExport, summary: str = "", parent: QWidget | None = None) -> None:
+    def __init__(self, default: RideExport, summary: str | RideSummary = "",
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Enregistrer la sortie")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(620)
         self.choice: RideExport | str | None = None
         layout = QVBoxLayout(self)
-        if summary:
+        self.panel: SummaryPanel | None = None
+        if isinstance(summary, RideSummary):  # bilan de la sortie au-dessus du choix du fichier
+            self.panel = SummaryPanel(summary)
+            layout.addWidget(self.panel)
+            layout.addSpacing(8)
+        elif summary:
             label = QLabel(summary)
             label.setWordWrap(True)
             layout.addWidget(label)
@@ -124,7 +132,7 @@ class RideExportDialog(QDialog):
             self.accept()
 
 
-def ask_ride_export(parent: QWidget | None, default: RideExport, summary: str = "") -> RideExport | str | None:
+def ask_ride_export(parent: QWidget | None, default: RideExport, summary: str | RideSummary = "") -> RideExport | str | None:
     """Fenêtre modale : un `RideExport`, `DISCARD`, ou None si l'utilisateur revient à la sortie."""
     dialog = RideExportDialog(default, summary, parent)
     dialog.exec()
