@@ -363,8 +363,8 @@ puissance (Z1 à Z7, de la FTP du profil) et **meilleures puissances** sur 5 s,
 1 min, 5 min, 20 min et 1 h. Une meilleure puissance jamais atteinte jusque-là
 par le profil est marquée **★ record**.
 
-Chaque sortie enregistrée s'ajoute à l'**historique** du profil (bouton
-**Historique…** ou Ctrl+H) : la liste des sorties (double-clic : leur bilan),
+Chaque sortie enregistrée s'ajoute à l'**historique** du profil (onglet
+**Historique** du bandeau ou Ctrl+H) : la liste des sorties (double-clic : leur bilan),
 les heures et le TSS des 12 dernières semaines, la **condition** (CTL, charge
 des 6 dernières semaines), la **forme** (condition moins fatigue, TSB) et la
 courbe des meilleures puissances, de toujours et des 6 dernières semaines. Il est
