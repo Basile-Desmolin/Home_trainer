@@ -40,8 +40,13 @@ class Service:
         self.http = http
         self.sleep = sleep
 
-    def redirect_uri(self, port: int = CALLBACK_PORT) -> str:
+    def default_redirect_uri(self, port: int = CALLBACK_PORT) -> str:
         return f"http://localhost:{port}/{self.key}"
+
+    def redirect_uri(self, port: int = CALLBACK_PORT) -> str:
+        """URL de rappel : celle déclarée par l'utilisateur dans son appli API, sinon celle par défaut.
+        Elle doit être identique, au caractère près, à celle du portail du service."""
+        return self.account.redirect_uri.strip() or self.default_redirect_uri(port)
 
     def authorize_url(self, redirect_uri: str, state: str) -> str:
         raise NotImplementedError

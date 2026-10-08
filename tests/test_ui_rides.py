@@ -219,3 +219,28 @@ def test_failed_save_keeps_the_ride(window, tmp_path, monkeypatch):
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
     window.finish_button.click()
     assert len(window.session.samples) == 30 and not window.session.exported
+
+
+def test_nolio_redirect_field_and_cancel(window, monkeypatch):
+    import home_trainer.ui.accounts as accounts
+    opened = []
+    monkeypatch.setattr(accounts.webbrowser, "open", opened.append)
+    dialog = AccountsDialog(window.accounts, window.outbox, window)
+    box = dialog.boxes["nolio"]
+    assert box.redirect.placeholderText() == "http://localhost:8765/nolio"
+    assert dialog.boxes["strava"].redirect is None
+    box.client_id.setText("id")
+    box.client_secret.setText("sec")
+    box.redirect.setText("http://localhost:18769/nolio")
+    box.connect_button.click()
+    assert box.busy and box.connect_button.text() == "Annuler"
+    box.connect_button.click()  # Annuler
+    for _ in range(50):
+        QtWidgets.QApplication.processEvents()
+        if not box.busy:
+            break
+        import time
+        time.sleep(0.1)
+    assert not box.busy and box.connect_button.text() == "Se connecter"
+    assert "redirect_uri=http%3A%2F%2Flocalhost%3A18769%2Fnolio" in opened[0]
+    assert AccountBook.load(window.accounts.path)["nolio"].redirect_uri == "http://localhost:18769/nolio"

@@ -12,8 +12,9 @@ from garmin_fit_sdk import Decoder, Stream
 
 from home_trainer.bricks import parse_workout
 from home_trainer.formats.fit_activity import ActivityPoint, activity_file_name, encode_activity, summarize
-from home_trainer.sync import AccountBook, Nolio, Outbox, Strava, SyncError, connect, send_pending
-from home_trainer.sync.web import Response, multipart, wait_for_code
+from home_trainer.sync import (AccountBook, Nolio, Outbox, Strava, SyncError, connect, finish_connect, parse_callback,
+                               send_pending, start_connect)
+from home_trainer.sync.web import Response, local_callback, multipart, wait_for_code
 from home_trainer.ui.session import FreeMode, FreeRideSession, State, WorkoutSession, ride_points, ride_title
 
 T0 = 1_759_480_000  # 3 octobre 2025, 8 h 26 UTC
@@ -276,3 +277,65 @@ def test_durations_follow_the_ride_timer():
     # Horloge peu précise (mesures groupées) : le chronomètre de la séance fait foi.
     points = [ActivityPoint(T0 + i // 2, 200, speed_kmh=36.0, timer_s=float(i)) for i in range(60)]
     assert summarize(points).distance_m == pytest.approx(600)
+
+
+# --- URL de rappel de Nolio ----------------------------------------------------
+
+def test_redirect_uri_follows_the_one_declared(book):
+    a = book["nolio"]
+    a.client_id, a.client_secret = "id", "sec"
+    service = Nolio(a, FakeHttp((200, {"access_token": "a", "refresh_token": "r", "expires_in": 86400})))
+    assert service.redirect_uri() == "http://localhost:8765/nolio"
+    a.redirect_uri = " https://localhost/nolio "
+    auth = start_connect(service)
+    assert parse_qs(urlparse(auth.url).query)["redirect_uri"] == ["https://localhost/nolio"]
+    assert auth.local is None
+    finish_connect(service, book, auth, "C")
+    assert parse_qs(service.http.calls[0][3].decode())["redirect_uri"] == ["https://localhost/nolio"]
+
+
+def test_https_redirect_uses_pasted_address(book):
+    a = book["nolio"]
+    a.client_id, a.client_secret, a.redirect_uri = "id", "sec", "https://localhost/nolio"
+    http = FakeHttp((200, {"access_token": "a", "refresh_token": "r", "expires_in": 86400}))
+    opened = []
+
+    def paste():
+        state = parse_qs(urlparse(opened[0]).query)["state"][0]
+        return f"https://localhost/nolio?code=ABC%2F1&state={state}"
+
+    connect(Nolio(a, http), book, opened.append, paste=paste)
+    assert parse_qs(http.calls[0][3].decode())["code"] == ["ABC/1"] and a.connected
+
+
+def test_parse_callback_variants():
+    assert parse_callback("http://localhost:8765/nolio?code=X", "s") == "X"  # state non renvoyé
+    assert parse_callback("?code=X&state=s", "s") == "X"
+    with pytest.raises(SyncError, match="state"):
+        parse_callback("code=X&state=autre", "s")
+    with pytest.raises(SyncError, match="access_denied"):
+        parse_callback("https://localhost/nolio?error=access_denied", "s")
+    with pytest.raises(SyncError, match="pas de code"):
+        parse_callback("https://localhost/nolio", "s")
+
+
+def test_local_callback_port_and_path():
+    assert local_callback("http://localhost:8765/nolio") == (8765, "/nolio")
+    assert local_callback("http://127.0.0.1:9000/cb/") == (9000, "/cb/")
+    assert local_callback("https://localhost/nolio") is None
+    assert local_callback("https://example.com/cb") is None
+
+
+def test_token_error_names_the_redirect_uri(book):
+    a = book["nolio"]
+    a.client_id, a.client_secret = "id", "sec"
+    service = Nolio(a, FakeHttp((400, {"error": "invalid_grant"})))
+    with pytest.raises(SyncError, match="invalid_grant.*http://localhost:8765/nolio"):
+        finish_connect(service, book, start_connect(service), "C")
+
+
+def test_wait_for_code_can_be_cancelled():
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    with pytest.raises(SyncError, match="annulée"):
+        wait_for_code("nolio", "s", port=18768, timeout_s=10, cancel=cancel)
