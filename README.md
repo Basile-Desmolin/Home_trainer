@@ -113,7 +113,7 @@ mode ERG.
 
 Bandeau du haut : à gauche les onglets **Séance**, **Libre** et **Parcours**,
 la **Bibliothèque** et le menu **Fichier** ; à droite, en pastilles, le home
-trainer et le cardio (point vert : connecté, orange : connexion en cours ou
+trainer, le capteur de puissance s'il y en a un, et le cardio (point vert : connecté, orange : connexion en cours ou
 signal perdu, gris : simulé ou aucun ; un clic pour en changer), la **FTP** et
 le **poids** (à taper ou à la molette) et le **profil**.
 
@@ -261,18 +261,41 @@ contrôle. L'état de la connexion s'affiche dans cette pastille.
 Les trames sont encodées et décodées par des fonctions pures
 (`sensors/trainer.py`), testées sans matériel (`tests/test_trainer.py`).
 
+### Capteur de puissance externe
+
+```bash
+home-trainer-gui --power ble           # premier capteur de puissance Bluetooth (hors home trainer)
+home-trainer-gui --power ant           # premier capteur ANT+ (ou --power-ant-id 12345)
+home-trainer-gui --power aucun         # puissance du home trainer
+```
+
+Des pédales, une manivelle ou un moyeu capteurs de puissance se choisissent
+dans la pastille du home trainer, ligne **Capteur de puissance** (Bluetooth
+Cycling Power, ou ANT+ Bicycle Power). Une pastille apparaît alors dans le bandeau.
+
+- Ses watts (et sa cadence, s'il la donne) **remplacent ceux du home trainer**
+  à l'écran, sur la courbe et dans la sortie enregistrée. La vitesse reste
+  celle du home trainer. Si le capteur se tait, on revient aux watts du home trainer.
+- **L'ERG se règle sur le capteur** : l'appli mesure en continu l'écart entre
+  le home trainer et le capteur (moyenne sur ~10 s, seulement quand on pédale)
+  et corrige d'autant la consigne. Si le home trainer lit 8 W de trop, on lui
+  demande 208 W pour tenir 200 W au capteur. L'écart en cours s'affiche en
+  survolant la pastille ; la correction est bornée (100 W, 30 % de la cible).
+- En pente (mode libre, parcours) rien n'est corrigé : la résistance suit la
+  route, seuls les watts affichés et enregistrés viennent du capteur.
+
 ## Appareils mémorisés
 
 ![Appareils mémorisés](docs/appareils.png)
 
-Chaque home trainer ou ceinture cardio qui se connecte est **mémorisé** avec
+Chaque home trainer, capteur de puissance ou ceinture cardio qui se connecte est **mémorisé** avec
 son adresse Bluetooth ou son numéro ANT+ (même choisi en « premier trouvé ») :
 il apparaît ensuite en tête de la liste **Appareil** des pastilles
 home trainer et cardio. En le choisissant, on peut le **renommer**
 (« Kickr du salon », « Ceinture Polar »…, Entrée pour valider) ou
 l'**oublier**. Le nom choisi s'affiche dans la pastille et sur la tuile
 cardio. Au lancement, l'appli **se reconnecte** d'elle-même aux derniers
-appareils choisis ; les options `--trainer` et `--hr` passent outre.
+appareils choisis ; les options `--trainer`, `--power` et `--hr` passent outre.
 
 La liste est enregistrée dans `%APPDATA%\HomeTrainer\appareils.json` sous
 Windows, `~/.config/home-trainer/appareils.json` ailleurs (variable

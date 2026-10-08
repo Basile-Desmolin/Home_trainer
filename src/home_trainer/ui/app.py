@@ -6,6 +6,10 @@ et parcours GPX (la pente de la route suit la distance parcourue).
     home-trainer-gui [seance.erg | parcours.gpx] [--profile Basile] [--ftp 250] [--weight 70] [--bricks "10m@150 3x(4m@105% 2m@55%)"]
                      [--trainer sim|ble|ant] [--trainer-address AA:BB:…] [--trainer-ant-id 12345]
                      [--hr ble|ant|aucun] [--hr-address AA:BB:…] [--hr-ant-id 12345]
+                     [--power ble|ant|aucun] [--power-address AA:BB:…] [--power-ant-id 12345]
+
+Avec un capteur de puissance externe (pédales, manivelle), ses watts remplacent ceux du
+home trainer à l'écran et dans la sortie, et l'ERG se règle sur sa mesure.
 
 Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 → ou N = brique suivante, E = ERG on / off, Ctrl+N = nouvelle séance, Ctrl+O = ouvrir,
@@ -20,6 +24,7 @@ Sur un parcours : ↑ ↓ = difficulté ±10 %.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 import threading
 import time
@@ -40,8 +45,8 @@ from ..formats.fit_activity import activity_file_name
 from ..keep_awake import KeepAwake
 from ..profiles import Profile, ProfileBook
 from ..route import RouteError, load_route
-from ..sensors import (BackgroundSensor, HeartRateReading, SensorState, Slope, Trainer,
-                       open_heart_rate_sensor)
+from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
+                       Trainer, open_heart_rate_sensor, open_power_meter)
 from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
@@ -55,7 +60,7 @@ from .loader import load_workout
 from .metric import Metric
 from .profiles import choose_profile
 from .ride_export import DISCARD, RideExport, ask_ride_export
-from .power import PowerSource, SimulatedTrainer, open_power_source, road_speed_kmh
+from .power import PowerSource, Reading, SimulatedTrainer, open_power_source, road_speed_kmh
 from .route_ride import RoutePanel
 from .theme import GOOD, OFF, WAIT, dot, icon, install, keycaps, number_font, pill, zone_index, zone_label
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
@@ -94,7 +99,8 @@ class MainWindow(QMainWindow):
                  heart_rate: BackgroundSensor[HeartRateReading] | None = None,
                  book: DeviceBook | None = None, accounts: AccountBook | None = None,
                  outbox: Outbox | None = None, profiles: ProfileBook | None = None,
-                 profile: Profile | None = None) -> None:
+                 profile: Profile | None = None,
+                 power_meter: BackgroundSensor[PowerMeterReading] | None = None) -> None:
         super().__init__()
         # Avec un profil, ses comptes et son dossier des sorties remplacent `accounts` et `outbox`.
         self.profiles = profiles if profiles is not None else ProfileBook()
@@ -124,6 +130,9 @@ class MainWindow(QMainWindow):
         self._since_sample = 0.0
         self._last_reading = None
         self.heart_rate: BackgroundSensor[HeartRateReading] | None = None
+        # Capteur de puissance externe : ses watts font foi, et l'ERG du home trainer est corrigé dessus.
+        self.power_meter: BackgroundSensor[PowerMeterReading] | None = None
+        self.power_match = PowerMatch()
 
         self._build_toolbar()
         self._build_body()
@@ -137,6 +146,7 @@ class MainWindow(QMainWindow):
         self.load(workout)
         self.set_power_source(self.source)
         self.set_heart_rate_sensor(heart_rate)
+        self.set_power_meter(power_meter)
         if profile is not None:
             self.set_profile(profile)  # envoie aussi les sorties restées en attente
         else:
@@ -146,7 +156,7 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self) -> None:
         """Bandeau du haut : onglets Séance / Libre / Parcours, Bibliothèque et menu Fichier à gauche ;
-        à droite, en pastilles, le home trainer, le cardio, la FTP, le poids et le profil."""
+        à droite, en pastilles, le home trainer, le capteur de puissance, le cardio, la FTP, le poids et le profil."""
         bar = QToolBar("Bandeau")
         bar.setObjectName("header")
         bar.setMovable(False)
@@ -213,6 +223,10 @@ class MainWindow(QMainWindow):
         self.source_label = self._header_button("", "Choisir ou calibrer le home trainer", "chip")
         self.source_label.clicked.connect(self._choose_trainer)
         bar.addWidget(self.source_label)
+        self.power_chip = self._header_button("", POWER_TIP, "chip")
+        self.power_chip.clicked.connect(lambda: self._choose_power_meter())
+        # Pastille montrée seulement avec un capteur : il se choisit depuis la pastille du home trainer.
+        self.power_chip_action = bar.addWidget(self.power_chip)
         self.heart_chip = self._header_button("", "Choisir la ceinture cardio", "chip")
         self.heart_chip.clicked.connect(self._choose_heart_rate)
         bar.addWidget(self.heart_chip)
@@ -646,6 +660,7 @@ class MainWindow(QMainWindow):
             self.source.stop()
         self.source = source
         self._last_reading = None
+        self.power_match.reset()  # l'écart avec le capteur est propre à chaque home trainer
         if isinstance(source, Trainer):
             source.start()
         self._push_target()
@@ -654,9 +669,14 @@ class MainWindow(QMainWindow):
     def _choose_trainer(self) -> None:
         dialog = TrainerDialog(self.book, self, current=self.source,
                                current_name=self._display_name("trainer", self.source),
-                               before_calibration=self._pause_for_calibration)
+                               before_calibration=self._pause_for_calibration,
+                               choose_power_meter=self._choose_power_meter,
+                               power_meter_name=self._power_meter_name())
         if dialog.exec() == QDialog.Accepted:
             self.set_power_source(dialog.sensor())
+
+    def _power_meter_name(self) -> str:
+        return "aucun" if self.power_meter is None else self._display_name("power", self.power_meter)
 
     def _pause_for_calibration(self) -> None:
         """La séance se met en pause : pendant la calibration, c'est le home trainer qui mène."""
@@ -678,6 +698,24 @@ class MainWindow(QMainWindow):
         dialog = HeartRateDialog(self.book, self)
         if dialog.exec() == QDialog.Accepted:
             self.set_heart_rate_sensor(dialog.sensor())
+
+    def set_power_meter(self, sensor: BackgroundSensor[PowerMeterReading] | None) -> None:
+        """Remplace le capteur de puissance externe (None = puissance du home trainer) et le démarre."""
+        if self.power_meter is not None:
+            self.power_meter.stop()
+        self.power_meter = sensor
+        self.power_match.reset()
+        if sensor is not None:
+            sensor.start()
+        self._push_target()
+        self._refresh()
+
+    def _choose_power_meter(self, parent: QWidget | None = None) -> str:
+        """Choix du capteur de puissance ; renvoie son nom (« aucun »)."""
+        dialog = PowerMeterDialog(self.book, parent or self)
+        if dialog.exec() == QDialog.Accepted:
+            self.set_power_meter(dialog.sensor())
+        return self._power_meter_name()
 
     def set_library(self, library: Library) -> None:
         """Bibliothèque des séances : ouvertures et enregistrements partent de son dossier."""
@@ -721,6 +759,8 @@ class MainWindow(QMainWindow):
         self.send_rides(wait_s=CLOSE_SEND_WAIT_S)
         if self.heart_rate is not None:
             self.heart_rate.stop()
+        if self.power_meter is not None:
+            self.power_meter.stop()
         if isinstance(self.source, Trainer):
             self.source.stop()
         super().closeEvent(event)
@@ -981,6 +1021,7 @@ class MainWindow(QMainWindow):
         running = active.state is State.RUNNING
         # Un vrai home trainer est lu en permanence (échauffement, pause) ; le simulateur seulement en séance.
         reading = self.source.read(dt) if running or isinstance(self.source, Trainer) else None
+        reading = self._with_power_meter(reading, dt)
         self._last_reading = reading
         if reading is not None and running:
             self._since_sample += dt
@@ -1000,6 +1041,19 @@ class MainWindow(QMainWindow):
         self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
         self._refresh()
 
+    def _with_power_meter(self, reading, dt: float):
+        """Avec un capteur de puissance qui répond, ses watts (et sa cadence s'il la donne) remplacent
+        ceux du home trainer ; l'écart entre les deux sert à corriger l'ERG (voir `_push_target`)."""
+        meter = self.power_meter.latest() if self.power_meter is not None else None
+        if meter is None:
+            return reading  # capteur muet : on garde la puissance du home trainer plutôt que rien
+        if reading is None:
+            return Reading(meter.power_w, meter.cadence_rpm)
+        if isinstance(self.source, Trainer):  # le simulateur n'a pas d'écart à mesurer
+            self.power_match.update(dt, reading.power_w, meter.power_w)
+        cadence = meter.cadence_rpm if meter.cadence_rpm is not None else reading.cadence_rpm
+        return dataclasses.replace(reading, power_w=meter.power_w, cadence_rpm=cadence)
+
     def _speed(self, reading) -> float:
         """Vitesse donnée par le home trainer, sinon celle d'un cycliste de ce poids sur le plat (ou la pente)."""
         if self.route_ride:  # sur un parcours, la distance suit la vitesse simulée de la route
@@ -1014,10 +1068,14 @@ class MainWindow(QMainWindow):
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
         active = self.active
         running = active.state is State.RUNNING
-        self.source.set_target(active.command if running else None)
+        command = active.command if running else None
+        if self.power_meter is not None:
+            command = self.power_match.command(command)  # ERG tenu selon le capteur de puissance
+        self.source.set_target(command)
 
     def _refresh(self) -> None:
         self._refresh_source()
+        self._refresh_power_chip()
         self._refresh_heart_chip()
         page = "route" if self.route_ride else "free" if self.free_ride else "workout"
         if not self.tabs[page].isChecked():
@@ -1097,6 +1155,33 @@ class MainWindow(QMainWindow):
             self._source_color = color
             self.source_label.setIcon(dot(color))
 
+    def _refresh_power_chip(self) -> None:
+        sensor = self.power_meter
+        tip = None
+        self.power_chip_action.setVisible(sensor is not None)
+        if sensor is None:
+            text, color = "Puissance : aucun", OFF
+        else:
+            self._remember("power", sensor)
+            if sensor.latest() is not None:
+                name = self._display_name("power", sensor)
+                text, color = (name if "puissance" in name.lower() else f"Puissance · {name}"), GOOD
+                if self.power_match.ready and isinstance(self.source, Trainer):
+                    offset = round(self.power_match.offset_w)
+                    tip = (f"{name} : ses watts font foi. Le home trainer lit {abs(offset)} W de "
+                           f"{'plus' if offset >= 0 else 'moins'} : la consigne ERG est corrigée de {offset:+d} W.")
+            else:
+                state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
+                text, color = f"Puissance : {state}", WAIT
+        tip = tip or POWER_TIP
+        if self.power_chip.toolTip() != tip:
+            self.power_chip.setToolTip(tip)
+        if self.power_chip.text() != text:
+            self.power_chip.setText(text)
+        if getattr(self, "_power_color", None) != color:
+            self._power_color = color
+            self.power_chip.setIcon(dot(color))
+
     def _refresh_heart_chip(self) -> None:
         sensor = self.heart_rate
         if sensor is None:
@@ -1133,6 +1218,8 @@ class MainWindow(QMainWindow):
             metric.set("Off", f"{self._display_name('hr', sensor)} : {state}")
 
 
+POWER_TIP = ("Capteur de puissance externe (pédales, manivelle) : ses watts font foi "
+             "et l'ERG se règle dessus")
 FINISH_TIP = ("Terminer la sortie : choix du format (.fit par défaut), du nom et du dossier ; "
               "le .fit part vers Strava / Nolio (Ctrl+T)")
 
@@ -1364,6 +1451,34 @@ class HeartRateDialog(SensorDialog):
         return open_heart_rate_sensor(kind, **args)
 
 
+class PowerMeterDialog(SensorDialog):
+    """Choix du capteur de puissance externe : aucun (puissance du home trainer), Bluetooth ou ANT+."""
+
+    TITLE = "Capteur de puissance"
+    ROLE = "power"
+    KINDS = [("Aucun : puissance du home trainer", None), ("Bluetooth", "ble"), ("ANT+ (clé USB)", "ant")]
+    DEFAULT_KIND = None
+    SCAN_TEXT = "Recherche des capteurs de puissance Bluetooth (5 s)… Pédalez pour les réveiller."
+    ANY_DEVICE = "Premier capteur trouvé"
+
+    def _extra_rows(self, form: QFormLayout) -> None:
+        note = QLabel("Pédales, manivelle ou moyeu : ses watts remplacent ceux du home trainer à l'écran "
+                      "et dans la sortie, et l'ERG se règle sur sa mesure.")
+        note.setObjectName("metricSub")
+        note.setWordWrap(True)
+        form.addRow("", note)
+
+    def scan_devices(self) -> list:
+        from ..sensors.power_meter import scan_power_meters
+        return scan_power_meters(timeout=5)
+
+    def sensor(self) -> BackgroundSensor[PowerMeterReading] | None:
+        kind, args = self._connect_args()
+        if kind is None:
+            return None
+        return open_power_meter(kind, **args)
+
+
 class TrainerDialog(SensorDialog):
     """Choix du home trainer : simulé, en Bluetooth ou en ANT+ (toutes marques)."""
 
@@ -1376,7 +1491,10 @@ class TrainerDialog(SensorDialog):
     ANY_DEVICE = "Premier home trainer trouvé"
 
     def __init__(self, book: DeviceBook, parent: QWidget | None = None, *, current: PowerSource | None = None,
-                 current_name: str = "", before_calibration=None) -> None:
+                 current_name: str = "", before_calibration=None, choose_power_meter=None,
+                 power_meter_name: str = "aucun") -> None:
+        self.choose_power_meter = choose_power_meter
+        self.power_meter_name = power_meter_name
         self.current = current
         self.current_name = current_name or getattr(current, "name", "")
         self.before_calibration = before_calibration
@@ -1396,6 +1514,23 @@ class TrainerDialog(SensorDialog):
         hint.setObjectName("metricSub")
         line.addWidget(hint, 1)
         form.addRow("Calibration", row)
+        meter_row = QWidget()
+        line = QHBoxLayout(meter_row)
+        line.setContentsMargins(0, 0, 0, 0)
+        self.power_meter_button = QPushButton("Choisir…")
+        self.power_meter_button.setToolTip("Capteur de puissance externe (pédales, manivelle) : ses watts "
+                                           "font foi et l'ERG du home trainer se règle dessus")
+        self.power_meter_button.clicked.connect(self._choose_power_meter)
+        self.power_meter_button.setEnabled(self.choose_power_meter is not None)
+        line.addWidget(self.power_meter_button)
+        self.power_meter_label = QLabel(self.power_meter_name)
+        self.power_meter_label.setObjectName("metricSub")
+        line.addWidget(self.power_meter_label, 1)
+        form.addRow("Capteur de puissance", meter_row)
+
+    def _choose_power_meter(self) -> None:
+        if self.choose_power_meter is not None:
+            self.power_meter_label.setText(self.choose_power_meter(self))
 
     def calibrate(self) -> None:
         if self.current is None:
@@ -1436,6 +1571,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hr-address", help="adresse Bluetooth de la ceinture (sinon la première trouvée)")
     parser.add_argument("--hr-ant-id", type=int, default=0,
                         help="numéro ANT+ de la ceinture (sinon la première trouvée)")
+    parser.add_argument("--power", choices=["ble", "ant", "aucun"],
+                        help="capteur de puissance externe (pédales, manivelle) : Bluetooth, ANT+ ou aucun "
+                             "(défaut : le dernier utilisé, sinon aucun)")
+    parser.add_argument("--power-address", help="adresse Bluetooth du capteur de puissance (sinon le premier trouvé)")
+    parser.add_argument("--power-ant-id", type=int, default=0,
+                        help="numéro ANT+ du capteur de puissance (sinon le premier trouvé)")
     args = parser.parse_args(argv)
 
     _set_windows_app_id()
@@ -1461,12 +1602,19 @@ def main(argv: list[str] | None = None) -> int:
     else:
         hr_kind = None if args.hr == "aucun" else args.hr
         hr_address, hr_number = args.hr_address, args.hr_ant_id
+    if args.power is None:
+        power_kind, power_address, power_number = book.startup_choice("power", ("ble", "ant", None), default=None)
+    else:
+        power_kind = None if args.power == "aucun" else args.power
+        power_address, power_number = args.power_address, args.power_ant_id
     if args.trainer is None:
         trainer_kind, trainer_address, trainer_number = book.startup_choice("trainer", ("sim", "ble", "ant"))
     else:
         trainer_kind, trainer_address, trainer_number = args.trainer, args.trainer_address, args.trainer_ant_id
     heart_rate = (None if hr_kind is None
                   else open_heart_rate_sensor(hr_kind, address=hr_address, device_number=hr_number))
+    power_meter = (None if power_kind is None
+                   else open_power_meter(power_kind, address=power_address, device_number=power_number))
     source = open_power_source(trainer_kind, address=trainer_address, device_number=trainer_number)
     try:
         workout = parse_workout(args.bricks or DEFAULT_BRICKS,
@@ -1476,8 +1624,8 @@ def main(argv: list[str] | None = None) -> int:
         QMessageBox.warning(None, "Briques invalides", str(e))
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
     window = MainWindow(workout, profile.ftp, source=source, heart_rate=heart_rate, book=book,
-                        profiles=profiles, profile=profile)
-    window.resize(1240, 760)
+                        profiles=profiles, profile=profile, power_meter=power_meter)
+    window.resize(1360, 780)
     if args.ftp:
         window.ftp_box.setValue(int(args.ftp))
         window._ftp_changed()

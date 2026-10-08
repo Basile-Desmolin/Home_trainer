@@ -13,6 +13,11 @@ Le home trainer se pilote de la même façon, avec une consigne en plus :
     reading = trainer.read()                    # TrainerReading ou None
     trainer.stop()
 
+Un capteur de puissance externe (pédales, manivelle) se lit comme le cardio ;
+`PowerMatch` règle alors l'ERG du home trainer sur sa mesure :
+
+    meter = open_power_meter("ble")             # ou "ant"
+
 `BackgroundSensor` (base.py) est le socle commun de tous ces capteurs.
 """
 
@@ -20,10 +25,12 @@ from __future__ import annotations
 
 from .base import BackgroundSensor, SensorState, SensorUnavailable
 from .heart_rate import AntHeartRateDecoder, HeartRateReading, parse_ble_measurement
+from .power_meter import AntPowerDecoder, PowerMatch, PowerMeterReading
 from .trainer import Slope, Trainer, TrainerReading
 
 HEART_RATE_KINDS = {"ble": "Bluetooth", "ant": "ANT+"}
 TRAINER_KINDS = {"ble": "Bluetooth", "ant": "ANT+"}
+POWER_METER_KINDS = {"ble": "Bluetooth", "ant": "ANT+"}
 
 
 def open_heart_rate_sensor(kind: str, *, address: str | None = None,
@@ -38,6 +45,18 @@ def open_heart_rate_sensor(kind: str, *, address: str | None = None,
     raise ValueError(f"capteur cardio inconnu : {kind!r} (ble ou ant)")
 
 
+def open_power_meter(kind: str, *, address: str | None = None,
+                     device_number: int = 0) -> BackgroundSensor[PowerMeterReading]:
+    """Crée (sans le démarrer) un capteur de puissance : "ble" ou "ant"."""
+    if kind == "ble":
+        from .power_meter import BlePowerMeter
+        return BlePowerMeter(address)
+    if kind == "ant":
+        from .power_meter import AntPowerMeter
+        return AntPowerMeter(device_number)
+    raise ValueError(f"capteur de puissance inconnu : {kind!r} (ble ou ant)")
+
+
 def open_trainer(kind: str, *, address: str | None = None, device_number: int = 0) -> Trainer:
     """Crée (sans le démarrer) le pilote du home trainer : "ble" ou "ant"."""
     if kind == "ble":
@@ -49,6 +68,7 @@ def open_trainer(kind: str, *, address: str | None = None, device_number: int = 
     raise ValueError(f"home trainer inconnu : {kind!r} (ble ou ant)")
 
 
-__all__ = ["AntHeartRateDecoder", "BackgroundSensor", "HEART_RATE_KINDS", "HeartRateReading",
-           "SensorState", "SensorUnavailable", "Slope", "TRAINER_KINDS", "Trainer",
-           "TrainerReading", "open_heart_rate_sensor", "open_trainer", "parse_ble_measurement"]
+__all__ = ["AntHeartRateDecoder", "AntPowerDecoder", "BackgroundSensor", "HEART_RATE_KINDS", "HeartRateReading",
+           "POWER_METER_KINDS", "PowerMatch", "PowerMeterReading", "SensorState", "SensorUnavailable", "Slope",
+           "TRAINER_KINDS", "Trainer", "TrainerReading", "open_heart_rate_sensor", "open_power_meter",
+           "open_trainer", "parse_ble_measurement"]
