@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout, QHeaderV
 
 from ..history import RideHistory
 from ..ride_stats import CURVE_S, RideSummary, duration_label
-from .chart import ACCENT, BG, MUTED, PANEL, POWER, TEXT, hms
+from .chart import ACCENT, BG, MUTED, POWER, TEXT, hms, paint_panel
 from .metric import Metric
 from .ride_summary import SummaryDialog, number, ride_date
 
@@ -59,8 +59,7 @@ class WeeksChart(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 (API Qt)
         weeks = self.history.weeks(WEEKS)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(PANEL))
+        paint_panel(p, self)
         p.setPen(QColor(MUTED))
         p.drawText(QRectF(10, 4, self.width() - 20, 18), Qt.AlignLeft | Qt.AlignVCenter, "HEURES PAR SEMAINE")
         area = QRectF(10, 58, self.width() - 20, self.height() - 82)
@@ -99,8 +98,7 @@ class PowerCurve(QWidget):
         best = self.history.best_powers()
         recent = self.history.best_powers(since=time.time() - RECENT_DAYS * 86400)
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(PANEL))
+        paint_panel(p, self)
         p.setPen(QColor(MUTED))
         p.drawText(QRectF(10, 4, self.width() - 20, 18), Qt.AlignLeft | Qt.AlignVCenter, "MEILLEURES PUISSANCES")
         p.setPen(QColor(ACCENT))

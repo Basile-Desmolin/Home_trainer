@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QGridLayout, QHBoxLayo
 from ..ride_stats import HIGHLIGHT_S, ZONE_NAMES, RideSummary, duration_label
 from .chart import ACCENT, HEART, MUTED, PANEL, POWER, TEXT, ZONES, hms
 from .metric import Metric
+from .theme import ui_font
 
 DAYS = ["lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim."]
 MONTHS = ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
@@ -49,6 +50,7 @@ class ZoneBars(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 (API Qt)
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        p.setFont(ui_font(9.5))
         total = sum(self.zone_s) or 1
         longest = max(self.zone_s) or 1
         label_w, value_w = 130, 110

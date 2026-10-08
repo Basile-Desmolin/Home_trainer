@@ -53,7 +53,7 @@ def test_opening_a_gpx_rides_it_and_sends_the_route_grade(app, tmp_path):
     assert window.route.difficulty_pct == 90
     assert source.targets[-1].grade_pct == pytest.approx(sent.grade_pct * 0.9, abs=0.1)
     window._refresh()
-    assert "km" in window.route_panel.m_remaining.value.text()
+    assert window.route_panel.m_remaining.unit.text() == "km"
     window.grab()  # dessine profils et carte
     window.leave_free_ride()
     assert window.pages.currentIndex() == 0 and window.route.state is State.PAUSED

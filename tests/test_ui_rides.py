@@ -257,7 +257,8 @@ def test_summary_and_history_windows(window):
     window.finish_button.click()
     history = window.ride_history()
     dialog = RideExportDialog(RideExport(window.outbox.dir, "x"), history.rides[0])
-    assert dialog.panel is not None and dialog.panel.tiles["PUISSANCE MOY."].value.text() == "150 W"
+    assert dialog.panel is not None and dialog.panel.tiles["PUISSANCE MOY."].value.text() == "150"
+    assert dialog.panel.tiles["PUISSANCE MOY."].unit.text() == "W"
     hist = HistoryDialog(history, "Moi")
     assert hist.tree.topLevelItemCount() == 1
     assert hist.week_tile.value.text() != "—"

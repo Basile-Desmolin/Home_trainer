@@ -26,10 +26,11 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QLocale, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QFont, QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
-                               QMessageBox, QPushButton, QSpinBox, QStackedWidget, QToolBar, QVBoxLayout, QWidget)
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+                               QFormLayout, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
+                               QStackedWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from ..bricks import BrickSyntaxError, parse_workout
 from ..devices import DeviceBook, SavedDevice, ant_ident
@@ -48,9 +49,10 @@ from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
 from .calibration import CalibrationDialog, can_calibrate
-from .chart import ACCENT, BG, CADENCE, HEART, MUTED, PANEL, POWER, TEXT, WorkoutChart, hms
+from .chart import ACCENT, CADENCE, HEART, MUTED, TEXT, WorkoutChart, hms, zone_color
 from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
+from .gauges import BrickRing, ZoneBar
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
 from .heart_rate_mode import ask_heart_rate_mode
 from .loader import load_workout
@@ -60,6 +62,7 @@ from .history import HistoryDialog
 from .ride_export import DISCARD, RideExport, ask_ride_export
 from .power import PowerSource, SimulatedTrainer, open_power_source, road_speed_kmh
 from .route_ride import RoutePanel
+from .theme import GOOD, OFF, WAIT, dot, icon, install, keycaps, number_font, pill, zone_index, zone_label
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
                       FreeRideSession, RouteSession, State, WorkoutSession, ride_points, ride_title)
 
@@ -156,73 +159,139 @@ class MainWindow(QMainWindow):
     # --- construction ----------------------------------------------------
 
     def _build_toolbar(self) -> None:
-        bar = QToolBar("Séance")
+        """Bandeau du haut : onglets Séance / Libre / Parcours, Bibliothèque et menu Fichier à gauche ;
+        à droite, en pastilles, le home trainer, le cardio, la FTP, le poids et le profil."""
+        bar = QToolBar("Bandeau")
+        bar.setObjectName("header")
         bar.setMovable(False)
+        bar.setFloatable(False)
+        bar.setContextMenuPolicy(Qt.PreventContextMenu)
         self.addToolBar(bar)
-        for text, shortcut, slot, tip in (
-            ("Nouvelle…", QKeySequence.New, self._new_workout, "Composer une séance en briques"),
-            ("Ouvrir…", QKeySequence.Open, self._open_file,
+        if ICON.exists():
+            logo = QLabel()
+            logo.setObjectName("appName")
+            logo.setPixmap(QIcon(str(ICON)).pixmap(28, 28))
+            logo.setToolTip("Home trainer")
+            bar.addWidget(logo)
+
+        self.tabs: dict[str, QToolButton] = {}
+        group = QButtonGroup(self)
+        for key, text, slot, tip in (
+            ("workout", "Séance", self.leave_free_ride, "La séance chargée"),
+            ("free", "Libre", self.enter_free_ride, "Rouler sans séance, consigne réglée à la main (Ctrl+L)"),
+            ("route", "Parcours", self.show_route, "Le parcours GPX chargé, sinon en choisir un (Ctrl+G)"),
+        ):
+            tab = self._header_button(text, tip, "tab")
+            tab.setCheckable(True)
+            tab.clicked.connect(slot)
+            group.addButton(tab)
+            bar.addWidget(tab)
+            self.tabs[key] = tab
+        self.tabs["workout"].setChecked(True)
+
+        actions = {}
+        for key, text, shortcut, slot, tip in (
+            ("new", "Nouvelle séance…", QKeySequence.New, self._new_workout, "Composer une séance en briques"),
+            ("open", "Ouvrir…", QKeySequence.Open, self._open_file,
              "Ouvrir une séance .zwo, .mrc, .erg ou .fit, ou un parcours .gpx"),
-            ("Parcours GPX…", QKeySequence("Ctrl+G"), self._open_route,
+            ("route", "Parcours GPX…", QKeySequence("Ctrl+G"), self._open_route,
              "Rouler un parcours .gpx : le home trainer simule la pente de la route"),
-            ("Modifier…", QKeySequence("Ctrl+E"), self._edit_workout, "Modifier la séance affichée"),
-            ("Enregistrer sous…", QKeySequence.Save, self._save_as,
+            ("edit", "Modifier la séance…", QKeySequence("Ctrl+E"), self._edit_workout,
+             "Modifier la séance affichée"),
+            ("save", "Enregistrer sous…", QKeySequence.Save, self._save_as,
              "Enregistrer la séance affichée en .zwo, .mrc, .erg ou .fit"),
-            ("Bibliothèque…", QKeySequence("Ctrl+B"), self._open_library,
+            ("library", "Bibliothèque…", QKeySequence("Ctrl+B"), self._open_library,
              "Séances du dossier de la bibliothèque : recherche, aperçu, double-clic pour rouler"),
+            ("history", "Historique…", QKeySequence("Ctrl+H"), self._open_history,
+             "Sorties du profil avec leur bilan, totaux par semaine, forme et records"),
         ):
             action = QAction(text, self)
             action.setShortcut(shortcut)
             action.setToolTip(tip)
             action.triggered.connect(slot)
-            bar.addAction(action)
-        # Deuxième rangée : qui roule, sur quoi, avec quels réglages.
-        self.addToolBarBreak()
-        bar = QToolBar("Cycliste et appareils")
-        bar.setMovable(False)
-        self.addToolBar(bar)
-        self.profile_action = QAction("Profil…", self)
-        self.profile_action.setToolTip("Changer de cycliste : FTP, poids, comptes Strava / Nolio et sorties")
-        self.profile_action.triggered.connect(self._choose_profile)
-        bar.addAction(self.profile_action)
-        history_action = QAction("Historique…", self)
-        history_action.setShortcut(QKeySequence("Ctrl+H"))
-        history_action.setToolTip("Sorties du profil avec leur bilan, totaux par semaine, forme et records")
-        history_action.triggered.connect(self._open_history)
-        bar.addAction(history_action)
-        trainer_action = QAction("Home trainer…", self)
-        trainer_action.triggered.connect(self._choose_trainer)
-        bar.addAction(trainer_action)
-        heart_action = QAction("Cardio…", self)
-        heart_action.triggered.connect(self._choose_heart_rate)
-        bar.addAction(heart_action)
-        accounts_action = QAction("Strava / Nolio…", self)
-        accounts_action.setToolTip("Comptes vers lesquels envoyer chaque sortie terminée")
-        accounts_action.triggered.connect(self._choose_accounts)
-        bar.addAction(accounts_action)
-        bar.addSeparator()
-        bar.addWidget(QLabel(" FTP "))
+            self.addAction(action)  # raccourci actif même menu fermé
+            actions[key] = action
+        library = self._header_button("Bibliothèque", actions["library"].toolTip() + " (Ctrl+B)", "tab")
+        library.clicked.connect(self._open_library)
+        bar.addWidget(library)
+        history = self._header_button("Historique", actions["history"].toolTip() + " (Ctrl+H)", "tab")
+        history.clicked.connect(self._open_history)
+        bar.addWidget(history)
+        menu = QMenu(self)
+        for key in ("new", "open", "route", None, "edit", "save"):
+            menu.addSeparator() if key is None else menu.addAction(actions[key])
+        file_button = self._header_button("Fichier  ▾", "Nouvelle séance, ouvrir, modifier, enregistrer", "tab")
+        file_button.setMenu(menu)
+        file_button.setPopupMode(QToolButton.InstantPopup)
+        bar.addWidget(file_button)
+
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        bar.addWidget(spacer)
+
+        self.source_label = self._header_button("", "Choisir ou calibrer le home trainer", "chip")
+        self.source_label.clicked.connect(self._choose_trainer)
+        bar.addWidget(self.source_label)
+        self.heart_chip = self._header_button("", "Choisir la ceinture cardio", "chip")
+        self.heart_chip.clicked.connect(self._choose_heart_rate)
+        bar.addWidget(self.heart_chip)
         self.ftp_box = QSpinBox()
         self.ftp_box.setRange(50, 600)
         self.ftp_box.setSuffix(" W")
         self.ftp_box.setValue(int(self.ftp))
         self.ftp_box.editingFinished.connect(self._ftp_changed)
-        bar.addWidget(self.ftp_box)
-        bar.addWidget(QLabel(" Poids "))
+        bar.addWidget(self._chip_box("FTP", self.ftp_box, "FTP du cycliste : les % FTP des séances en dépendent"))
         self.weight_box = QDoubleSpinBox()
         self.weight_box.setRange(30, 200)
         self.weight_box.setDecimals(1)
         self.weight_box.setSingleStep(0.5)
         self.weight_box.setSuffix(" kg")
         self.weight_box.setLocale(QLocale(QLocale.French))  # « 68,5 kg »
-        self.weight_box.setToolTip("Poids du cycliste, pour la pente simulée (mode libre et parcours GPX ; vélo : 9 kg en plus)")
         self.weight_box.setValue(self.free.rider_kg)
         self.weight_box.valueChanged.connect(self._weight_changed)
-        bar.addWidget(self.weight_box)
-        bar.addSeparator()
-        self.source_label = QLabel(f"  {self.source.name}")
-        self.source_label.setObjectName("metricSub")
-        bar.addWidget(self.source_label)
+        bar.addWidget(self._chip_box("Poids", self.weight_box, "Poids du cycliste, pour la pente simulée "
+                                     "(mode libre et parcours GPX ; vélo : 9 kg en plus)"))
+        self.profile_action = QAction("Profil…", self)
+        self.profile_action.setToolTip("Changer de cycliste : FTP, poids, comptes Strava / Nolio et sorties")
+        self.profile_action.triggered.connect(self._choose_profile)
+        profile_menu = QMenu(self)
+        change = profile_menu.addAction("Changer de cycliste…")
+        change.triggered.connect(self._choose_profile)
+        accounts = profile_menu.addAction("Comptes Strava / Nolio…")
+        accounts.setToolTip("Comptes vers lesquels envoyer chaque sortie terminée")
+        accounts.triggered.connect(self._choose_accounts)
+        profile = self._header_button("", "", "chip")
+        profile.setDefaultAction(self.profile_action)
+        profile.setMenu(profile_menu)
+        profile.setPopupMode(QToolButton.InstantPopup)
+        bar.addWidget(profile)
+
+    @staticmethod
+    def _header_button(text: str, tip: str, kind: str) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName(kind)
+        button.setText(text)
+        button.setToolTip(tip)
+        button.setFocusPolicy(Qt.NoFocus)
+        button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        button.setCursor(Qt.PointingHandCursor)
+        return button
+
+    @staticmethod
+    def _chip_box(label: str, box: QSpinBox | QDoubleSpinBox, tip: str) -> QWidget:
+        """Réglage en pastille : libellé grisé puis valeur modifiable (clavier ou molette)."""
+        chip = QWidget()
+        chip.setObjectName("chipBox")
+        chip.setAttribute(Qt.WA_StyledBackground, True)
+        chip.setToolTip(tip)
+        row = QHBoxLayout(chip)
+        row.setContentsMargins(0, 0, 12, 0)
+        row.setSpacing(4)
+        row.addWidget(QLabel(label))
+        box.setAlignment(Qt.AlignRight)
+        box.setMinimumWidth(box.fontMetrics().horizontalAdvance("000,0 kg") + 8)
+        row.addWidget(box)
+        return chip
 
     def _build_body(self) -> None:
         self.pages = QStackedWidget()
@@ -233,50 +302,62 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 10, 14, 14)
         layout.setSpacing(10)
 
+        heading = QHBoxLayout()
         self.title = QLabel()
         self.title.setObjectName("title")
-        layout.addWidget(self.title)
+        self.subtitle = QLabel()
+        self.subtitle.setObjectName("metricSub")
+        heading.addWidget(self.title)
+        heading.addWidget(self.subtitle, 1, Qt.AlignBottom)
+        layout.addLayout(heading)
 
         grid = QGridLayout()
         grid.setSpacing(10)
-        self.m_power = Metric("PUISSANCE", 52, POWER)
-        self.m_target = Metric("CIBLE", 52, ACCENT)
-        self.m_step = Metric("RESTE SUR LA BRIQUE", 52)
-        self.m_total = Metric("RESTE AU TOTAL", 30)
-        self.m_cadence = Metric("CADENCE", 30, CADENCE)
-        self.m_heart = Metric("CARDIO", 52, HEART)
-        grid.addWidget(self.m_power, 0, 0)
-        grid.addWidget(self.m_target, 0, 1)
-        grid.addWidget(self.m_heart, 0, 2)
-        grid.addWidget(self.m_step, 0, 3)
-        grid.addWidget(self.m_cadence, 1, 0)
-        grid.addWidget(self._build_intensity(), 1, 1, 1, 2)
+        self.m_power = Metric("PUISSANCE", 64)
+        self.power_zones = ZoneBar()
+        self.m_power.add(self.power_zones)
+        self.m_target = Metric("CIBLE", 64, ACCENT)
+        self.step_ring = BrickRing(124)
+        self.step_ring.setToolTip("Temps restant sur la brique")
+        self.m_target.row.addWidget(self.step_ring, 0, Qt.AlignTop)
+        self.zone_tag = QLabel()
+        self.next_label = QLabel()
+        self.next_label.setObjectName("metricSub")
+        tag_row = QHBoxLayout()
+        tag_row.addWidget(self.zone_tag)
+        tag_row.addStretch(1)
+        self.m_target.body.addLayout(tag_row)
+        self.m_target.add(self.next_label)
+        self.m_cadence = Metric("CADENCE", 34, CADENCE)
+        self.m_heart = Metric("CARDIO", 34, HEART)
+        self.m_total = Metric("RESTE AU TOTAL", 34)
+        self.total_bar = QProgressBar()
+        self.total_bar.setTextVisible(False)
+        self.total_bar.setFixedHeight(6)
+        self.total_bar.setRange(0, 1000)
+        self.m_total.add(self.total_bar)
+        grid.addWidget(self.m_power, 0, 0, 2, 1)
+        grid.addWidget(self.m_target, 0, 1, 2, 1)
+        grid.addWidget(self.m_cadence, 0, 2)
+        grid.addWidget(self.m_heart, 0, 3)
+        grid.addWidget(self._build_intensity(), 1, 2)
         grid.addWidget(self.m_total, 1, 3)
-        for c in range(4):
-            grid.setColumnStretch(c, 1)
+        for c, stretch in enumerate((28, 30, 21, 21)):
+            grid.setColumnStretch(c, stretch)
         layout.addLayout(grid)
 
         self.current_label = QLabel()
         self.current_label.setObjectName("current")
-        self.next_label = QLabel()
-        self.next_label.setObjectName("metricSub")
         layout.addWidget(self.current_label)
-        layout.addWidget(self.next_label)
 
         self.chart = WorkoutChart()
         layout.addWidget(self.chart, 1)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(8)
         self.play_button = QPushButton("Démarrer")
         self.play_button.setObjectName("play")
         self.play_button.clicked.connect(self._toggle)
-        self.next_button = QPushButton("Brique suivante")
-        self.next_button.clicked.connect(self._next_step)
-        self.reset_button = QPushButton("Recommencer")
-        self.reset_button.clicked.connect(self._reset)
-        self.free_button = QPushButton("Mode libre")
-        self.free_button.setToolTip("Rouler sans séance en réglant la puissance à la main (Ctrl+L)")
-        self.free_button.clicked.connect(self.enter_free_ride)
         self.erg_button = QPushButton("ERG on")
         self.erg_button.setObjectName("erg")
         self.erg_button.setCheckable(True)
@@ -284,15 +365,25 @@ class MainWindow(QMainWindow):
         self.erg_button.setToolTip("ERG on : le home trainer impose la cible.\nERG off : résistance libre, "
                                    "la séance continue et la cible est à suivre à la main (E)")
         self.erg_button.clicked.connect(self.toggle_erg)
+        self.next_button = QPushButton("Brique suivante")
+        self.next_button.setIcon(icon("next"))
+        self.next_button.clicked.connect(self._next_step)
+        self.reset_button = QPushButton("Recommencer")
+        self.reset_button.setIcon(icon("restart"))
+        self.reset_button.clicked.connect(self._reset)
         self.finish_button = QPushButton("Terminer")
+        self.finish_button.setIcon(icon("flag"))
         self.finish_button.setToolTip(FINISH_TIP)
         self.finish_button.clicked.connect(self.finish_ride)
+        self.free_button = QPushButton("Mode libre")
+        self.free_button.setToolTip("Rouler sans séance en réglant la puissance à la main (Ctrl+L)")
+        self.free_button.clicked.connect(self.enter_free_ride)
         for b in (self.play_button, self.erg_button, self.next_button, self.reset_button, self.finish_button, self.free_button):
             b.setFocusPolicy(Qt.NoFocus)
+            b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
         buttons.addStretch(1)
-        hint = QLabel("Espace : démarrer / pause   ↑ ↓ : ±1 %   → : brique suivante   E : ERG on / off")
-        hint.setObjectName("metricSub")
+        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] ±1 %   [→] brique suivante   [E] ERG"))
         buttons.addWidget(hint)
         layout.addLayout(buttons)
 
@@ -323,23 +414,21 @@ class MainWindow(QMainWindow):
         box = QFrame()
         box.setObjectName("metric")
         layout = QVBoxLayout(box)
-        layout.setContentsMargins(14, 8, 14, 10)
+        layout.setContentsMargins(16, 10, 16, 12)
         layout.setSpacing(4)
         title = QLabel("INTENSITÉ")
         title.setObjectName("metricTitle")
         layout.addWidget(title)
         row = QHBoxLayout()
-        self.minus_button = QPushButton("−1 %")
-        self.plus_button = QPushButton("+1 %")
+        self.minus_button = QPushButton("−1")
+        self.plus_button = QPushButton("+1")
         self.intensity_label = QLabel("100 %")
-        font = QFont()
-        font.setPointSize(30)
-        font.setBold(True)
-        self.intensity_label.setFont(font)
+        self.intensity_label.setFont(number_font(40))
         self.intensity_label.setAlignment(Qt.AlignCenter)
         for b, delta in ((self.minus_button, -1), (self.plus_button, +1)):
             b.setObjectName("adjust")
             b.setFocusPolicy(Qt.NoFocus)
+            b.setToolTip(f"{delta:+d} % sur toute la suite de la séance".replace("-", "−"))
             b.setAutoRepeat(True)  # rester appuyé fait défiler les pourcents
             b.setAutoRepeatDelay(400)
             b.setAutoRepeatInterval(120)
@@ -347,7 +436,9 @@ class MainWindow(QMainWindow):
         row.addWidget(self.minus_button)
         row.addWidget(self.intensity_label, 1)
         row.addWidget(self.plus_button)
+        layout.addStretch(1)
         layout.addLayout(row)
+        layout.addStretch(1)
         return box
 
     def _build_shortcuts(self) -> None:
@@ -393,7 +484,9 @@ class MainWindow(QMainWindow):
         self.erg_button.setEnabled(workout.has_power_targets)
         self._since_sample = 0.0
         self.chart.set_session(self.session)
-        self.title.setText(f"{workout.name}  ·  {hms(self.session.total_s)}")
+        self.title.setText(workout.name)
+        count = len(self.session.segments)
+        self.subtitle.setText(f"   {hms(self.session.total_s)}  ·  {count} brique{'s' if count > 1 else ''}")
         if not self.free_ride:
             self.setWindowTitle(f"{workout.name} — Home trainer")
         self._refresh()
@@ -468,6 +561,20 @@ class MainWindow(QMainWindow):
         self.active.pause()
         self.pages.setCurrentIndex(0)
         self.setWindowTitle(f"{self.session.workout.name} — Home trainer")
+        self._push_target()
+        self._refresh()
+
+    def show_route(self) -> None:
+        """Revient au parcours chargé (en pause, tel qu'on l'a laissé) ; sans parcours, en propose un."""
+        if self.route is None:
+            self._open_route()
+            self._refresh()  # onglet Parcours décoché si rien n'a été choisi
+            return
+        if self.route_ride:
+            return
+        self.active.pause()
+        self.pages.setCurrentWidget(self.route_panel)
+        self.setWindowTitle(f"{self.route.route.name} — Home trainer")
         self._push_target()
         self._refresh()
 
@@ -816,7 +923,7 @@ class MainWindow(QMainWindow):
             history.add(summary)
         if not auto_services(self.accounts):
             self.statusBar().showMessage(f"Sortie enregistrée : {shown} (pour l'envoyer vers Strava ou "
-                                         f"Nolio, connectez un compte : Strava / Nolio…)", 15000)
+                                         f"Nolio, connectez un compte : Profil → Comptes Strava / Nolio…)", 15000)
         else:
             self.statusBar().showMessage(f"Sortie enregistrée : {shown}, envoi en cours…", 15000)
         if send:
@@ -888,7 +995,7 @@ class MainWindow(QMainWindow):
             text = " · ".join(str(r) for r in reports[-4:])
             failed = [r for r in reports if not r.ok]
             if failed:
-                text += " (nouvel essai au prochain lancement, ou bouton Strava / Nolio…)"
+                text += " (nouvel essai au prochain lancement, ou Profil → Comptes Strava / Nolio…)"
             self.statusBar().showMessage(text, 20000)
         if self._send_again:
             self._send_again = False
@@ -977,26 +1084,32 @@ class MainWindow(QMainWindow):
         self.source.set_target(active.command if running else None)
 
     def _refresh(self) -> None:
+        self._refresh_source()
+        self._refresh_heart_chip()
+        page = "route" if self.route_ride else "free" if self.free_ride else "workout"
+        if not self.tabs[page].isChecked():
+            self.tabs[page].setChecked(True)
         if self.route_ride:
             self.route_panel.refresh(self.route, self._last_reading)
             self._refresh_heart_rate(self.route_panel.m_heart, self.route)
-            self._refresh_source()
             return
         if self.free_ride:
             self.free_panel.refresh(self.free, self._last_reading)
             self._refresh_heart_rate(self.free_panel.m_heart, self.free)
-            self._refresh_source()
             return
         s = self.session
         r = self._last_reading
         self.m_power.set(f"{r.power_w:.0f} W" if r else "—", f"{r.power_w / self.ftp * 100:.0f} % FTP" if r else "")
+        self.power_zones.set_zone(zone_index(r.power_w if r else None, self.ftp))
         target = s.target_w
         base = s.base_target_w
         bpm = s.target_bpm
         sub = "" if base is None or s.intensity_pct == 100 else f"séance : {base:.0f} W  ({s.intensity_pct} %)"
+        color = None if target is None or s.state is State.FINISHED else zone_color(target, self.ftp)
         if target is None and bpm is not None:  # séance en FC roulée aux vitesses
             self.m_target.set(f"{bpm:.0f} bpm", "FC cible · résistance libre, aux vitesses")
             self.m_target.title.setText("CIBLE FC")
+            self.m_target.set_color(HEART)
         else:
             if bpm is not None:
                 sub = f"FC cible {bpm:.0f} bpm" + (f"  ·  {sub}" if sub else "")
@@ -1004,41 +1117,81 @@ class MainWindow(QMainWindow):
                 sub = "ERG off : à suivre à la main" + (f"  ·  {sub}" if sub else "")
             self.m_target.set("libre" if target is None else f"{target:.0f} W", sub)
             self.m_target.title.setText("CIBLE" if s.erg else "CIBLE (ERG OFF)")
+            # Récup (zone 1, grise) : chiffres en blanc, sinon ils auraient l'air éteints.
+            self.m_target.set_color(TEXT if color is None or zone_index(target, self.ftp) == 0 else color)
+        self.m_target.set_tint(color)
+        self.m_power.set_tint(color)
+        if color is None:
+            self.zone_tag.hide()
+        else:
+            self.zone_tag.setText(f"{zone_label(target, self.ftp)}  ·  {target / self.ftp * 100:.0f} % FTP")
+            self.zone_tag.setStyleSheet(pill(color))
+            self.zone_tag.show()
         self.erg_button.setChecked(s.erg)
         self.erg_button.setText("ERG on" if s.erg else "ERG off")
+        self.erg_button.setIcon(icon("check", "#6fd3a3") if s.erg else QIcon())
         remaining = s.step_remaining_s
-        self.m_step.set("tour" if remaining is None else hms(remaining),
-                        f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}")
+        seg = s.segment
+        fraction = (remaining / seg.duration_s if remaining is not None and seg is not None and seg.duration_s
+                    else None)
+        brick = f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}"
+        self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick,
+                           color or MUTED)
         self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
+        self.total_bar.setValue(round(1000 * s.elapsed_s / s.total_s) if s.total_s else 0)
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
         self._refresh_heart_rate(self.m_heart, s)
-        self._refresh_source()
         self.intensity_label.setText(f"{s.intensity_pct} %")
         self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
         if s.state is State.FINISHED:
             self.current_label.setText("Séance terminée")
             self.next_label.setText("")
         else:
-            self.current_label.setText(f"Maintenant : {describe_segment(s.segment, self.ftp, s.intensity_pct)}")
+            self.current_label.setText(f"Maintenant : {describe_segment(s.segment, self.ftp, s.intensity_pct)}"
+                                       f"   ·   {brick}")
             self.next_label.setText(f"Ensuite : {describe_segment(s.next_segment, self.ftp, s.intensity_pct)}"
                                     if s.next_segment else "Dernière brique")
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
+        self.play_button.setIcon(icon("pause" if s.state is State.RUNNING else "play", "#18191c"))
         self.chart.update()
 
     def _refresh_source(self) -> None:
         source = self.source
         self._remember("trainer", source)
         text = self._display_name("trainer", source)
+        color = GOOD
         if isinstance(source, Trainer) and (source.state is not SensorState.CONNECTED or source.latest() is None):
             text += f" : {source.status if source.state is not SensorState.CONNECTED else 'signal perdu'}"
-        self.source_label.setText(f"  {text}")
+            color = WAIT
+        elif not isinstance(source, Trainer):
+            color = OFF  # simulé
+        if self.source_label.text() != text:
+            self.source_label.setText(text)
+        if getattr(self, "_source_color", None) != color:
+            self._source_color = color
+            self.source_label.setIcon(dot(color))
+
+    def _refresh_heart_chip(self) -> None:
+        sensor = self.heart_rate
+        if sensor is None:
+            text, color = "Cardio : aucun", OFF
+        elif sensor.latest() is not None:
+            name = self._display_name("hr", sensor)
+            text, color = (name if "cardio" in name.lower() else f"Cardio · {name}"), GOOD
+        else:
+            text, color = f"Cardio : {sensor.status if sensor.state is not SensorState.CONNECTED else 'signal perdu'}", WAIT
+        if self.heart_chip.text() != text:
+            self.heart_chip.setText(text)
+        if getattr(self, "_heart_color", None) != color:
+            self._heart_color = color
+            self.heart_chip.setIcon(dot(color))
 
     def _refresh_heart_rate(self, metric: Metric,
                             session: WorkoutSession | FreeRideSession | RouteSession) -> None:
         sensor = self.heart_rate
         if sensor is None:
-            metric.set("Off", "aucun capteur · menu Cardio…")
+            metric.set("Off", "aucun capteur · pastille Cardio en haut")
             return
         self._remember("hr", sensor)
         heart = sensor.latest()
@@ -1335,32 +1488,6 @@ class TrainerDialog(SensorDialog):
         return open_power_source(kind, **args)
 
 
-STYLE = f"""
-QMainWindow, QWidget {{ background: {BG}; color: {TEXT}; }}
-QToolBar {{ background: {PANEL}; border: none; padding: 4px; spacing: 6px; }}
-QToolBar QToolButton {{ padding: 4px 10px; }}
-QFrame#metric {{ background: {PANEL}; border-radius: 10px; }}
-QFrame#metric QLabel {{ background: transparent; }}
-QLabel#metricTitle {{ color: {MUTED}; font-size: 11px; font-weight: bold; letter-spacing: 1px; }}
-QLabel#metricSub {{ color: {MUTED}; font-size: 12px; background: transparent; }}
-QLabel#title {{ font-size: 18px; font-weight: bold; }}
-QLabel#current {{ font-size: 16px; }}
-QPushButton {{ background: #2d323c; border: none; border-radius: 6px; padding: 8px 16px; font-size: 14px; }}
-QPushButton:hover {{ background: #3a404c; }}
-QPushButton#play {{ background: {ACCENT}; color: #1a1a1a; font-weight: bold; min-width: 110px; }}
-QPushButton#mode {{ padding: 3px 10px; font-size: 12px; min-width: 52px; }}
-QPushButton#mode:checked {{ background: {ACCENT}; color: #1a1a1a; font-weight: bold; }}
-QPushButton#erg {{ background: #5a2f2f; color: {TEXT}; font-weight: bold; min-width: 90px; }}
-QPushButton#erg:checked {{ background: #2f5a3a; }}
-QPushButton#adjust {{ font-size: 18px; font-weight: bold; min-width: 70px; min-height: 44px; }}
-QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox {{ background: #2d323c; border: none; padding: 3px 6px; }}
-QPushButton:disabled {{ color: {MUTED}; }}
-QTreeWidget {{ background: {PANEL}; border: none; font-size: 14px; }}
-QTreeWidget::item {{ padding: 3px; }}
-QTreeWidget::item:selected {{ background: #3a404c; }}
-QHeaderView::section {{ background: {BG}; color: {MUTED}; border: none; padding: 4px; }}
-QStatusBar {{ color: {MUTED}; }}
-"""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1389,7 +1516,7 @@ def main(argv: list[str] | None = None) -> int:
     _set_windows_app_id()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Home trainer")
-    app.setStyleSheet(STYLE)
+    install(app)  # polices embarquées et feuille de style
     if ICON.exists():
         app.setWindowIcon(QIcon(str(ICON)))
     # Sans option, on rebranche les appareils de la dernière fois (mémorisés dans le profil utilisateur).
