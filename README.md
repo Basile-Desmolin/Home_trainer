@@ -165,6 +165,15 @@ résistance libre (route plate, selon le poids) ; la séance continue de
 dérouler et la cible reste affichée pour la suivre à la main avec les
 vitesses. ERG on reprend la consigne de la brique en cours.
 
+**Séances en fréquence cardiaque** : certains `.erg` donnent les cibles en FC
+(`MINUTES HR`, `BPM`, `HEARTRATE`…). À l'ouverture, une fenêtre propose :
+- **Sans ERG** : résistance libre, la FC cible s'affiche (en bpm) et l'on
+  règle l'effort avec les vitesses ;
+- **En puissance** : chaque cible de FC devient un % FTP d'après la **FC max**
+  (gardée dans le profil). La FC au seuil est estimée à 90 % de la FC max et
+  les zones de FC de Coggan sont reliées aux zones de puissance
+  (`heart_zones.py`) ; la FC cible reste affichée sous la cible en watts.
+
 Pendant une sortie (en cours ou en pause), le PC ne se met pas en veille et
 l'écran ne s'éteint pas (Windows) ; le réglage d'alimentation habituel revient
 dès la sortie terminée.
@@ -368,6 +377,28 @@ sorties en attente**.
 
 ![Strava et Nolio](docs/strava-nolio.png)
 
+### Bilan de fin de sortie et historique
+
+La fenêtre **Enregistrer la sortie** commence par le **bilan** de la sortie :
+durée et distance, puissance moyenne, normalisée et max, IF, TSS, travail (kJ),
+FC moyenne et max, cadence moyenne, **temps passé dans chaque zone** de
+puissance (Z1 à Z7, de la FTP du profil) et **meilleures puissances** sur 5 s,
+1 min, 5 min, 20 min et 1 h. Une meilleure puissance jamais atteinte jusque-là
+par le profil est marquée **★ record**.
+
+Chaque sortie enregistrée s'ajoute à l'**historique** du profil (onglet
+**Historique** du bandeau ou Ctrl+H) : la liste des sorties (double-clic : leur bilan),
+les heures et le TSS des 12 dernières semaines, la **condition** (CTL, charge
+des 6 dernières semaines), la **forme** (condition moins fatigue, TSB) et la
+courbe des meilleures puissances, de toujours et des 6 dernières semaines. Il est
+gardé dans `historique.json` du dossier des sorties du profil ; une sortie
+« Ne pas enregistrer » n'y entre pas. **Retirer de l'historique** enlève une
+sortie de la liste sans toucher à son fichier.
+
+![Bilan de fin de sortie](docs/bilan.png)
+
+![Historique](docs/historique.png)
+
 ### Connecter Strava (une fois)
 
 Strava n'accepte les envois que d'une appli API déclarée : chacun crée la
@@ -444,7 +475,7 @@ sans matériel (`tests/test_sensors.py`).
 | Extension | Puissance | Ce qui se perd à l'écriture |
 | --- | --- | --- |
 | `.zwo` (Zwift) | % FTP | plages (→ valeur moyenne) ; répétitions autres que on/off dépliées |
-| `.erg` | watts | répétitions dépliées, plages (→ moyenne), noms |
+| `.erg` | watts (ou FC en bpm) | répétitions dépliées, plages (→ moyenne), noms |
 | `.mrc` | % FTP | idem `.erg` |
 | `.fit` | watts ou % FTP | rampes écrites en paliers d'une minute |
 

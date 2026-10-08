@@ -42,8 +42,11 @@ from ..devices import DeviceBook, SavedDevice, ant_ident
 from ..formats import FormatError, save_workout
 from ..formats.activity_export import write_ride
 from ..formats.fit_activity import activity_file_name
+from ..heart_zones import to_power
+from ..history import FILE_NAME as HISTORY_FILE, RideHistory
 from ..keep_awake import KeepAwake
 from ..profiles import Profile, ProfileBook
+from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
                        Trainer, open_heart_rate_sensor, open_power_meter)
@@ -56,9 +59,11 @@ from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .gauges import BrickRing, ZoneBar
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
+from .heart_rate_mode import ask_heart_rate_mode
 from .loader import load_workout
 from .metric import Metric
 from .profiles import choose_profile
+from .history import HistoryDialog
 from .ride_export import DISCARD, RideExport, ask_ride_export
 from .power import PowerSource, Reading, SimulatedTrainer, open_power_source, road_speed_kmh
 from .route_ride import RoutePanel
@@ -79,7 +84,11 @@ def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) 
         return "—"
     duration = "jusqu'au tour" if seg.duration_s is None else hms(seg.duration_s)
     p = seg.step.power
-    if p is None or seg.low_w is None:
+    hr = seg.step.heart_rate
+    if hr is not None and seg.low_w is None:  # séance en FC roulée sans ERG
+        start, end = seg.target_bpm(0), seg.target_bpm(seg.duration_s or 0)
+        target = f"{start:.0f} bpm" if round(start) == round(end) else f"{start:.0f} → {end:.0f} bpm"
+    elif p is None or seg.low_w is None:
         target = "libre"
     else:
         k = intensity_pct / 100
@@ -89,6 +98,8 @@ def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) 
         if p.unit is PowerUnit.FTP_PERCENT:
             pct = (p.low + p.high) / 2 * k
             target += f"  ({pct:.0f} % FTP)" if not seg.step.is_ramp else ""
+        if hr is not None:
+            target += f"  ·  FC {hr.mid:.0f} bpm" if seg.step.heart_rate_end is None else ""
     name = f"  ·  {seg.step.name}" if seg.step.name else ""
     return f"{duration} à {target}{name}"
 
@@ -114,6 +125,9 @@ class MainWindow(QMainWindow):
         self._send_again = False
         # Fenêtre de fin de sortie (remplaçable dans les tests) et derniers choix faits dedans.
         self.ask_ride_export = ask_ride_export
+        self.ask_heart_rate_mode = ask_heart_rate_mode  # séance en FC : sans ERG ou convertie en puissance
+        self._hr_to_power = False  # dernier choix fait pour une séance en FC
+        self._erg_wanted = True  # ERG voulu (bouton), repris par les séances qui ont des cibles en puissance
         self._export_folder: Path | None = None  # None : dossier des sorties du profil
         self._export_fmt = "fit"
         self._asking = False
@@ -198,6 +212,8 @@ class MainWindow(QMainWindow):
              "Enregistrer la séance affichée en .zwo, .mrc, .erg ou .fit"),
             ("library", "Bibliothèque…", QKeySequence("Ctrl+B"), self._open_library,
              "Séances du dossier de la bibliothèque : recherche, aperçu, double-clic pour rouler"),
+            ("history", "Historique…", QKeySequence("Ctrl+H"), self._open_history,
+             "Sorties du profil avec leur bilan, totaux par semaine, forme et records"),
         ):
             action = QAction(text, self)
             action.setShortcut(shortcut)
@@ -208,6 +224,9 @@ class MainWindow(QMainWindow):
         library = self._header_button("Bibliothèque", actions["library"].toolTip() + " (Ctrl+B)", "tab")
         library.clicked.connect(self._open_library)
         bar.addWidget(library)
+        history = self._header_button("Historique", actions["history"].toolTip() + " (Ctrl+H)", "tab")
+        history.clicked.connect(self._open_history)
+        bar.addWidget(history)
         menu = QMenu(self)
         for key in ("new", "open", "route", None, "edit", "save"):
             menu.addSeparator() if key is None else menu.addAction(actions[key])
@@ -471,10 +490,12 @@ class MainWindow(QMainWindow):
     def load(self, workout: Workout, *, end_ride: bool = True) -> None:
         if end_ride:  # la séance en cours, même inachevée, est enregistrée avant d'être remplacée
             self.end_ride(self.session)
-        intensity, erg = self.session.intensity_pct, self.session.erg
+        intensity = self.session.intensity_pct
         self.session = WorkoutSession(workout, self.ftp, self.free.rider_kg)
         self.session.intensity_pct = intensity
-        self.session.erg = erg
+        # Sans cible en puissance (séance en FC roulée aux vitesses), pas d'ERG possible.
+        self.session.erg = self._erg_wanted and workout.has_power_targets
+        self.erg_button.setEnabled(workout.has_power_targets)
         self._since_sample = 0.0
         self.chart.set_session(self.session)
         self.title.setText(workout.name)
@@ -491,9 +512,9 @@ class MainWindow(QMainWindow):
 
     def toggle_erg(self) -> None:
         """Séance : ERG on (le home trainer impose la cible) ou off (résistance libre, cible à suivre)."""
-        if self.free_ride or self.route_ride:
+        if self.free_ride or self.route_ride or not self.session.workout.has_power_targets:
             return
-        self.session.toggle_erg()
+        self._erg_wanted = self.session.toggle_erg()
         self._push_target()
         self._refresh()
 
@@ -788,9 +809,29 @@ class MainWindow(QMainWindow):
         self.directory = str(Path(path).parent)
         if warnings:
             QMessageBox.information(self, "À savoir", "\n".join(warnings))
+        if workout.uses_heart_rate and not workout.has_power_targets:
+            workout = self._heart_rate_workout(workout)
+            if workout is None:
+                return False
         self.leave_free_ride()
         self.load(workout)
         return True
+
+    def _heart_rate_workout(self, workout: Workout) -> Workout | None:
+        """Séance aux cibles en FC : telle quelle (sans ERG, aux vitesses) ou convertie en puissance
+        d'après la FC max du profil (demandée, puis gardée dans le profil). None si l'on renonce."""
+        hr_max = self.profile.hr_max if self.profile is not None else None
+        choice = self.ask_heart_rate_mode(self, workout.name, hr_max, self._hr_to_power)
+        if choice is None:
+            return None
+        self._hr_to_power = choice.to_power
+        if not choice.to_power:
+            return workout
+        if self.profile is not None and self.profile.hr_max != choice.hr_max:
+            self.profile.hr_max = choice.hr_max
+            self.profiles.save()
+        self._erg_wanted = True  # converties en puissance pour être roulées en ERG
+        return to_power(workout, choice.hr_max)
 
     def open_route(self, path: str) -> bool:
         try:
@@ -873,8 +914,10 @@ class MainWindow(QMainWindow):
         start = next((x.at for x in session.samples if x.at is not None), time.time())
         default = RideExport(self._export_folder or self.outbox.dir,
                              Path(activity_file_name(start, title)).stem, self._export_fmt)
-        watts = sum(x.power_w for x in session.samples) / len(session.samples)
-        summary = f"{title} · {hms(session.elapsed_s)} · moyenne {watts:.0f} W"
+        summary = self.ride_summary(session)
+        history = self.ride_history()
+        if history is not None:
+            history.mark_records(summary)
         choice = self.ask_ride_export(self, default, summary)
         if choice is None:
             return False
@@ -913,6 +956,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Sortie non enregistrée", f"{where} : {e}")
             return False
         shown = path.name if path.parent == self.outbox.dir.absolute() else str(path)
+        history = self.ride_history()
+        if history is not None:
+            summary = self.ride_summary(session)
+            summary.file = str(Path(path).absolute())
+            history.add(summary)
         if not auto_services(self.accounts):
             self.statusBar().showMessage(f"Sortie enregistrée : {shown} (pour l'envoyer vers Strava ou "
                                          f"Nolio, connectez un compte : Profil → Comptes Strava / Nolio…)", 15000)
@@ -921,6 +969,25 @@ class MainWindow(QMainWindow):
         if send:
             self.send_rides()
         return True
+
+    def ride_summary(self, session: WorkoutSession | FreeRideSession | RouteSession) -> RideSummary:
+        """Bilan de la sortie : chiffres, temps par zone, meilleures puissances."""
+        title, _ = ride_title(session)
+        start = next((x.at for x in session.samples if x.at is not None), time.time())
+        return summarize(session.samples, self.ftp, title, start)
+
+    def ride_history(self) -> RideHistory | None:
+        """Historique du profil, dans son dossier des sorties (None sans dossier des sorties)."""
+        if self.outbox is None:
+            return None
+        return RideHistory.load(self.outbox.dir / HISTORY_FILE)
+
+    def _open_history(self) -> None:
+        history = self.ride_history()
+        if history is None:
+            self.statusBar().showMessage("Pas d'historique : les sorties ne sont pas enregistrées", 8000)
+            return
+        HistoryDialog(history, self.profile.name if self.profile else "", self).exec()
 
     def _ask_at_end(self, session: WorkoutSession | RouteSession) -> None:
         """Fin de séance ou arrivée du parcours : la fenêtre d'enregistrement s'ouvre d'elle-même, une fois."""
@@ -1094,14 +1161,22 @@ class MainWindow(QMainWindow):
         self.power_zones.set_zone(zone_index(r.power_w if r else None, self.ftp))
         target = s.target_w
         base = s.base_target_w
+        bpm = s.target_bpm
         sub = "" if base is None or s.intensity_pct == 100 else f"séance : {base:.0f} W  ({s.intensity_pct} %)"
-        if not s.erg:
-            sub = "ERG off : à suivre à la main" + (f"  ·  {sub}" if sub else "")
-        self.m_target.set("libre" if target is None else f"{target:.0f} W", sub)
-        self.m_target.title.setText("CIBLE" if s.erg else "CIBLE (ERG OFF)")
         color = None if target is None or s.state is State.FINISHED else zone_color(target, self.ftp)
-        # Récup (zone 1, grise) : chiffres en blanc, sinon ils auraient l'air éteints.
-        self.m_target.set_color(TEXT if color is None or zone_index(target, self.ftp) == 0 else color)
+        if target is None and bpm is not None:  # séance en FC roulée aux vitesses
+            self.m_target.set(f"{bpm:.0f} bpm", "FC cible · résistance libre, aux vitesses")
+            self.m_target.title.setText("CIBLE FC")
+            self.m_target.set_color(HEART)
+        else:
+            if bpm is not None:
+                sub = f"FC cible {bpm:.0f} bpm" + (f"  ·  {sub}" if sub else "")
+            if not s.erg:
+                sub = "ERG off : à suivre à la main" + (f"  ·  {sub}" if sub else "")
+            self.m_target.set("libre" if target is None else f"{target:.0f} W", sub)
+            self.m_target.title.setText("CIBLE" if s.erg else "CIBLE (ERG OFF)")
+            # Récup (zone 1, grise) : chiffres en blanc, sinon ils auraient l'air éteints.
+            self.m_target.set_color(TEXT if color is None or zone_index(target, self.ftp) == 0 else color)
         self.m_target.set_tint(color)
         self.m_power.set_tint(color)
         if color is None:
