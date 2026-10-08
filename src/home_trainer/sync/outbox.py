@@ -22,7 +22,7 @@ from ..config import config_dir
 from ..formats.fit_activity import ActivityPoint, activity_file_name, write_activity
 from .accounts import SERVICES, AccountBook
 from .services import Service, open_service
-from .web import CALLBACK_PORT, Http, SyncError, urllib_http, wait_for_code
+from .web import CALLBACK_PORT, Http, SyncError, local_callback, parse_callback, urllib_http, wait_for_code
 
 log = logging.getLogger(__name__)
 
@@ -162,14 +162,57 @@ def send_pending(outbox: Outbox, book: AccountBook, http: Http = urllib_http,
     return reports
 
 
-def connect(service: Service, book: AccountBook, open_browser: Callable[[str], object],
-            port: int = CALLBACK_PORT, timeout_s: float = 300) -> None:
-    """Connexion OAuth : ouvre la page d'accord du service, attend le retour sur localhost, garde les jetons."""
+@dataclass(frozen=True)
+class Authorization:
+    """Connexion OAuth en cours : page d'accord à ouvrir, et où la réponse reviendra."""
+
+    url: str
+    state: str
+    redirect_uri: str
+
+    @property
+    def local(self) -> tuple[int, str] | None:
+        """(port, chemin) quand la réponse revient sur http://localhost ; None : adresse à recopier."""
+        return local_callback(self.redirect_uri)
+
+
+def start_connect(service: Service, port: int = CALLBACK_PORT) -> Authorization:
     if not service.account.configured:
         raise SyncError(f"{service.label} : saisissez d'abord l'identifiant et le secret de votre appli API")
     state = secrets.token_urlsafe(16)
     redirect = service.redirect_uri(port)
-    url = service.authorize_url(redirect, state)
-    code = wait_for_code(service.key, state, port, timeout_s, ready=lambda: open_browser(url))
-    service.exchange_code(code, redirect)
+    return Authorization(service.authorize_url(redirect, state), state, redirect)
+
+
+def finish_connect(service: Service, book: AccountBook, auth: Authorization, code: str) -> None:
+    """Échange le code contre les jetons et les garde."""
+    try:
+        service.exchange_code(code, auth.redirect_uri)
+    except SyncError as e:
+        raise SyncError(f"{e} (URL de rappel envoyée : {auth.redirect_uri}, elle doit être exactement "
+                        f"celle déclarée chez {service.label})") from e
     book.save()
+
+
+def connect(service: Service, book: AccountBook, open_browser: Callable[[str], object],
+            port: int = CALLBACK_PORT, timeout_s: float = 300, cancel: threading.Event | None = None,
+            paste: Callable[[], str | None] | None = None) -> None:
+    """Connexion OAuth : ouvre la page d'accord du service, attend la réponse et garde les jetons.
+
+    Avec une URL de rappel http://localhost, la réponse arrive d'elle-même ; sinon (https…),
+    `paste` rend l'adresse de la page affichée après l'accord, recopiée par l'utilisateur.
+    """
+    auth = start_connect(service, port)
+    local = auth.local
+    if local is None:
+        if paste is None:
+            raise SyncError(f"{service.label} : URL de rappel {auth.redirect_uri} non prise en charge")
+        open_browser(auth.url)
+        pasted = paste()
+        if not pasted:
+            raise SyncError("connexion annulée")
+        code = parse_callback(pasted, auth.state)
+    else:
+        code = wait_for_code(local[1], auth.state, local[0], timeout_s, ready=lambda: open_browser(auth.url),
+                             cancel=cancel)
+    finish_connect(service, book, auth, code)

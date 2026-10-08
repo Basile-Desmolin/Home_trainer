@@ -36,6 +36,7 @@ class Account:
     expires_at: float = 0.0  # heure d'expiration du jeton d'accès (secondes depuis 1970)
     athlete: str = ""  # nom du compte connecté, pour l'affichage
     auto: bool = True  # envoyer chaque sortie dès qu'elle est terminée
+    redirect_uri: str = ""  # URL de rappel déclarée dans l'appli API ("" : http://localhost:8765/<service>)
 
     @property
     def configured(self) -> bool:
