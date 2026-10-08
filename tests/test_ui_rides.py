@@ -219,3 +219,49 @@ def test_failed_save_keeps_the_ride(window, tmp_path, monkeypatch):
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
     window.finish_button.click()
     assert len(window.session.samples) == 30 and not window.session.exported
+
+
+def test_finish_shows_the_summary_and_fills_the_history(window):
+    from home_trainer.ride_stats import RideSummary
+    seen = []
+    window.ask_ride_export = lambda parent, default, summary="": seen.append(summary) or default
+    pedal(window.session, 30)
+    window.finish_button.click()
+    [summary] = seen
+    assert isinstance(summary, RideSummary)
+    assert summary.duration_s == 30 and summary.avg_power_w == 150 and summary.avg_hr_bpm == 130
+    assert summary.records == {}  # première sortie
+    [ride] = window.ride_history().rides
+    assert ride.file.endswith(".fit") and ride.title == window.session.workout.name
+
+    seen.clear()
+    window.session.start()
+    for i in range(30):
+        window.session.record(200, 90, 140, 32.0, at=1_759_490_000 + i)
+        window.session.tick(1)
+    window.finish_button.click()
+    assert seen[0].records[5] == 150  # 200 W bat les 150 W de la première sortie
+    assert len(window.ride_history().rides) == 2
+
+
+def test_discarded_ride_stays_out_of_the_history(window):
+    window.ask_ride_export = lambda parent, default, summary="": DISCARD
+    pedal(window.session, 30)
+    window.finish_button.click()
+    assert window.ride_history().rides == []
+
+
+def test_summary_and_history_windows(window):
+    from home_trainer.ui.history import HistoryDialog
+    pedal(window.session, 30)
+    window.finish_button.click()
+    history = window.ride_history()
+    dialog = RideExportDialog(RideExport(window.outbox.dir, "x"), history.rides[0])
+    assert dialog.panel is not None and dialog.panel.tiles["PUISSANCE MOY."].value.text() == "150 W"
+    hist = HistoryDialog(history, "Moi")
+    assert hist.tree.topLevelItemCount() == 1
+    assert hist.week_tile.value.text() != "—"
+    hist.resize(960, 700)
+    hist.grab()  # dessine les graphiques
+    hist.tree.setCurrentItem(hist.tree.topLevelItem(0))
+    assert hist.open_button.isEnabled()

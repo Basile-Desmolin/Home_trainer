@@ -337,6 +337,28 @@ sorties en attente**.
 
 ![Strava et Nolio](docs/strava-nolio.png)
 
+### Bilan de fin de sortie et historique
+
+La fenêtre **Enregistrer la sortie** commence par le **bilan** de la sortie :
+durée et distance, puissance moyenne, normalisée et max, IF, TSS, travail (kJ),
+FC moyenne et max, cadence moyenne, **temps passé dans chaque zone** de
+puissance (Z1 à Z7, de la FTP du profil) et **meilleures puissances** sur 5 s,
+1 min, 5 min, 20 min et 1 h. Une meilleure puissance jamais atteinte jusque-là
+par le profil est marquée **★ record**.
+
+Chaque sortie enregistrée s'ajoute à l'**historique** du profil (bouton
+**Historique…** ou Ctrl+H) : la liste des sorties (double-clic : leur bilan),
+les heures et le TSS des 12 dernières semaines, la **condition** (CTL, charge
+des 6 dernières semaines), la **forme** (condition moins fatigue, TSB) et la
+courbe des meilleures puissances, de toujours et des 6 dernières semaines. Il est
+gardé dans `historique.json` du dossier des sorties du profil ; une sortie
+« Ne pas enregistrer » n'y entre pas. **Retirer de l'historique** enlève une
+sortie de la liste sans toucher à son fichier.
+
+![Bilan de fin de sortie](docs/bilan.png)
+
+![Historique](docs/historique.png)
+
 ### Connecter Strava (une fois)
 
 Strava n'accepte les envois que d'une appli API déclarée : chacun crée la
