@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 
 from ..formats.fit_activity import ActivityPoint
@@ -51,6 +51,7 @@ class Sample:
     speed_kmh: float | None = None
     at: float | None = None  # heure de la mesure (secondes depuis 1970), pour le .fit de la sortie
     lap: int = 0  # brique de la séance : un tour par brique dans le .fit
+    position_s: float | None = None  # place sur l'axe de la séance (diffère de `t` après une brique passée)
 
 
 class WorkoutSession:
@@ -117,7 +118,8 @@ class WorkoutSession:
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
                at: float | None = None) -> None:
         self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm, heart_rate_bpm,
-                                   None, speed_kmh, time.time() if at is None else at, self.index))
+                                   None, speed_kmh, time.time() if at is None else at, self.index,
+                                   self.position_s))
 
     # --- lecture ---------------------------------------------------------
 
@@ -129,6 +131,22 @@ class WorkoutSession:
     def next_segment(self) -> Segment | None:
         i = self.index + 1
         return self.segments[i] if i < len(self.segments) else None
+
+    @property
+    def chart_runs(self) -> list[list[Sample]]:
+        """Mesures placées sur l'axe de la séance, pour le graphique, en tronçons roulés d'une
+        traite : passer une brique avant son terme fait sauter l'axe sans faire avancer le temps
+        écoulé, et ouvre un nouveau tronçon (rien n'a été roulé sur la partie sautée)."""
+        runs: list[list[Sample]] = []
+        previous: Sample | None = None
+        for x in self.samples:
+            jumped = (previous is not None and x.position_s is not None and previous.position_s is not None
+                      and x.position_s - previous.position_s > x.t - previous.t + 1.0)
+            if not runs or jumped:
+                runs.append([])
+            runs[-1].append(x if x.position_s is None else replace(x, t=x.position_s))
+            previous = x
+        return runs
 
     @property
     def step_remaining_s(self) -> float | None:
