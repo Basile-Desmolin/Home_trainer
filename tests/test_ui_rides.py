@@ -291,3 +291,24 @@ def test_summary_and_history_windows(window):
     hist.grab()  # dessine les graphiques
     hist.tree.setCurrentItem(hist.tree.topLevelItem(0))
     assert hist.open_button.isEnabled()
+
+
+def test_smooth_keeps_gaps_and_steadies_heart_rate():
+    from home_trainer.ui.chart import smooth
+    # Ceinture qui oscille d'un battement autour de 122 : la courbe lissée reste à 122.
+    jitter = [(t, 122 + (-1, 0, 1, 0)[t % 4]) for t in range(60)]
+    assert all(abs(v - 122) <= 0.3 for _, v in smooth(jitter, 10)[5:-5])
+    # Un trou du capteur reste un trou, et on ne moyenne pas par-dessus.
+    points = [(0, 100.0), (1, 100.0), (2, None), (3, 200.0), (4, 200.0)]
+    assert smooth(points, 10) == [(0, 100.0), (1, 100.0), (2, None), (3, 200.0), (4, 200.0)]
+    assert smooth([], 10) == []
+
+
+def test_trace_draws_one_point_per_pixel():
+    from home_trainer.ui.chart import trace
+    points = [(t / 4, 120.0 + t % 2) for t in range(400)]  # 4 mesures par pixel
+    path = trace(points, lambda t: t, lambda v: v)
+    assert path.elementCount() == 100
+    assert all(abs(path.elementAt(i).y - 120.5) < 1e-9 for i in range(path.elementCount()))
+    gap = trace([(0, 1.0), (1, 1.0), (2, None), (3, 1.0), (4, 1.0)], lambda t: t * 10, lambda v: v)
+    assert [gap.elementAt(i).isMoveTo() for i in range(gap.elementCount())] == [True, False, True, False]
