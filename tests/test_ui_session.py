@@ -149,3 +149,20 @@ def test_erg_off_sends_free_resistance_while_workout_keeps_running():
     assert s.index == 1 and s.target_w == 200  # la séance déroule, la cible reste affichée
     s.toggle_erg()
     assert s.command == 200  # ERG réactivé : consigne de la brique en cours
+
+
+def test_skipped_brick_moves_chart_samples_with_the_workout():
+    s = make()
+    s.start()
+    s.tick(10)
+    s.record(150)
+    s.next_step()  # brique de 1 min passée au bout de 10 s
+    s.tick(5)
+    s.record(220)
+    assert [x.t for x in s.samples] == [10, 15]  # temps réellement roulé, pour le .fit et le bilan
+    runs = s.chart_runs  # sur l'axe de la séance : 60 s + 5 s, et la partie sautée n'est pas reliée
+    assert [[x.t for x in run] for run in runs] == [[10], [65]]
+    assert runs[-1][-1].t == s.position_s
+    s.tick(1)
+    s.record(220)
+    assert [[x.t for x in run] for run in s.chart_runs] == [[10], [65, 66]]

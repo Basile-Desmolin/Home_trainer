@@ -1196,7 +1196,7 @@ class MainWindow(QMainWindow):
         self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick,
                            color or MUTED)
         self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
-        self.total_bar.setValue(round(1000 * s.elapsed_s / s.total_s) if s.total_s else 0)
+        self.total_bar.setValue(round(1000 * s.position_s / s.total_s) if s.total_s else 0)
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
         self._refresh_heart_rate(self.m_heart, s)
         self.intensity_label.setText(f"{s.intensity_pct} %")
