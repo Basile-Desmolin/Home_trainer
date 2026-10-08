@@ -2,7 +2,9 @@
 
 La connexion ouvre la page d'accord du service dans le navigateur ; la réponse
 revient sur http://localhost:8765, attendue dans un fil à part pour ne pas
-figer la fenêtre.
+figer la fenêtre (bouton Annuler). Avec une URL de rappel en https (que
+l'appli ne peut pas recevoir), on recopie l'adresse de la page affichée après
+l'accord.
 """
 
 from __future__ import annotations
@@ -12,18 +14,24 @@ import webbrowser
 
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
+                               QInputDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
-from ..sync import AccountBook, Outbox, SyncError, auto_services, connect, open_service
+from ..sync import (AccountBook, Outbox, SyncError, auto_services, finish_connect, open_service, parse_callback,
+                    start_connect)
+from ..sync.web import wait_for_code
 
 HELP = {
     "strava": ('Créez votre appli sur <a href="https://www.strava.com/settings/api">strava.com/settings/api</a> '
                "(domaine de rappel : <b>localhost</b>), puis copiez ici son Client ID et son Client Secret."),
     "nolio": ('Créez votre appli « personnelle » sur <a href="https://www.nolio.io/api/">nolio.io/api</a> '
-              "(URL de rappel : <b>http://localhost:8765/nolio</b>), puis copiez ici son identifiant "
-              "et son secret."),
+              "et recopiez ici son identifiant, son secret et son URL de rappel, au caractère près "
+              "(<b>http://localhost:8765/nolio</b> conseillée ; si Nolio exige du https, "
+              "<b>https://localhost/nolio</b> : il faudra alors recopier l'adresse de la page après l'accord)."),
 }
+REDIRECT_FIELD = {"nolio"}  # services dont l'URL de rappel se saisit (Strava n'en demande qu'un domaine)
+PASTE_PROMPT = ("Après avoir accepté, le navigateur affiche une page d'erreur ou blanche : c'est normal.\n"
+                "Copiez toute son adresse (barre d'adresse, elle contient « code= ») et collez-la ici :")
 
 
 class _Signals(QObject):
@@ -49,6 +57,12 @@ class ServiceBox(QGroupBox):
         self.client_secret.setEchoMode(QLineEdit.Password)
         form.addRow("Identifiant (client ID)", self.client_id)
         form.addRow("Secret (client secret)", self.client_secret)
+        self.redirect: QLineEdit | None = None
+        if key in REDIRECT_FIELD:
+            self.redirect = QLineEdit(self.account.redirect_uri)
+            self.redirect.setPlaceholderText(self.service.default_redirect_uri())
+            self.redirect.setToolTip("Exactement l'URL de rappel déclarée dans votre appli API")
+            form.addRow("URL de rappel", self.redirect)
         layout.addLayout(form)
         row = QHBoxLayout()
         self.state_label = QLabel()
@@ -63,6 +77,7 @@ class ServiceBox(QGroupBox):
         self.auto.toggled.connect(self._auto_toggled)
         layout.addWidget(self.auto)
         self.busy = False
+        self.cancel: threading.Event | None = None
         self.refresh()
 
     def refresh(self, error: str = "") -> None:
@@ -77,13 +92,15 @@ class ServiceBox(QGroupBox):
             text = "Non connecté"
         self.state_label.setText(text)
         self.state_label.setStyleSheet("color: #e5484d;" if error else "")
-        self.connect_button.setText("Déconnecter" if a.connected and not self.busy else "Se connecter")
-        self.connect_button.setEnabled(not self.busy)
+        self.connect_button.setText("Annuler" if self.busy else "Déconnecter" if a.connected else "Se connecter")
 
     def _store_credentials(self) -> None:
         cid, secret = self.client_id.text().strip(), self.client_secret.text().strip()
-        if (cid, secret) != (self.account.client_id, self.account.client_secret):
+        redirect = self.redirect.text().strip() if self.redirect is not None else self.account.redirect_uri
+        if (cid, secret, redirect) != (self.account.client_id, self.account.client_secret,
+                                       self.account.redirect_uri):
             self.account.client_id, self.account.client_secret = cid, secret
+            self.account.redirect_uri = redirect
             self.account.disconnect()  # autre appli : les jetons de l'ancienne ne valent plus
         self.dialog.book.save()
 
@@ -92,6 +109,10 @@ class ServiceBox(QGroupBox):
         self.dialog.book.save()
 
     def _connect_clicked(self) -> None:
+        if self.busy:  # Annuler : on cesse d'attendre la réponse du navigateur
+            if self.cancel is not None:
+                self.cancel.set()
+            return
         self._store_credentials()
         if self.account.connected:
             self.account.disconnect()
@@ -101,13 +122,36 @@ class ServiceBox(QGroupBox):
         if not self.account.configured:
             self.refresh("Saisissez d'abord l'identifiant et le secret de votre appli.")
             return
+        try:
+            auth = start_connect(self.service)
+        except SyncError as e:
+            self.refresh(str(e))
+            return
+        code = None
+        if auth.local is None:  # URL de rappel en https : l'adresse de retour se recopie
+            webbrowser.open(auth.url)
+            pasted, ok = QInputDialog.getText(self, f"Connexion à {self.service.label}", PASTE_PROMPT)
+            if not ok or not pasted.strip():
+                self.refresh()
+                return
+            try:
+                code = parse_callback(pasted, auth.state)
+            except SyncError as e:
+                self.refresh(str(e))
+                return
         self.busy = True
+        self.cancel = cancel = threading.Event()
         self.refresh()
         signals = self.dialog.signals
 
         def work() -> None:
             try:
-                connect(self.service, self.dialog.book, webbrowser.open)
+                got = code
+                if got is None:
+                    port, path = auth.local
+                    got = wait_for_code(path, auth.state, port, ready=lambda: webbrowser.open(auth.url),
+                                        cancel=cancel)
+                finish_connect(self.service, self.dialog.book, auth, got)
                 error = ""
             except SyncError as e:
                 error = str(e)
@@ -120,7 +164,8 @@ class ServiceBox(QGroupBox):
 
     def connected(self, error: str) -> None:
         self.busy = False
-        self.refresh(error)
+        self.cancel = None
+        self.refresh("" if error == "connexion annulée" else error)
 
 
 class AccountsDialog(QDialog):
@@ -179,6 +224,8 @@ class AccountsDialog(QDialog):
 
     def done(self, result: int) -> None:  # noqa: D401 (fermeture : on garde ce qui a été saisi)
         for box in self.boxes.values():
-            if not box.busy:
+            if box.busy and box.cancel is not None:
+                box.cancel.set()  # libère le port d'écoute
+            elif not box.busy:
                 box._store_credentials()
         super().done(result)

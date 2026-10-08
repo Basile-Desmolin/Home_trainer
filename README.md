@@ -402,9 +402,19 @@ Même principe, avec l'API officielle de Nolio
    développeur (nom, e-mail, logo, usage : « logiciel de home trainer
    personnel »).
 2. Créer une appli **personnelle** (jusqu'à 5 comptes, il n'en faut qu'un)
-   avec l'**URL de rappel `http://localhost:8765/nolio`**, exactement.
-3. Copier l'identifiant (client ID) et le secret dans **Strava / Nolio…**,
-   puis **Se connecter** et accepter dans le navigateur.
+   avec l'**URL de rappel `http://localhost:8765/nolio`** (conseillée).
+3. Copier l'identifiant (client ID), le secret **et l'URL de rappel**
+   déclarée dans **Strava / Nolio…** (champ *URL de rappel*, vide = celle
+   conseillée), puis **Se connecter** et accepter dans le navigateur.
+
+L'URL de rappel doit être **identique au caractère près** à celle du portail
+Nolio (pas de `/` en plus ou en moins, `localhost` et non `127.0.0.1`),
+sinon Nolio refuse la connexion sur sa page. Si le portail exige une adresse
+en `https`, déclarer `https://localhost/nolio` et la recopier dans l'appli :
+après l'accord, le navigateur affiche une page d'erreur (normal, l'appli ne
+peut pas recevoir du https) ; copier toute l'adresse de cette page (elle
+contient `code=`) et la coller dans la fenêtre qui s'ouvre. Le bouton
+**Annuler** abandonne une connexion en attente.
 
 Nolio met les fichiers reçus dans une file de traitement : la sortie
 apparaît dans le calendrier au bout de quelques instants.
