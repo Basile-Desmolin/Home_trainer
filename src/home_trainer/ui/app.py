@@ -1240,7 +1240,7 @@ class MainWindow(QMainWindow):
             self._remember("power", sensor)
             if sensor.latest() is not None:
                 name = self._display_name("power", sensor)
-                text, color = (name if "puissance" in name.lower() else f"Puissance · {name}"), GOOD
+                text, color = name, GOOD  # le bandeau est plein : le nom seul, la bulle explique
                 if self.power_match.ready and isinstance(self.source, Trainer):
                     offset = round(self.power_match.offset_w)
                     tip = (f"{name} : ses watts font foi. Le home trainer lit {abs(offset)} W de "
@@ -1700,7 +1700,7 @@ def main(argv: list[str] | None = None) -> int:
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
     window = MainWindow(workout, profile.ftp, source=source, heart_rate=heart_rate, book=book,
                         profiles=profiles, profile=profile, power_meter=power_meter)
-    window.resize(1360, 780)
+    window.resize(1400, 780)
     if args.ftp:
         window.ftp_box.setValue(int(args.ftp))
         window._ftp_changed()

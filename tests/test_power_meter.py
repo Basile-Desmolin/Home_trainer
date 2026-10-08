@@ -161,7 +161,7 @@ def test_window_uses_power_meter_watts_and_corrects_erg(app, tmp_path):
     assert (reading.power_w, reading.cadence_rpm, reading.speed_kmh) == (200, 91, 31.0)
     assert trainer.target_w == pytest.approx(212, abs=0.5)  # 200 W selon le capteur
     assert window.m_power.value.text() == "200"
-    assert window.power_chip.text() == "Puissance · ASSIOMA 1234"
+    assert window.power_chip.text() == "ASSIOMA 1234"
     assert "corrigée de +12 W" in window.power_chip.toolTip()
     assert book.find("power", "ble", "AA:BB") is not None  # mémorisé à la connexion
 
