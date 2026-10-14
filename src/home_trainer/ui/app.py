@@ -16,7 +16,8 @@ Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 Ctrl+E = modifier, Ctrl+S = enregistrer sous, Ctrl+L = mode libre / séance,
 Ctrl+G = rouler un parcours GPX,
 Ctrl+T = terminer la sortie (format, nom et dossier au choix ; .fit envoyé vers Strava / Nolio).
-Pendant une sortie, le PC ne se met pas en veille (Windows).
+Pendant une sortie, le PC ne se met pas en veille (Windows), et une vignette au premier plan
+(cible, puissance, temps restant) reste visible quand le logiciel passe en arrière-plan.
 En mode libre : ↑ ↓ = ±5 W ou ±0,5 %, Page↑ Page↓ = ±25 W ou ±2 %.
 Sur un parcours : ↑ ↓ = difficulté ±10 %.
 """
@@ -58,15 +59,16 @@ from .chart import ACCENT, CADENCE, HEART, MUTED, TEXT, WorkoutChart, hms, zone_
 from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .gauges import BrickRing, ZoneBar
-from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
+from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel, grade_color, grade_text
 from .heart_rate_mode import ask_heart_rate_mode
 from .loader import load_workout
 from .metric import Metric
+from .mini import MiniInfo, MiniWindow
 from .profiles import choose_profile
 from .history import HistoryDialog
 from .ride_export import DISCARD, RideExport, ask_ride_export
 from .power import PowerSource, Reading, SimulatedTrainer, open_power_source, road_speed_kmh
-from .route_ride import RoutePanel
+from .route_ride import RoutePanel, km_text, route_grade_color
 from .theme import GOOD, OFF, WAIT, dot, icon, install, keycaps, number_font, pill, zone_index, zone_label
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
                       FreeRideSession, RouteSession, State, WorkoutSession, ride_points, ride_title)
@@ -151,6 +153,9 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_body()
         self._build_shortcuts()
+        # Vignette au premier plan quand le logiciel passe en arrière-plan pendant une sortie.
+        self.mini = MiniWindow()
+        self.mini.clicked.connect(self.bring_back)
 
         self.clock = QElapsedTimer()
         self.timer = QTimer(self)
@@ -773,6 +778,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
         self.keep_awake.set(False)
+        self.mini.close()
         self.end_ride(self.session, send=False)
         self.end_ride(self.free, send=False)
         if self.route is not None:
@@ -1107,6 +1113,7 @@ class MainWindow(QMainWindow):
         # Pas de veille tant qu'une sortie est en cours, même en pause.
         self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
         self._refresh()
+        self._refresh_mini()
 
     def _with_power_meter(self, reading, dt: float):
         """Avec un capteur de puissance qui répond, ses watts (et sa cadence s'il la donne) remplacent
@@ -1213,6 +1220,58 @@ class MainWindow(QMainWindow):
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
         self.play_button.setIcon(icon("pause" if s.state is State.RUNNING else "play", "#18191c"))
         self.chart.update()
+
+    # --- vignette en arrière-plan ------------------------------------------
+
+    def in_background(self) -> bool:
+        """Fenêtre réduite, ou une autre application au premier plan."""
+        return self.isMinimized() or QApplication.applicationState() != Qt.ApplicationActive
+
+    def _refresh_mini(self) -> None:
+        """Vignette affichée pendant une sortie (en cours ou en pause) tant que le logiciel est en arrière-plan."""
+        riding = self.active.state in (State.RUNNING, State.PAUSED)
+        if not (riding and self.isVisible() and self.in_background()):
+            self.mini.hide()
+            return
+        self.mini.set_info(self.mini_info())
+        self.mini.popup(self)
+
+    def mini_info(self) -> MiniInfo:
+        r = self._last_reading
+        power = f"{r.power_w:.0f} W" if r else "—"
+        active = self.active
+        status = "En pause" if active.state is State.PAUSED else ""
+        if self.route_ride:
+            grade = active.grade_pct
+            return MiniInfo(grade_text(grade), power, km_text(active.remaining_m), target_title="PENTE",
+                            color=route_grade_color(grade), status=status)
+        if self.free_ride:
+            if active.mode is FreeMode.ERG:
+                target, color = f"{active.target_w} W", zone_color(active.target_w, self.ftp)
+            else:
+                target, color = grade_text(active.grade_pct), grade_color(active.grade_pct)
+            return MiniInfo(target, power, hms(active.elapsed_s), remaining_title="DURÉE", color=color,
+                            status=status)
+        s = self.session
+        target, bpm = s.target_w, s.target_bpm
+        if target is None and bpm is not None:  # séance en FC roulée aux vitesses
+            text, title, color = f"{bpm:.0f} bpm", "CIBLE FC", HEART
+        else:
+            text, title = ("libre" if target is None else f"{target:.0f} W"), "CIBLE"
+            color = None if target is None or zone_index(target, self.ftp) == 0 else zone_color(target, self.ftp)
+        brick = s.step_remaining_s  # brique en cours ; le reste de la séance passe en dessous
+        remaining = hms(s.total_remaining_s if brick is None else brick)
+        where = f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}  ·  séance {hms(s.total_remaining_s)}"
+        status = "  ·  ".join(x for x in (status, where) if x)
+        return MiniInfo(text, power, remaining, target_title=title, color=color, status=status)
+
+    def bring_back(self) -> None:
+        """Clic sur la vignette : la fenêtre principale revient au premier plan."""
+        self.mini.hide()
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def _refresh_source(self) -> None:
         source = self.source

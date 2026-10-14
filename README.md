@@ -178,6 +178,12 @@ Pendant une sortie (en cours ou en pause), le PC ne se met pas en veille et
 l'écran ne s'éteint pas (Windows) ; le réglage d'alimentation habituel revient
 dès la sortie terminée.
 
+Quand le logiciel passe en arrière-plan pendant une sortie (fenêtre réduite ou
+autre appli au premier plan), une vignette reste visible au-dessus des autres
+fenêtres (`ui/mini.py`) : puissance cible, puissance mesurée et temps restant
+de la brique (pente et kilomètres restants sur un parcours). Elle se déplace à
+la souris ; un clic ramène le logiciel, et elle disparaît à son retour.
+
 Le home trainer réel et le simulateur (`ui/power.py`) offrent la même
 interface `PowerSource` (`set_target`, `read`), voir ci-dessous.
 La logique de déroulé (`ui/session.py`) ne dépend pas de Qt et est testée.
