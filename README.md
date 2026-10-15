@@ -333,9 +333,13 @@ sont gardés dans le profil.
 La liste est dans `profils.json` du dossier de configuration
 (`%APPDATA%\HomeTrainer` sous Windows, `~/.config/home-trainer` ailleurs ;
 variable `HOME_TRAINER_PROFILES` pour un autre fichier), et chaque profil a
-son dossier `profils/<nom>/` avec `comptes.json` et `sorties/`. Au premier
-lancement après la mise à jour, les comptes et les sorties déjà là sont
-rangés dans un premier profil, « Mon profil », à renommer.
+son dossier `profils/<nom>/` avec `comptes.json`. Ses **sorties** sont dans
+**`Documents\HomeTrainer\Sorties\<nom>\`**, à côté de la bibliothèque
+(`Documents\HomeTrainer\Séances`). Au premier lancement après la mise à jour,
+les comptes et les sorties déjà là sont rangés dans un premier profil,
+« Mon profil », à renommer, et les sorties encore dans `%APPDATA%` sont
+déplacées dans Documents avec leur historique (si le déplacement échoue, elles
+restent lues là où elles sont).
 
 ## Sorties enregistrées, envoi vers Strava et Nolio
 
