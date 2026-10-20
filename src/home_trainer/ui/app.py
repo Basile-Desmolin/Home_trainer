@@ -1225,7 +1225,9 @@ class MainWindow(QMainWindow):
                            color or MUTED)
         self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
         self.total_bar.setValue(round(1000 * s.elapsed_s / s.total_s) if s.total_s else 0)
-        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
+        # Sous la cadence, la vitesse : celle du home trainer, sinon celle estimée (comme dans l'enregistrement).
+        sub = "tr/min" if r is None else f"tr/min · {self._speed(r):.1f} km/h".replace(".", ",")
+        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
         self._refresh_heart_rate(self.m_heart, s)
         self.intensity_label.setText(f"{s.intensity_pct} %")
         self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")

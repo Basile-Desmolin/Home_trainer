@@ -135,3 +135,15 @@ def test_heart_rate_off_without_sensor_or_signal(app, tmp_path):
     window._refresh()
     assert window.m_heart.value.text() == "131"
     window.close()
+
+
+def test_session_shows_speed_under_cadence(app):
+    window = MainWindow(parse_workout("10m@200"))  # simulateur : pas de vitesse mesurée, elle est estimée
+    assert window.m_cadence.sub.text() == "tr/min"
+    window._toggle()
+    for _ in range(20):
+        window._on_tick()
+    reading = window._last_reading
+    speed = f"{window._speed(reading):.1f}".replace(".", ",")
+    assert window.m_cadence.sub.text() == f"tr/min · {speed} km/h"
+    window.close()
