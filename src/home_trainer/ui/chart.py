@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -145,8 +147,10 @@ class WorkoutChart(QWidget):
         area = QRectF(margin_l, margin_t, self.width() - margin_l - margin_r,
                       self.height() - margin_t - margin_b)
         total = max(s.total_s, 1.0)
+        runs = s.chart_runs  # sur l'axe de la séance, qui saute quand on passe une brique
+        samples = [x_ for run in runs for x_ in run]
         peak = max([seg.high_w or 0 for seg in s.segments] + [seg.end_high_w or 0 for seg in s.segments]
-                   + [x.power_w for x in s.samples] + [ftp])
+                   + [x.power_w for x in samples] + [ftp])
         peak *= max(s.intensity_pct, 100) / 100 * 1.12
 
         def x(t: float) -> float:
@@ -156,7 +160,8 @@ class WorkoutChart(QWidget):
             return area.bottom() - w / peak * area.height()
 
         # Échelle de la fréquence cardiaque (cibles d'une séance en FC et FC mesurée).
-        heart = [(x_.t, x_.heart_rate_bpm) for x_ in s.samples if x_.heart_rate_bpm]
+        heart_runs = [[(x_.t, x_.heart_rate_bpm) for x_ in run if x_.heart_rate_bpm] for run in runs]
+        heart = [point for run in heart_runs for point in run]
         bpms = [b for _, b in heart] + [seg.target_bpm(t) for seg in s.segments if seg.step.heart_rate
                                          for t in (0, seg.duration_s or 0)]
         lo = min([60] + [b - 5 for b in bpms])
@@ -222,10 +227,13 @@ class WorkoutChart(QWidget):
                 p.drawLine(QPointF(x(start), y(a)), QPointF(x(seg.start_s + seg.duration_s), y(b)))
 
         # Puissance réalisée.
-        draw_power(p, [(x(x_.t), y(x_.power_w)) for x_ in s.samples])
+        for run in runs:
+            draw_power(p, [(x(x_.t), y(x_.power_w)) for x_ in run])
 
-        # Cadence, sur sa propre échelle (graduée dans la marge de droite).
-        draw_cadence(p, area, s.samples, x, area.right() + 6)
+        # Cadence, sur sa propre échelle (graduée dans la marge de droite) ; coupée entre deux tronçons.
+        cadence = [x_ for j, run in enumerate(runs)
+                   for x_ in ([replace(run[0], cadence_rpm=None)] if j else []) + run]
+        draw_cadence(p, area, cadence, x, area.right() + 6)
 
         # Fréquence cardiaque, sur sa propre échelle (graduée à droite).
         if len(heart) > 1 or any(seg.low_w is None and seg.step.heart_rate for seg in s.segments):
@@ -234,15 +242,19 @@ class WorkoutChart(QWidget):
                 p.drawText(QRectF(area.right() - 40, yh(bpm) - 8, 38, 16), Qt.AlignRight | Qt.AlignVCenter,
                            f"{bpm}")
         if len(heart) > 1:
-            path = QPainterPath(QPointF(x(heart[0][0]), yh(heart[0][1])))
-            for t_, bpm in heart[1:]:
-                path.lineTo(x(t_), yh(bpm))
+            path = QPainterPath()
+            for run in heart_runs:
+                for i, (t_, bpm) in enumerate(run):
+                    if i:
+                        path.lineTo(x(t_), yh(bpm))
+                    else:
+                        path.moveTo(x(t_), yh(bpm))
             p.setPen(QPen(QColor(HEART), 1.4))
             p.drawPath(path)
 
         # Curseur de position.
         if self.preview:
             return
-        last = s.samples[-1] if s.samples else None
+        last = samples[-1] if samples else None
         draw_cursor(p, x(position), area.top(), area.bottom(),
                     y(last.power_w) if last is not None and abs(x(last.t) - x(position)) < 6 else None)
