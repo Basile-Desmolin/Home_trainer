@@ -1224,7 +1224,7 @@ class MainWindow(QMainWindow):
         self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick,
                            color or MUTED)
         self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
-        self.total_bar.setValue(round(1000 * s.elapsed_s / s.total_s) if s.total_s else 0)
+        self.total_bar.setValue(round(1000 * s.position_s / s.total_s) if s.total_s else 0)
         # Sous la cadence, la vitesse : celle du home trainer, sinon celle estimée (comme dans l'enregistrement).
         sub = "tr/min" if r is None else f"tr/min · {self._speed(r):.1f} km/h".replace(".", ",")
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
