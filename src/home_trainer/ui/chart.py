@@ -15,6 +15,81 @@ from .theme import (ACCENT, BG, CADENCE, HEART, MUTED, PANEL, POWER, TEXT, ZONES
 DEFAULT_FTP = 250
 RADIUS = 12  # coins des cartes et des graphiques
 
+# Lissage des courbes mesurées (moyenne glissante centrée, en secondes). Une mesure par seconde
+# tracée telle quelle fait des dents de scie : à 122 bpm, la ceinture passe sans cesse de 121 à
+# 123 et chaque battement devient un trait vertical, alors que le chiffre affiché paraît fixe.
+POWER_SMOOTH_S = 5
+CADENCE_SMOOTH_S = 5
+HEART_SMOOTH_S = 10
+
+
+def smooth(points: list[tuple[float, float | None]], window_s: float) -> list[tuple[float, float | None]]:
+    """Moyenne glissante centrée sur `window_s` secondes. Un trou (None) reste un trou et
+    coupe la moyenne : on ne lisse pas d'un côté à l'autre d'une coupure du capteur."""
+    out: list[tuple[float, float | None]] = []
+    run: list[tuple[float, float]] = []
+
+    def flush() -> None:
+        lo = hi = 0
+        total = 0.0
+        half = window_s / 2
+        for t, _ in run:
+            while hi < len(run) and run[hi][0] <= t + half:
+                total += run[hi][1]
+                hi += 1
+            while run[lo][0] < t - half:
+                total -= run[lo][1]
+                lo += 1
+            out.append((t, total / (hi - lo)))
+        run.clear()
+
+    for t, v in points:
+        if v is None:
+            flush()
+            out.append((t, None))
+        else:
+            run.append((t, v))
+    flush()
+    return out
+
+
+def trace(points: list[tuple[float, float | None]], x, y) -> QPainterPath:
+    """Chemin d'une courbe mesurée : un point par pixel (moyenne des mesures qui y tombent),
+    sinon une longue sortie entasse plusieurs secondes par pixel en zigzags. None coupe la courbe."""
+    path = QPainterPath()
+    column: int | None = None
+    xs: list[float] = []
+    vs: list[float] = []
+    drawing = False
+
+    def emit() -> None:
+        nonlocal drawing
+        if not vs:
+            return
+        point = QPointF(sum(xs) / len(xs), y(sum(vs) / len(vs)))
+        if drawing:
+            path.lineTo(point)
+        else:
+            path.moveTo(point)
+        drawing = True
+        xs.clear()
+        vs.clear()
+
+    for t, v in points:
+        if v is None:
+            emit()
+            drawing = False
+            column = None
+            continue
+        px = x(t)
+        if column is not None and int(px) != column:
+            emit()
+        column = int(px)
+        xs.append(px)
+        vs.append(v)
+    emit()
+    return path
+
 
 def zone_color(watts: float | None, ftp: float) -> QColor:
     if watts is None:
@@ -40,18 +115,8 @@ def draw_cadence(p: QPainter, area: QRectF, samples, x, labels_left: float) -> N
     for rpm in range(30, hi, 30):
         p.drawText(QRectF(labels_left, yc(rpm) - 8, width, 16), Qt.AlignLeft | Qt.AlignVCenter, f"{rpm}")
     p.drawText(QRectF(labels_left, area.top() - 12, width, 14), Qt.AlignLeft | Qt.AlignVCenter, "rpm")
-    path = QPainterPath()
-    drawing = False
-    for t, rpm in points:
-        if rpm is None:
-            drawing = False
-        elif drawing:
-            path.lineTo(x(t), yc(rpm))
-        else:
-            path.moveTo(x(t), yc(rpm))
-            drawing = True
     p.setPen(QPen(QColor(CADENCE), 1.2))
-    p.drawPath(path)
+    p.drawPath(trace(smooth(points, CADENCE_SMOOTH_S), x, yc))
 
 
 def paint_panel(p: QPainter, widget: QWidget) -> None:
@@ -83,13 +148,11 @@ def block_path(x0: float, x1: float, top0: float, top1: float, bottom: float, ra
     return path
 
 
-def draw_power(p: QPainter, points: list[tuple[float, float]]) -> None:
-    """Puissance réalisée."""
-    if len(points) < 2:
+def draw_power(p: QPainter, samples, x, y) -> None:
+    """Puissance réalisée, lissée."""
+    if len(samples) < 2:
         return
-    path = QPainterPath(QPointF(*points[0]))
-    for point in points[1:]:
-        path.lineTo(*point)
+    path = trace(smooth([(s.t, s.power_w) for s in samples], POWER_SMOOTH_S), x, y)
     pen = QPen(QColor(POWER), 2)
     pen.setJoinStyle(Qt.RoundJoin)
     p.setPen(pen)
@@ -228,7 +291,7 @@ class WorkoutChart(QWidget):
 
         # Puissance réalisée.
         for run in runs:
-            draw_power(p, [(x(x_.t), y(x_.power_w)) for x_ in run])
+            draw_power(p, run, x, y)
 
         # Cadence, sur sa propre échelle (graduée dans la marge de droite) ; coupée entre deux tronçons.
         cadence = [x_ for j, run in enumerate(runs)
@@ -242,15 +305,9 @@ class WorkoutChart(QWidget):
                 p.drawText(QRectF(area.right() - 40, yh(bpm) - 8, 38, 16), Qt.AlignRight | Qt.AlignVCenter,
                            f"{bpm}")
         if len(heart) > 1:
-            path = QPainterPath()
-            for run in heart_runs:
-                for i, (t_, bpm) in enumerate(run):
-                    if i:
-                        path.lineTo(x(t_), yh(bpm))
-                    else:
-                        path.moveTo(x(t_), yh(bpm))
             p.setPen(QPen(QColor(HEART), 1.4))
-            p.drawPath(path)
+            for run in heart_runs:  # un tronçon par morceau de séance, lissé à part
+                p.drawPath(trace(smooth(run, HEART_SMOOTH_S), x, yh))
 
         # Curseur de position.
         if self.preview:
