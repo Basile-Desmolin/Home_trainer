@@ -16,7 +16,8 @@ Raccourcis : Espace = démarrer / pause, ↑ ou + = +1 %, ↓ ou − = −1 %,
 Ctrl+E = modifier, Ctrl+S = enregistrer sous, Ctrl+L = mode libre / séance,
 Ctrl+G = rouler un parcours GPX,
 Ctrl+T = terminer la sortie (format, nom et dossier au choix ; .fit envoyé vers Strava / Nolio).
-Pendant une sortie, le PC ne se met pas en veille (Windows).
+Pendant une sortie, le PC ne se met pas en veille (Windows), et une vignette au premier plan
+(cible, puissance, temps restant) reste visible quand le logiciel passe en arrière-plan.
 En mode libre : ↑ ↓ = ±5 W ou ±0,5 %, Page↑ Page↓ = ±25 W ou ±2 %.
 Sur un parcours : ↑ ↓ = difficulté ±10 %.
 """
@@ -45,7 +46,7 @@ from ..formats.fit_activity import activity_file_name
 from ..heart_zones import to_power
 from ..history import FILE_NAME as HISTORY_FILE, RideHistory
 from ..keep_awake import KeepAwake
-from ..profiles import Profile, ProfileBook
+from ..profiles import Profile, ProfileBook, default_rides_root
 from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
@@ -58,15 +59,16 @@ from .chart import ACCENT, CADENCE, HEART, MUTED, TEXT, WorkoutChart, hms, zone_
 from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .gauges import BrickRing, ZoneBar
-from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
+from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel, grade_color, grade_text
 from .heart_rate_mode import ask_heart_rate_mode
 from .loader import load_workout
 from .metric import Metric
+from .mini import MiniInfo, MiniWindow
 from .profiles import choose_profile
 from .history import HistoryDialog
 from .ride_export import DISCARD, RideExport, ask_ride_export
 from .power import PowerSource, Reading, SimulatedTrainer, open_power_source, road_speed_kmh
-from .route_ride import RoutePanel
+from .route_ride import RoutePanel, km_text, route_grade_color
 from .theme import GOOD, OFF, WAIT, dot, icon, install, keycaps, number_font, pill, zone_index, zone_label
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
                       FreeRideSession, RouteSession, State, WorkoutSession, ride_points, ride_title)
@@ -125,6 +127,7 @@ class MainWindow(QMainWindow):
         self._send_again = False
         # Fenêtre de fin de sortie (remplaçable dans les tests) et derniers choix faits dedans.
         self.ask_ride_export = ask_ride_export
+        self.confirm_stop = confirm_stop  # « Recommencer » / « Terminer » en pleine sortie
         self.ask_heart_rate_mode = ask_heart_rate_mode  # séance en FC : sans ERG ou convertie en puissance
         self._hr_to_power = False  # dernier choix fait pour une séance en FC
         self._erg_wanted = True  # ERG voulu (bouton), repris par les séances qui ont des cibles en puissance
@@ -151,6 +154,9 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_body()
         self._build_shortcuts()
+        # Vignette au premier plan quand le logiciel passe en arrière-plan pendant une sortie.
+        self.mini = MiniWindow()
+        self.mini.clicked.connect(self.bring_back)
 
         self.clock = QElapsedTimer()
         self.timer = QTimer(self)
@@ -384,7 +390,7 @@ class MainWindow(QMainWindow):
         self.next_button.clicked.connect(self._next_step)
         self.reset_button = QPushButton("Recommencer")
         self.reset_button.setIcon(icon("restart"))
-        self.reset_button.clicked.connect(self._reset)
+        self.reset_button.clicked.connect(self.restart_ride)
         self.finish_button = QPushButton("Terminer")
         self.finish_button.setIcon(icon("flag"))
         self.finish_button.setToolTip(FINISH_TIP)
@@ -404,7 +410,7 @@ class MainWindow(QMainWindow):
         self.free_panel = FreeRidePanel()
         self.free_panel.chart.set_session(self.free)
         self.free_panel.play_button.clicked.connect(self._toggle)
-        self.free_panel.reset_button.clicked.connect(self._reset_free_ride)
+        self.free_panel.reset_button.clicked.connect(self.restart_ride)
         self.free_panel.back_button.clicked.connect(self.leave_free_ride)
         self.free_panel.finish_button.setToolTip(FINISH_TIP)
         self.free_panel.finish_button.clicked.connect(self.finish_ride)
@@ -416,7 +422,7 @@ class MainWindow(QMainWindow):
 
         self.route_panel = RoutePanel()
         self.route_panel.play_button.clicked.connect(self._toggle)
-        self.route_panel.reset_button.clicked.connect(self._reset_route)
+        self.route_panel.reset_button.clicked.connect(self.restart_ride)
         self.route_panel.back_button.clicked.connect(self.leave_free_ride)
         self.route_panel.finish_button.setToolTip(FINISH_TIP)
         self.route_panel.finish_button.clicked.connect(self.finish_ride)
@@ -654,6 +660,22 @@ class MainWindow(QMainWindow):
     def _reset(self) -> None:
         self.load(self.session.workout)
 
+    def _ride_underway(self) -> bool:
+        return self.active.state in (State.RUNNING, State.PAUSED)
+
+    def restart_ride(self) -> None:
+        """Bouton « Recommencer » : en pleine sortie, on demande d'abord confirmation."""
+        if self._ride_underway() and not self.confirm_stop(
+                self, "Recommencer", "Recommencer depuis le début ?\n\n"
+                "La sortie en cours s'arrête ; ce qui a déjà été roulé est enregistré."):
+            return
+        if self.route_ride:
+            self._reset_route()
+        elif self.free_ride:
+            self._reset_free_ride()
+        else:
+            self._reset()
+
     def _ftp_changed(self) -> None:
         if self.ftp_box.value() == self.ftp:
             return
@@ -773,6 +795,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
         self.keep_awake.set(False)
+        self.mini.close()
         self.end_ride(self.session, send=False)
         self.end_ride(self.free, send=False)
         if self.route is not None:
@@ -889,7 +912,11 @@ class MainWindow(QMainWindow):
 
     def finish_ride(self) -> None:
         """Bouton « Terminer » : la sortie en cours est enregistrée là où on le choisit et envoyée,
-        puis on repart de zéro ; « Annuler » dans la fenêtre ramène à la sortie, en pause."""
+        puis on repart de zéro ; « Annuler » dans la fenêtre ramène à la sortie, en pause.
+        En pleine sortie, une confirmation vient d'abord : « Annuler » la laisse continuer."""
+        if self._ride_underway() and not self.confirm_stop(
+                self, "Terminer", "Terminer la sortie ?\n\nElle s'arrête et passe à l'enregistrement."):
+            return
         active = self.active
         if active.state is State.RUNNING:
             active.pause()
@@ -1107,6 +1134,7 @@ class MainWindow(QMainWindow):
         # Pas de veille tant qu'une sortie est en cours, même en pause.
         self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
         self._refresh()
+        self._refresh_mini()
 
     def _with_power_meter(self, reading, dt: float):
         """Avec un capteur de puissance qui répond, ses watts (et sa cadence s'il la donne) remplacent
@@ -1197,7 +1225,9 @@ class MainWindow(QMainWindow):
                            color or MUTED)
         self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
         self.total_bar.setValue(round(1000 * s.position_s / s.total_s) if s.total_s else 0)
-        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
+        # Sous la cadence, la vitesse : celle du home trainer, sinon celle estimée (comme dans l'enregistrement).
+        sub = "tr/min" if r is None else f"tr/min · {self._speed(r):.1f} km/h".replace(".", ",")
+        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
         self._refresh_heart_rate(self.m_heart, s)
         self.intensity_label.setText(f"{s.intensity_pct} %")
         self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
@@ -1213,6 +1243,58 @@ class MainWindow(QMainWindow):
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
         self.play_button.setIcon(icon("pause" if s.state is State.RUNNING else "play", "#18191c"))
         self.chart.update()
+
+    # --- vignette en arrière-plan ------------------------------------------
+
+    def in_background(self) -> bool:
+        """Fenêtre réduite, ou une autre application au premier plan."""
+        return self.isMinimized() or QApplication.applicationState() != Qt.ApplicationActive
+
+    def _refresh_mini(self) -> None:
+        """Vignette affichée pendant une sortie (en cours ou en pause) tant que le logiciel est en arrière-plan."""
+        riding = self.active.state in (State.RUNNING, State.PAUSED)
+        if not (riding and self.isVisible() and self.in_background()):
+            self.mini.hide()
+            return
+        self.mini.set_info(self.mini_info())
+        self.mini.popup(self)
+
+    def mini_info(self) -> MiniInfo:
+        r = self._last_reading
+        power = f"{r.power_w:.0f} W" if r else "—"
+        active = self.active
+        status = "En pause" if active.state is State.PAUSED else ""
+        if self.route_ride:
+            grade = active.grade_pct
+            return MiniInfo(grade_text(grade), power, km_text(active.remaining_m), target_title="PENTE",
+                            color=route_grade_color(grade), status=status)
+        if self.free_ride:
+            if active.mode is FreeMode.ERG:
+                target, color = f"{active.target_w} W", zone_color(active.target_w, self.ftp)
+            else:
+                target, color = grade_text(active.grade_pct), grade_color(active.grade_pct)
+            return MiniInfo(target, power, hms(active.elapsed_s), remaining_title="DURÉE", color=color,
+                            status=status)
+        s = self.session
+        target, bpm = s.target_w, s.target_bpm
+        if target is None and bpm is not None:  # séance en FC roulée aux vitesses
+            text, title, color = f"{bpm:.0f} bpm", "CIBLE FC", HEART
+        else:
+            text, title = ("libre" if target is None else f"{target:.0f} W"), "CIBLE"
+            color = None if target is None or zone_index(target, self.ftp) == 0 else zone_color(target, self.ftp)
+        brick = s.step_remaining_s  # brique en cours ; le reste de la séance passe en dessous
+        remaining = hms(s.total_remaining_s if brick is None else brick)
+        where = f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}  ·  séance {hms(s.total_remaining_s)}"
+        status = "  ·  ".join(x for x in (status, where) if x)
+        return MiniInfo(text, power, remaining, target_title=title, color=color, status=status)
+
+    def bring_back(self) -> None:
+        """Clic sur la vignette : la fenêtre principale revient au premier plan."""
+        self.mini.hide()
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def _refresh_source(self) -> None:
         source = self.source
@@ -1295,6 +1377,18 @@ class MainWindow(QMainWindow):
 
 POWER_TIP = ("Capteur de puissance externe (pédales, manivelle) : ses watts font foi "
              "et l'ERG se règle dessus")
+def confirm_stop(parent, action: str, question: str) -> bool:
+    """Confirmation avant d'arrêter la sortie : « Annuler » est le choix par défaut, pour qu'un
+    Entrée ou un Échap en pleine séance ne coupe rien."""
+    box = QMessageBox(QMessageBox.Question, action, question, parent=parent)
+    yes = box.addButton(action, QMessageBox.AcceptRole)
+    cancel = box.addButton("Annuler", QMessageBox.RejectRole)
+    box.setDefaultButton(cancel)
+    box.setEscapeButton(cancel)
+    box.exec()
+    return box.clickedButton() is yes
+
+
 FINISH_TIP = ("Terminer la sortie : choix du format (.fit par défaut), du nom et du dossier ; "
               "le .fit part vers Strava / Nolio (Ctrl+T)")
 
@@ -1662,8 +1756,10 @@ def main(argv: list[str] | None = None) -> int:
         app.setWindowIcon(QIcon(str(ICON)))
     # Sans option, on rebranche les appareils de la dernière fois (mémorisés dans le profil utilisateur).
     book = DeviceBook.load()
-    profiles = ProfileBook.load()
+    documents = documents_folder()
+    profiles = ProfileBook.load(rides_root=default_rides_root(documents))  # sorties dans Documents
     profiles.migrate_legacy()  # comptes et sorties d'avant les profils → premier profil
+    profiles.migrate_rides()  # sorties encore dans AppData → Documents
     if args.profile:
         profile = profiles.find(args.profile) or profiles.create(args.profile)
         profiles.last = profile.id
@@ -1706,7 +1802,7 @@ def main(argv: list[str] | None = None) -> int:
         window._ftp_changed()
     if args.weight:
         window.weight_box.setValue(args.weight)
-    window.set_library(Library.load(documents=documents_folder()))
+    window.set_library(Library.load(documents=documents))
     window.show()
     if args.file:  # fichier passé en argument, ou glissé sur l'icône
         window.open_path(args.file)

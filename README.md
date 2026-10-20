@@ -178,6 +178,12 @@ Pendant une sortie (en cours ou en pause), le PC ne se met pas en veille et
 l'écran ne s'éteint pas (Windows) ; le réglage d'alimentation habituel revient
 dès la sortie terminée.
 
+Quand le logiciel passe en arrière-plan pendant une sortie (fenêtre réduite ou
+autre appli au premier plan), une vignette reste visible au-dessus des autres
+fenêtres (`ui/mini.py`) : puissance cible, puissance mesurée et temps restant
+de la brique (pente et kilomètres restants sur un parcours). Elle se déplace à
+la souris ; un clic ramène le logiciel, et elle disparaît à son retour.
+
 Le home trainer réel et le simulateur (`ui/power.py`) offrent la même
 interface `PowerSource` (`set_target`, `read`), voir ci-dessous.
 La logique de déroulé (`ui/session.py`) ne dépend pas de Qt et est testée.
@@ -333,9 +339,13 @@ sont gardés dans le profil.
 La liste est dans `profils.json` du dossier de configuration
 (`%APPDATA%\HomeTrainer` sous Windows, `~/.config/home-trainer` ailleurs ;
 variable `HOME_TRAINER_PROFILES` pour un autre fichier), et chaque profil a
-son dossier `profils/<nom>/` avec `comptes.json` et `sorties/`. Au premier
-lancement après la mise à jour, les comptes et les sorties déjà là sont
-rangés dans un premier profil, « Mon profil », à renommer.
+son dossier `profils/<nom>/` avec `comptes.json`. Ses **sorties** sont dans
+**`Documents\HomeTrainer\Sorties\<nom>\`**, à côté de la bibliothèque
+(`Documents\HomeTrainer\Séances`). Au premier lancement après la mise à jour,
+les comptes et les sorties déjà là sont rangés dans un premier profil,
+« Mon profil », à renommer, et les sorties encore dans `%APPDATA%` sont
+déplacées dans Documents avec leur historique (si le déplacement échoue, elles
+restent lues là où elles sont).
 
 ## Sorties enregistrées, envoi vers Strava et Nolio
 

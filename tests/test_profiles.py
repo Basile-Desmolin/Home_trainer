@@ -60,3 +60,53 @@ def test_nothing_to_migrate_on_first_install(tmp_path):
 def test_unreadable_file_gives_empty_book(tmp_path):
     (tmp_path / "profils.json").write_text("{pas du json", encoding="utf-8")
     assert ProfileBook.load(tmp_path / "profils.json").profiles == []
+
+
+def test_rides_go_to_documents(tmp_path):
+    book = ProfileBook(tmp_path / "config" / "profils.json", rides_root=tmp_path / "Documents" / "HomeTrainer" / "Sorties")
+    basile = book.create("Basile")
+    assert book.rides_dir(basile) == tmp_path / "Documents" / "HomeTrainer" / "Sorties" / "basile"
+    book.rides_dir(basile).mkdir(parents=True)
+    book.remove(basile)
+    assert book.create("Basile").id == "basile-2"  # dossier de sorties resté : pas repris
+
+
+def test_appdata_rides_move_to_documents_with_their_history(tmp_path):
+    book = ProfileBook(tmp_path / "config" / "profils.json", rides_root=tmp_path / "Documents")
+    basile = book.create("Basile")
+    old = book.legacy_rides_dir(basile)
+    old.mkdir(parents=True)
+    (old / "sortie.fit").write_bytes(b"fit")
+    elsewhere = tmp_path / "Bureau" / "col.gpx"
+    history = {"rides": [{"file": str(old.absolute() / "sortie.fit")}, {"file": str(elsewhere)}]}
+    (old / "historique.json").write_text(json.dumps(history), encoding="utf-8")
+    assert book.rides_dir(basile) == old  # pas encore déplacées : on les lit là où elles sont
+    book.migrate_rides()
+    new = tmp_path / "Documents" / "basile"
+    assert book.rides_dir(basile) == new and not old.exists()
+    assert (new / "sortie.fit").read_bytes() == b"fit"
+    files = [r["file"] for r in json.loads((new / "historique.json").read_text(encoding="utf-8"))["rides"]]
+    assert files == [str(new.absolute() / "sortie.fit"), str(elsewhere)]
+    book.migrate_rides()  # une seule fois
+    assert (new / "sortie.fit").exists()
+
+
+def test_rides_stay_in_appdata_when_the_move_fails(tmp_path, monkeypatch):
+    import shutil
+    book = ProfileBook(tmp_path / "config" / "profils.json", rides_root=tmp_path / "Documents")
+    basile = book.create("Basile")
+    old = book.legacy_rides_dir(basile)
+    old.mkdir(parents=True)
+    (old / "sortie.fit").write_bytes(b"fit")
+
+    def no_rename(self, target):
+        raise OSError("autre disque")
+
+    def full_disk(*args, **kwargs):
+        raise OSError("disque plein")
+
+    monkeypatch.setattr(type(old), "rename", no_rename)
+    monkeypatch.setattr(shutil, "copytree", full_disk)
+    book.migrate_rides()
+    assert book.rides_dir(basile) == old and (old / "sortie.fit").exists()
+    assert not (tmp_path / "Documents" / "basile").exists()
