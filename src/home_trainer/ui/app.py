@@ -125,6 +125,7 @@ class MainWindow(QMainWindow):
         self._send_again = False
         # Fenêtre de fin de sortie (remplaçable dans les tests) et derniers choix faits dedans.
         self.ask_ride_export = ask_ride_export
+        self.confirm_stop = confirm_stop  # « Recommencer » / « Terminer » en pleine sortie
         self.ask_heart_rate_mode = ask_heart_rate_mode  # séance en FC : sans ERG ou convertie en puissance
         self._hr_to_power = False  # dernier choix fait pour une séance en FC
         self._erg_wanted = True  # ERG voulu (bouton), repris par les séances qui ont des cibles en puissance
@@ -384,7 +385,7 @@ class MainWindow(QMainWindow):
         self.next_button.clicked.connect(self._next_step)
         self.reset_button = QPushButton("Recommencer")
         self.reset_button.setIcon(icon("restart"))
-        self.reset_button.clicked.connect(self._reset)
+        self.reset_button.clicked.connect(self.restart_ride)
         self.finish_button = QPushButton("Terminer")
         self.finish_button.setIcon(icon("flag"))
         self.finish_button.setToolTip(FINISH_TIP)
@@ -404,7 +405,7 @@ class MainWindow(QMainWindow):
         self.free_panel = FreeRidePanel()
         self.free_panel.chart.set_session(self.free)
         self.free_panel.play_button.clicked.connect(self._toggle)
-        self.free_panel.reset_button.clicked.connect(self._reset_free_ride)
+        self.free_panel.reset_button.clicked.connect(self.restart_ride)
         self.free_panel.back_button.clicked.connect(self.leave_free_ride)
         self.free_panel.finish_button.setToolTip(FINISH_TIP)
         self.free_panel.finish_button.clicked.connect(self.finish_ride)
@@ -416,7 +417,7 @@ class MainWindow(QMainWindow):
 
         self.route_panel = RoutePanel()
         self.route_panel.play_button.clicked.connect(self._toggle)
-        self.route_panel.reset_button.clicked.connect(self._reset_route)
+        self.route_panel.reset_button.clicked.connect(self.restart_ride)
         self.route_panel.back_button.clicked.connect(self.leave_free_ride)
         self.route_panel.finish_button.setToolTip(FINISH_TIP)
         self.route_panel.finish_button.clicked.connect(self.finish_ride)
@@ -654,6 +655,22 @@ class MainWindow(QMainWindow):
     def _reset(self) -> None:
         self.load(self.session.workout)
 
+    def _ride_underway(self) -> bool:
+        return self.active.state in (State.RUNNING, State.PAUSED)
+
+    def restart_ride(self) -> None:
+        """Bouton « Recommencer » : en pleine sortie, on demande d'abord confirmation."""
+        if self._ride_underway() and not self.confirm_stop(
+                self, "Recommencer", "Recommencer depuis le début ?\n\n"
+                "La sortie en cours s'arrête ; ce qui a déjà été roulé est enregistré."):
+            return
+        if self.route_ride:
+            self._reset_route()
+        elif self.free_ride:
+            self._reset_free_ride()
+        else:
+            self._reset()
+
     def _ftp_changed(self) -> None:
         if self.ftp_box.value() == self.ftp:
             return
@@ -889,7 +906,11 @@ class MainWindow(QMainWindow):
 
     def finish_ride(self) -> None:
         """Bouton « Terminer » : la sortie en cours est enregistrée là où on le choisit et envoyée,
-        puis on repart de zéro ; « Annuler » dans la fenêtre ramène à la sortie, en pause."""
+        puis on repart de zéro ; « Annuler » dans la fenêtre ramène à la sortie, en pause.
+        En pleine sortie, une confirmation vient d'abord : « Annuler » la laisse continuer."""
+        if self._ride_underway() and not self.confirm_stop(
+                self, "Terminer", "Terminer la sortie ?\n\nElle s'arrête et passe à l'enregistrement."):
+            return
         active = self.active
         if active.state is State.RUNNING:
             active.pause()
@@ -1295,6 +1316,18 @@ class MainWindow(QMainWindow):
 
 POWER_TIP = ("Capteur de puissance externe (pédales, manivelle) : ses watts font foi "
              "et l'ERG se règle dessus")
+def confirm_stop(parent, action: str, question: str) -> bool:
+    """Confirmation avant d'arrêter la sortie : « Annuler » est le choix par défaut, pour qu'un
+    Entrée ou un Échap en pleine séance ne coupe rien."""
+    box = QMessageBox(QMessageBox.Question, action, question, parent=parent)
+    yes = box.addButton(action, QMessageBox.AcceptRole)
+    cancel = box.addButton("Annuler", QMessageBox.RejectRole)
+    box.setDefaultButton(cancel)
+    box.setEscapeButton(cancel)
+    box.exec()
+    return box.clickedButton() is yes
+
+
 FINISH_TIP = ("Terminer la sortie : choix du format (.fit par défaut), du nom et du dossier ; "
               "le .fit part vers Strava / Nolio (Ctrl+T)")
 
