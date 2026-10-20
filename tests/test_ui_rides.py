@@ -32,6 +32,8 @@ def window(app, tmp_path):
         return default
 
     w.ask_ride_export = answer
+    w.confirmed = []
+    w.confirm_stop = lambda parent, action, question: w.confirmed.append(action) or True
     yield w
     w.close()
 
@@ -312,3 +314,34 @@ def test_trace_draws_one_point_per_pixel():
     assert all(abs(path.elementAt(i).y - 120.5) < 1e-9 for i in range(path.elementCount()))
     gap = trace([(0, 1.0), (1, 1.0), (2, None), (3, 1.0), (4, 1.0)], lambda t: t * 10, lambda v: v)
     assert [gap.elementAt(i).isMoveTo() for i in range(gap.elementCount())] == [True, False, True, False]
+
+
+def test_stopping_mid_ride_asks_first_and_cancel_keeps_riding(window):
+    window.session.start()
+    window.session.tick(5)
+    window.confirm_stop = lambda parent, action, question: window.confirmed.append(action) and False
+    window.finish_button.click()
+    window.reset_button.click()
+    assert window.confirmed == ["Terminer", "Recommencer"]
+    assert window.session.state is State.RUNNING and window.session.elapsed_s == 5
+    assert window.asked == []
+
+
+def test_restart_resets_every_mode_once_confirmed(window):
+    window.session.start()
+    window.session.tick(5)
+    window.reset_button.click()
+    assert window.session.state is State.READY and window.confirmed == ["Recommencer"]
+    window.enter_free_ride()
+    window.free.start()
+    window.free.pause()
+    window.free_panel.reset_button.click()
+    assert window.free.state is State.READY and window.confirmed[-1] == "Recommencer"
+
+
+def test_nothing_asked_before_the_ride_starts(window):
+    window.reset_button.click()
+    window.finish_button.click()
+    window.enter_free_ride()
+    window.free_panel.reset_button.click()
+    assert window.confirmed == []
