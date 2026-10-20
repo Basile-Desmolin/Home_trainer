@@ -3,11 +3,13 @@
 La liste est dans `profils.json` du dossier de configuration (%APPDATA%\\HomeTrainer
 sous Windows, ~/.config/home-trainer ailleurs ; variable HOME_TRAINER_PROFILES pour
 un autre fichier). Chaque profil a son dossier `profils/<id>/` à côté, avec
-`comptes.json` et `sorties/`. Les appareils et le dossier de la bibliothèque
-restent communs à tous les profils.
+`comptes.json`. Ses sorties sont dans Documents/HomeTrainer/Sorties/<id>/ quand
+l'appli donne ce dossier (`rides_root`), sinon dans `profils/<id>/sorties/`. Les
+appareils et le dossier de la bibliothèque restent communs à tous les profils.
 
 Au premier lancement après la mise à jour, les comptes et sorties d'avant les
-profils sont déplacés dans un premier profil (`migrate_legacy`).
+profils sont déplacés dans un premier profil (`migrate_legacy`), et les sorties
+encore dans `profils/<id>/sorties/` passent dans Documents (`migrate_rides`).
 """
 
 from __future__ import annotations
@@ -30,6 +32,13 @@ PROFILES_DIR = "profils"
 DEFAULT_FTP = 250
 DEFAULT_WEIGHT_KG = 66.0  # poids du cycliste seul, comme la case « Poids »
 FIRST_PROFILE_NAME = "Mon profil"
+RIDES_SUBFOLDER = Path("HomeTrainer") / "Sorties"
+HISTORY_FILE = "historique.json"  # voir home_trainer.history
+
+
+def default_rides_root(documents: Path | str | None = None) -> Path:
+    """Dossier des sorties de tous les profils : Documents/HomeTrainer/Sorties."""
+    return Path(documents or Path.home() / "Documents") / RIDES_SUBFOLDER
 
 
 def default_path() -> Path:
@@ -52,8 +61,10 @@ def _slug(name: str) -> str:
 
 
 class ProfileBook:
-    def __init__(self, path: Path | str | None = None) -> None:
+    def __init__(self, path: Path | str | None = None, rides_root: Path | str | None = None) -> None:
         self.path = Path(path) if path is not None else None
+        # Dossier des sorties (un sous-dossier par profil) ; None : dans le dossier du profil.
+        self.rides_root = Path(rides_root) if rides_root is not None else None
         self.profiles: list[Profile] = []
         self.last: str | None = None  # dernier profil choisi
         self.remember = False  # au lancement, reprendre le dernier profil sans demander
@@ -70,8 +81,17 @@ class ProfileBook:
     def accounts_path(self, profile: Profile) -> Path:
         return self.folder(profile) / "comptes.json"
 
-    def rides_dir(self, profile: Profile) -> Path:
+    def legacy_rides_dir(self, profile: Profile) -> Path:
+        """Ancien dossier des sorties, dans le dossier de configuration (AppData)."""
         return self.folder(profile) / "sorties"
+
+    def rides_dir(self, profile: Profile) -> Path:
+        old = self.legacy_rides_dir(profile)
+        if self.rides_root is None:
+            return old
+        new = self.rides_root / profile.id
+        # Tant que les sorties n'ont pas pu être déplacées, on reste dans l'ancien dossier.
+        return old if old.is_dir() and not new.exists() else new
 
     # --- liste -------------------------------------------------------------
 
@@ -95,7 +115,8 @@ class ProfileBook:
         taken = {p.id for p in self.profiles}
         ident, n = base, 2
         # Un dossier resté d'un profil supprimé n'est pas repris : ses sorties ne sont pas à nous.
-        while ident in taken or (self.path is not None and self.base_dir.joinpath(ident).exists()):
+        while ident in taken or (self.path is not None and self.base_dir.joinpath(ident).exists()) \
+                or (self.rides_root is not None and self.rides_root.joinpath(ident).exists()):
             ident, n = f"{base}-{n}", n + 1
         return ident
 
@@ -112,8 +133,8 @@ class ProfileBook:
     # --- fichier -----------------------------------------------------------
 
     @classmethod
-    def load(cls, path: Path | str | None = None) -> ProfileBook:
-        book = cls(default_path() if path is None else path)
+    def load(cls, path: Path | str | None = None, rides_root: Path | str | None = None) -> ProfileBook:
+        book = cls(default_path() if path is None else path, rides_root)
         try:
             data = json.loads(book.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -157,12 +178,72 @@ class ProfileBook:
         profile = self.create(FIRST_PROFILE_NAME)
         folder = self.folder(profile)
         folder.mkdir(parents=True, exist_ok=True)
-        for source, target in ((accounts, self.accounts_path(profile)), (rides, self.rides_dir(profile))):
-            if source.exists():
-                try:
-                    shutil.move(str(source), str(target))
-                except OSError as e:
-                    log.warning("%s non déplacé vers le profil : %s", source, e)
+        if accounts.exists():
+            try:
+                shutil.move(str(accounts), str(self.accounts_path(profile)))
+            except OSError as e:
+                log.warning("%s non déplacé vers le profil : %s", accounts, e)
+        if rides.exists():
+            move_rides(rides, self.legacy_rides_dir(profile))
         self.last = profile.id
         self.save()
         return profile
+
+    def migrate_rides(self) -> None:
+        """Déplace les sorties restées dans le dossier de configuration (AppData) vers
+        Documents, profil par profil, en gardant leur historique. Ce qui n'a pas pu
+        être déplacé reste où il était (et y est toujours lu)."""
+        if self.rides_root is None:
+            return
+        for profile in self.profiles:
+            old, new = self.legacy_rides_dir(profile), self.rides_root / profile.id
+            if old.is_dir() and not new.exists():
+                move_rides(old, new)
+
+
+def move_rides(old: Path, new: Path) -> bool:
+    """Déplace un dossier de sorties (sans rien perdre s'il échoue en route) et met à jour
+    les chemins des fichiers dans son historique. False s'il est resté où il était."""
+    tmp = new.with_name(new.name + ".deplacement")
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            old.rename(new)  # même disque : immédiat
+        except OSError:
+            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.copytree(old, tmp)  # autre disque (OneDrive…) : copie, puis on efface l'ancien
+            tmp.rename(new)
+            shutil.rmtree(old, ignore_errors=True)
+    except OSError as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        log.warning("sorties non déplacées de %s vers %s : %s", old, new, e)
+        return False
+    _relocate_history(new / HISTORY_FILE, old, new)
+    return True
+
+
+def _relocate_history(path: Path, old: Path, new: Path) -> None:
+    """Dans l'historique, les fichiers qui étaient dans `old` sont maintenant dans `new`."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as e:
+        log.warning("historique illisible (%s) : %s", path, e)
+        return
+    changed = False
+    for ride in data.get("rides", []) if isinstance(data, dict) else []:
+        file = ride.get("file") if isinstance(ride, dict) else None
+        if not file:
+            continue
+        try:
+            relative = Path(file).relative_to(old.absolute())
+        except ValueError:
+            continue  # enregistrée ailleurs (« Enregistrer sous »), elle n'a pas bougé
+        ride["file"] = str(new.absolute() / relative)
+        changed = True
+    if changed:
+        try:
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError as e:
+            log.warning("historique non mis à jour (%s) : %s", path, e)

@@ -45,7 +45,7 @@ from ..formats.fit_activity import activity_file_name
 from ..heart_zones import to_power
 from ..history import FILE_NAME as HISTORY_FILE, RideHistory
 from ..keep_awake import KeepAwake
-from ..profiles import Profile, ProfileBook
+from ..profiles import Profile, ProfileBook, default_rides_root
 from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
@@ -1662,8 +1662,10 @@ def main(argv: list[str] | None = None) -> int:
         app.setWindowIcon(QIcon(str(ICON)))
     # Sans option, on rebranche les appareils de la dernière fois (mémorisés dans le profil utilisateur).
     book = DeviceBook.load()
-    profiles = ProfileBook.load()
+    documents = documents_folder()
+    profiles = ProfileBook.load(rides_root=default_rides_root(documents))  # sorties dans Documents
     profiles.migrate_legacy()  # comptes et sorties d'avant les profils → premier profil
+    profiles.migrate_rides()  # sorties encore dans AppData → Documents
     if args.profile:
         profile = profiles.find(args.profile) or profiles.create(args.profile)
         profiles.last = profile.id
@@ -1706,7 +1708,7 @@ def main(argv: list[str] | None = None) -> int:
         window._ftp_changed()
     if args.weight:
         window.weight_box.setValue(args.weight)
-    window.set_library(Library.load(documents=documents_folder()))
+    window.set_library(Library.load(documents=documents))
     window.show()
     if args.file:  # fichier passé en argument, ou glissé sur l'icône
         window.open_path(args.file)
