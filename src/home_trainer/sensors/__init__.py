@@ -18,6 +18,11 @@ Un capteur de puissance externe (pédales, manivelle) se lit comme le cardio ;
 
     meter = open_power_meter("ble")             # ou "ant"
 
+Le Zwift Click change le braquet virtuel (voir `home_trainer.gears`) :
+
+    click = open_zwift_click()                  # Bluetooth seulement
+    click.take_shifts()                         # [+1, −1…] : appuis depuis le dernier appel
+
 `BackgroundSensor` (base.py) est le socle commun de tous ces capteurs.
 """
 
@@ -57,6 +62,12 @@ def open_power_meter(kind: str, *, address: str | None = None,
     raise ValueError(f"capteur de puissance inconnu : {kind!r} (ble ou ant)")
 
 
+def open_zwift_click(*, address: str | None = None):
+    """Crée (sans le démarrer) la commande de vitesses Zwift Click (Bluetooth)."""
+    from .zwift_click import BleZwiftClick
+    return BleZwiftClick(address)
+
+
 def open_trainer(kind: str, *, address: str | None = None, device_number: int = 0) -> Trainer:
     """Crée (sans le démarrer) le pilote du home trainer : "ble" ou "ant"."""
     if kind == "ble":
@@ -71,4 +82,4 @@ def open_trainer(kind: str, *, address: str | None = None, device_number: int = 
 __all__ = ["AntHeartRateDecoder", "AntPowerDecoder", "BackgroundSensor", "HEART_RATE_KINDS", "HeartRateReading",
            "POWER_METER_KINDS", "PowerMatch", "PowerMeterReading", "SensorState", "SensorUnavailable", "Slope",
            "TRAINER_KINDS", "Trainer", "TrainerReading", "open_heart_rate_sensor", "open_power_meter",
-           "open_trainer", "parse_ble_measurement"]
+           "open_trainer", "open_zwift_click", "parse_ble_measurement"]

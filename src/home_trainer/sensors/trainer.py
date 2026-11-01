@@ -18,6 +18,15 @@ testables sans matériel. Les pilotes radio (`trainer_ble.py`,
 Une consigne est une puissance en watts (mode ERG), une pente (`Slope`,
 mode simulation : la résistance suit la pente, le poids et la vitesse comme
 sur la route) ou None : « résistance libre », c'est-à-dire du plat.
+
+Braquet virtuel (`Slope.gear`, voir `home_trainer.gears`) : avec un pignon
+unique (Zwift Cog), passer un braquet `k` fois plus grand revient, à même
+cadence, à rouler `k` fois plus vite. La force à la roue devient
+k × F_route(k·v) = (k·m)·g·(pente + Crr) + (k³·Cw)·v² : le home trainer
+simule exactement ce braquet si l'on multiplie la masse par k et la traînée
+par k³. FTMS ne transmettant pas la masse, la pente et le Crr y sont
+multipliés par k ; la traînée est bornée par chaque protocole (2,55 kg/m en
+FTMS, 1,86 en FE-C), ce qui allège un peu les très grands braquets.
 """
 
 from __future__ import annotations
@@ -72,14 +81,16 @@ class Slope:
     grade_pct: float
     rider_kg: float = DEFAULT_WEIGHT_KG - DEFAULT_BIKE_KG
     bike_kg: float = DEFAULT_BIKE_KG
+    gear: float = 1.0  # braquet virtuel : rapport au braquet réel (1 = celui du vélo)
 
     @property
     def total_kg(self) -> float:
         return self.rider_kg + self.bike_kg
 
     def rounded(self) -> Slope:
-        """Ce qui compte pour le home trainer : pente au 0,01 %, poids aux 100 g."""
-        return Slope(round(self.grade_pct, 2), round(self.rider_kg, 1), round(self.bike_kg, 1))
+        """Ce qui compte pour le home trainer : pente au 0,01 %, poids aux 100 g, braquet au millième."""
+        return Slope(round(self.grade_pct, 2), round(self.rider_kg, 1), round(self.bike_kg, 1),
+                     round(self.gear, 3))
 
 
 
@@ -152,6 +163,8 @@ FTMS_START_OR_RESUME = 0x07
 FTMS_STOP_OR_PAUSE = 0x08
 FTMS_SET_SIMULATION = 0x11
 FTMS_RESPONSE = 0x80
+FTMS_MAX_CRR = 0.0255  # Crr et Cw tiennent chacun sur un octet
+FTMS_MAX_CW = 2.55
 
 FTMS_RESULTS = {0x01: "accepté", 0x02: "commande non gérée", 0x03: "paramètre invalide",
                 0x04: "échec", 0x05: "contrôle non accordé (une autre appli pilote le home trainer ?)"}
@@ -181,13 +194,15 @@ def ftms_command_for(target_w: float | Slope | None) -> bytes:
     if target_w is None:
         return ftms_set_simulation()
     if isinstance(target_w, Slope):
-        return ftms_set_simulation(ftms_grade(target_w))
+        k = target_w.gear
+        return ftms_set_simulation(ftms_grade(target_w), crr=min(FTMS_MAX_CRR, DEFAULT_CRR * k),
+                                   cw=min(FTMS_MAX_CW, DEFAULT_CW * k ** 3))
     return ftms_set_target_power(target_w)
 
 
 def ftms_grade(slope: Slope) -> float:
-    """Pente à envoyer en FTMS, ajustée au poids réel (voir `FTMS_REFERENCE_KG`)."""
-    return max(-327.0, min(327.0, slope.grade_pct * slope.total_kg / FTMS_REFERENCE_KG))
+    """Pente à envoyer en FTMS, ajustée au poids réel (voir `FTMS_REFERENCE_KG`) et au braquet."""
+    return max(-327.0, min(327.0, slope.grade_pct * slope.total_kg / FTMS_REFERENCE_KG * slope.gear))
 
 
 @dataclass(frozen=True)
@@ -241,7 +256,8 @@ def wahoo_commands_for(target_w: float | Slope | None) -> list[bytes]:
     if target_w is None:
         return [wahoo_set_sim(), wahoo_set_grade(0.0)]
     if isinstance(target_w, Slope):
-        return [wahoo_set_sim(target_w.total_kg), wahoo_set_grade(target_w.grade_pct)]
+        k = target_w.gear
+        return [wahoo_set_sim(target_w.total_kg * k, cw=DEFAULT_CW * k ** 3), wahoo_set_grade(target_w.grade_pct)]
     return [wahoo_set_erg(target_w)]
 
 
@@ -350,6 +366,14 @@ def fec_track_resistance(grade_pct: float = 0.0, crr: float = DEFAULT_CRR) -> li
     return [0x33, 0xFF, 0xFF, 0xFF, 0xFF, raw & 0xFF, raw >> 8, min(254, round(crr / 5e-5))]
 
 
+FEC_MAX_CW = 1.86
+
+
+def fec_wind_resistance(cw: float = DEFAULT_CW) -> list[int]:
+    """Page 0x32 : coefficient de traînée (0,01 kg/m), sans vent (127 = 0 km/h), sans abri (100 %)."""
+    return [0x32, 0xFF, 0xFF, 0xFF, 0xFF, round(max(0.0, min(FEC_MAX_CW, cw)) * 100), 127, 100]
+
+
 def fec_user_configuration(rider_kg: float, bike_kg: float = DEFAULT_BIKE_KG,
                            wheel_m: float = 0.70) -> list[int]:
     """Page 0x37 : poids du cycliste (0,01 kg), du vélo (0,05 kg sur 12 bits), diamètre de roue (cm)."""
@@ -363,14 +387,16 @@ def fec_page_for(target_w: float | Slope | None) -> list[int]:
     if target_w is None:
         return fec_track_resistance()
     if isinstance(target_w, Slope):
-        return fec_track_resistance(target_w.grade_pct)
+        return fec_track_resistance(target_w.grade_pct, DEFAULT_CRR * target_w.gear)
     return fec_target_power(target_w)
 
 
 def fec_pages_for(target_w: float | Slope | None) -> list[list[int]]:
-    """Pages à envoyer : en pente, le poids (page 0x37) part avant la pente."""
+    """Pages à envoyer : en pente, le poids (page 0x37) et la traînée (0x32) partent avant la pente."""
     if isinstance(target_w, Slope):
-        return [fec_user_configuration(target_w.rider_kg, target_w.bike_kg), fec_page_for(target_w)]
+        k = target_w.gear
+        return [fec_user_configuration(target_w.rider_kg * k, target_w.bike_kg * k),
+                fec_wind_resistance(DEFAULT_CW * k ** 3), fec_page_for(target_w)]
     return [fec_page_for(target_w)]
 
 

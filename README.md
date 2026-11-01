@@ -299,6 +299,30 @@ Cycling Power, ou ANT+ Bicycle Power). Une pastille apparaît alors dans le band
 - En pente (mode libre, parcours) rien n'est corrigé : la résistance suit la
   route, seuls les watts affichés et enregistrés viennent du capteur.
 
+### Braquets virtuels et Zwift Click (Zwift Cog)
+
+Hors ERG (parcours GPX, mode libre en pente, séance **ERG off**), on peut
+changer de **braquet virtuel** : 24 rapports, du braquet 1 (2,5 fois plus
+souple que celui du vélo) au braquet 24 (2,7 fois plus grand), 8,5 % d'écart
+entre deux crans. Le braquet 12 est celui du vélo : rien ne change tant
+qu'on n'y touche pas. Pratique avec un pignon unique (Zwift Cog), pour
+monter un col du parcours GPX ou faire un test PMA en ERG off.
+
+- **Commande** : les boutons + / − d'un **Zwift Click** (v1 ou v2), à choisir
+  dans la pastille du home trainer, ligne **Commande de vitesses**
+  (une pastille « Braquet 14 / 24 » apparaît alors dans le bandeau), ou au
+  clavier **Maj+↑ / Maj+↓**. En ERG, le braquet ne compte pas.
+- **Résistance** : un braquet `k` fois plus grand revient à rouler `k` fois
+  plus vite à même cadence. Le home trainer simule alors une masse `k` fois
+  et une traînée `k³` fois plus grandes : la résistance est celle de la
+  route à la vitesse virtuelle (exacte en protocole Wahoo ; en FTMS et FE-C,
+  la traînée est bornée, les tout derniers braquets sont un peu plus légers
+  que sur la route). La vitesse affichée suit le braquet.
+- **Click v2** : il doit avoir été connecté à l'appli Zwift dans la journée,
+  sinon il se déconnecte au bout d'une minute (l'appli se reconnecte seule).
+  Le protocole du Click n'est pas publié : il vient de la rétro-ingénierie des
+  projets libres zwiftplay et BikeControl.
+
 ## Appareils mémorisés
 
 ![Appareils mémorisés](docs/appareils.png)

@@ -252,7 +252,7 @@ class RoutePanel(QWidget):
             b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
         buttons.addStretch(1)
-        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] difficulté ±10 %"))
+        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] difficulté ±10 %   [Maj+↑] [Maj+↓] braquet"))
         buttons.addWidget(hint)
         layout.addLayout(buttons)
 
@@ -299,7 +299,8 @@ class RoutePanel(QWidget):
         r = session.route
         self.title.setText(f"{r.name}  ·  {km_text(r.total_m)}  ·  D+ {r.climb_m:.0f} m")
 
-    def refresh(self, session: RouteSession, reading: Reading | None) -> None:
+    def refresh(self, session: RouteSession, reading: Reading | None, gear: str | None = None) -> None:
+        """`gear` : braquet virtuel en cours (« 14 / 24 »)."""
         ftp = session.ftp or DEFAULT_FTP
         r = reading
         average = session.average_power()
@@ -309,7 +310,8 @@ class RoutePanel(QWidget):
         self.m_power.set(f"{r.power_w:.0f} W" if r else "—", sub)
         self.power_zones.set_zone(zone_index(r.power_w if r else None, ftp))
         self.m_power.set_tint(route_grade_color(session.grade_pct) if session.state is State.RUNNING else None)
-        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", "tr/min")
+        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—",
+                            "tr/min" + (f" · braquet {gear}" if gear else ""))
 
         grade = session.grade_pct
         self.grade_label.setText(grade_text(grade))
