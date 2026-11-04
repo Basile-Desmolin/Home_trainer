@@ -92,7 +92,9 @@ class SimulatedTrainer:
         target = self._target
         grade = target.grade_pct if isinstance(target, Slope) else 0.0
         if target is None or isinstance(target, Slope):
-            goal = max(60.0, self.free_ride_w + 20 * grade)  # on appuie plus fort en montée
+            gear = target.gear if isinstance(target, Slope) else 1.0
+            # On appuie plus fort en montée, et dans un plus grand braquet (même cadence).
+            goal = max(60.0, (self.free_ride_w + 20 * grade) * gear)
         else:
             goal = target
         if dt > 0:

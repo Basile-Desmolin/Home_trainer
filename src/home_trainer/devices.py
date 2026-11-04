@@ -1,4 +1,4 @@
-"""Appareils mémorisés : home trainers, ceintures cardio et capteurs de puissance déjà connectés, avec un nom choisi.
+"""Appareils mémorisés : home trainers, ceintures cardio, capteurs de puissance et Zwift Click déjà connectés, avec un nom choisi.
 
     book = DeviceBook.load()                       # fichier de l'utilisateur
     device = book.remember("trainer", "ble", "AA:BB:…", "KICKR CORE 5D21")
@@ -24,7 +24,8 @@ from .config import config_dir
 
 log = logging.getLogger(__name__)
 
-ROLES = {"trainer": "home trainer", "hr": "ceinture cardio", "power": "capteur de puissance"}
+ROLES = {"trainer": "home trainer", "hr": "ceinture cardio", "power": "capteur de puissance",
+         "click": "commande de vitesses"}
 KINDS = {"ble": "Bluetooth", "ant": "ANT+"}
 FILE_NAME = "appareils.json"
 
@@ -38,7 +39,7 @@ def default_path() -> Path:
 
 @dataclass
 class SavedDevice:
-    role: str   # "trainer", "hr" ou "power"
+    role: str   # "trainer", "hr", "power" ou "click"
     kind: str   # "ble" ou "ant"
     ident: str  # adresse Bluetooth, ou numéro ANT+ en texte
     name: str   # nom choisi par l'utilisateur

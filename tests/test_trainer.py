@@ -5,7 +5,8 @@ import pytest
 
 from home_trainer.sensors import SensorState, TrainerReading, open_trainer
 from home_trainer.sensors.trainer import (AntFecDecoder, CyclingPowerDecoder, Slope, TargetThrottle, Trainer,
-                                          WAHOO_UNLOCK, fec_page_for, fec_pages_for, fec_target_power, fec_track_resistance,
+                                          WAHOO_UNLOCK, fec_page_for, fec_pages_for, fec_target_power,
+                                          fec_track_resistance, fec_user_configuration, fec_wind_resistance,
                                           ftms_command_for, ftms_request_control, ftms_set_simulation,
                                           ftms_set_target_power, ftms_start, parse_ftms_response,
                                           parse_indoor_bike_data, wahoo_commands_for, wahoo_set_erg,
@@ -265,10 +266,33 @@ def test_slope_commands_carry_grade_and_weight():
     assert ftms_command_for(Slope(5.0, rider_kg=96.0)) == ftms_set_simulation(7.0)  # (96 + 9) / 75 × 5 %
     assert wahoo_commands_for(slope) == [wahoo_set_sim(75.0), wahoo_set_grade(5.0)]
     assert fec_page_for(slope) == fec_track_resistance(5.0)
-    config, track = fec_pages_for(Slope(-2.5, rider_kg=70.0, bike_kg=8.0))
+    config, wind, track = fec_pages_for(Slope(-2.5, rider_kg=70.0, bike_kg=8.0))
     assert config == [0x37, 0x58, 0x1B, 0xFF, 0x0F, 0x0A, 70, 0x00]  # 7000 × 0,01 kg ; 160 × 0,05 kg
+    assert wind == fec_wind_resistance(0.51) == [0x32, 0xFF, 0xFF, 0xFF, 0xFF, 51, 127, 100]
     assert track == fec_track_resistance(-2.5)
     assert fec_pages_for(200) == [fec_target_power(200)]
+
+
+def test_virtual_gear_scales_mass_and_drag():
+    # Braquet 2 fois plus grand : masse × 2, traînée × 8, comme une route roulée 2 fois plus vite.
+    geared = Slope(5.0, rider_kg=66.0, gear=2.0)
+    assert wahoo_commands_for(geared) == [wahoo_set_sim(150.0, cw=0.51 * 8), wahoo_set_grade(5.0)]
+    assert ftms_command_for(geared) == ftms_set_simulation(10.0, crr=0.008, cw=2.55)  # Cw borné à 2,55
+    assert ftms_command_for(Slope(5.0, rider_kg=66.0, gear=1.1)) == ftms_set_simulation(
+        5.5, crr=0.0044, cw=0.51 * 1.1 ** 3)
+    config, wind, track = fec_pages_for(Slope(0.0, rider_kg=70.0, bike_kg=8.0, gear=2.0))
+    assert config == fec_user_configuration(140.0, 16.0)
+    assert wind == fec_wind_resistance(1.86)  # borne FE-C
+    assert track == fec_track_resistance(0.0, 0.008)
+    # Braquet 1 : rien ne change par rapport à la pente seule.
+    assert ftms_command_for(Slope(5.0, rider_kg=66.0, gear=1.0)) == ftms_set_simulation(5.0)
+
+
+def test_throttle_sends_a_gear_change_at_once():
+    t = TargetThrottle(min_interval_s=1.0)
+    t.mark_sent(Slope(3.0), 0.0)
+    assert not t.due(Slope(3.0, gear=1.0), 0.1)
+    assert t.due(Slope(3.0, gear=1.085), 0.1)
 
 
 def test_throttle_sends_slope_changes_at_once():

@@ -345,3 +345,47 @@ def test_nothing_asked_before_the_ride_starts(window):
     window.enter_free_ride()
     window.free_panel.reset_button.click()
     assert window.confirmed == []
+
+
+def test_virtual_gears_change_the_resistance_off_erg(window):
+    from home_trainer.sensors import Slope
+    from home_trainer.ui.session import FreeMode
+    window.enter_free_ride()
+    window.set_free_mode(FreeMode.ERG)
+    window.free.start()
+    window._push_target()
+    window.shift_gear(+1)  # en ERG, le braquet ne compte pas
+    assert window.gears.gear == 12 and window.source._target == window.free.target_w
+    window.set_free_mode(FreeMode.SLOPE)
+    window.shift_gear(+1)
+    window.shift_gear(+1)
+    assert window.gears.gear == 14
+    target = window.source._target
+    assert isinstance(target, Slope) and target.gear == pytest.approx(1.085 ** 2)
+    assert "braquet 14 / 24" in window.free_panel.target_sub.text()
+    window.leave_free_ride()
+    window.toggle_erg()  # séance ERG off : le braquet suit
+    window.session.start()
+    window._push_target()
+    assert window.source._target.gear == pytest.approx(1.085 ** 2)
+    assert "braquet 14 / 24" in window.m_cadence.sub.text()
+    window.toggle_erg()
+
+
+def test_click_presses_shift_gears(window):
+    from home_trainer.sensors.zwift_click import BleZwiftClick
+
+    class FakeClick(BleZwiftClick):
+        def start(self) -> None:  # pas de Bluetooth dans les tests
+            pass
+
+    click = FakeClick("AA:BB")
+    window.set_click(click)
+    window.enter_free_ride()
+    from home_trainer.ui.session import FreeMode
+    window.set_free_mode(FreeMode.SLOPE)
+    click._on_shifts([-1, -1, -1], None)
+    window._on_tick()
+    assert window.gears.gear == 9
+    assert window.click_chip_action.isVisible() or not window.isVisible()
+    window.set_click(None)

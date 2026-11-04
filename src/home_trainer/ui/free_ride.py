@@ -265,9 +265,10 @@ class FreeRidePanel(QWidget):
                 text = ("+" if direction > 0 else "−") + grade_text(step).replace(" ", "\u202f")
             b.setText(text.replace("-", "−"))
         self.hint.setText(keycaps("[Espace] pause   [↑] [↓] ±5 W   [Pg↑] [Pg↓] ±25 W" if erg
-                                  else "[Espace] pause   [↑] [↓] ±0,5 %   [Pg↑] [Pg↓] ±2 %"))
+                                  else "[Espace] pause   [↑] [↓] ±0,5 %   [Maj+↑] [Maj+↓] braquet"))
 
-    def refresh(self, session: FreeRideSession, reading: Reading | None) -> None:
+    def refresh(self, session: FreeRideSession, reading: Reading | None, gear: str | None = None) -> None:
+        """`gear` : braquet virtuel en cours (« 14 / 24 »), montré en pente."""
         ftp = session.ftp or DEFAULT_FTP
         r = reading
         average = session.average_power()
@@ -288,9 +289,12 @@ class FreeRidePanel(QWidget):
             self.target_sub.setText(f"{session.target_w / ftp * 100:.0f} % FTP")
         else:
             self.target_label.setText(grade_text(session.grade_pct))
-            self.target_sub.setText(f"cycliste {session.rider_kg:g} kg".replace(".", ","))
+            self.target_sub.setText(f"cycliste {session.rider_kg:g} kg".replace(".", ",")
+                                    + (f" · braquet {gear}" if gear else ""))
         speed = getattr(r, "speed_kmh", None)
         sub = "tr/min" if speed is None else f"tr/min · {speed:.1f} km/h".replace(".", ",")
+        if gear and not erg:
+            sub += f" · braquet {gear}"
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
         self.m_time.set(hms(session.elapsed_s), "")
         running = f"ERG à {session.target_w} W" if erg else f"Pente simulée à {grade_text(session.grade_pct)}"

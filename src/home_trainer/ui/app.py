@@ -43,6 +43,7 @@ from ..devices import DeviceBook, SavedDevice, ant_ident
 from ..formats import FormatError, save_workout
 from ..formats.activity_export import write_ride
 from ..formats.fit_activity import activity_file_name
+from ..gears import VirtualGears
 from ..heart_zones import to_power
 from ..history import FILE_NAME as HISTORY_FILE, RideHistory
 from ..keep_awake import KeepAwake
@@ -50,7 +51,7 @@ from ..profiles import Profile, ProfileBook, default_rides_root
 from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
-                       Trainer, open_heart_rate_sensor, open_power_meter)
+                       Trainer, open_heart_rate_sensor, open_power_meter, open_zwift_click)
 from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
@@ -113,7 +114,8 @@ class MainWindow(QMainWindow):
                  book: DeviceBook | None = None, accounts: AccountBook | None = None,
                  outbox: Outbox | None = None, profiles: ProfileBook | None = None,
                  profile: Profile | None = None,
-                 power_meter: BackgroundSensor[PowerMeterReading] | None = None) -> None:
+                 power_meter: BackgroundSensor[PowerMeterReading] | None = None,
+                 click: BackgroundSensor | None = None) -> None:
         super().__init__()
         # Avec un profil, ses comptes et son dossier des sorties remplacent `accounts` et `outbox`.
         self.profiles = profiles if profiles is not None else ProfileBook()
@@ -150,6 +152,9 @@ class MainWindow(QMainWindow):
         # Capteur de puissance externe : ses watts font foi, et l'ERG du home trainer est corrigé dessus.
         self.power_meter: BackgroundSensor[PowerMeterReading] | None = None
         self.power_match = PowerMatch()
+        # Braquets virtuels hors ERG (pignon unique type Zwift Cog), changés au clavier ou au Zwift Click.
+        self.gears = VirtualGears()
+        self.click: BackgroundSensor | None = None
 
         self._build_toolbar()
         self._build_body()
@@ -167,6 +172,7 @@ class MainWindow(QMainWindow):
         self.set_power_source(self.source)
         self.set_heart_rate_sensor(heart_rate)
         self.set_power_meter(power_meter)
+        self.set_click(click)
         if profile is not None:
             self.set_profile(profile)  # envoie aussi les sorties restées en attente
         else:
@@ -252,6 +258,10 @@ class MainWindow(QMainWindow):
         self.power_chip.clicked.connect(lambda: self._choose_power_meter())
         # Pastille montrée seulement avec un capteur : il se choisit depuis la pastille du home trainer.
         self.power_chip_action = bar.addWidget(self.power_chip)
+        self.click_chip = self._header_button("", CLICK_TIP, "chip")
+        self.click_chip.clicked.connect(lambda: self._choose_click())
+        # Pastille montrée seulement avec un Click : il se choisit depuis la pastille du home trainer.
+        self.click_chip_action = bar.addWidget(self.click_chip)
         self.heart_chip = self._header_button("", "Choisir la ceinture cardio", "chip")
         self.heart_chip.clicked.connect(self._choose_heart_rate)
         bar.addWidget(self.heart_chip)
@@ -403,7 +413,8 @@ class MainWindow(QMainWindow):
             b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
         buttons.addStretch(1)
-        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] ±1 %   [→] brique suivante   [E] ERG"))
+        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] ±1 %   [→] brique suivante   [E] ERG   "
+                              "[Maj+↑] [Maj+↓] braquet"))
         buttons.addWidget(hint)
         layout.addLayout(buttons)
 
@@ -472,6 +483,9 @@ class MainWindow(QMainWindow):
             for key in keys:
                 QShortcut(QKeySequence(key), self, activated=slot)
         QShortcut(QKeySequence(Qt.Key_E), self, activated=self.toggle_erg)
+        # Maj+↑ / Maj+↓ : braquet virtuel plus dur / plus souple, comme les boutons + / − du Zwift Click.
+        QShortcut(QKeySequence("Shift+Up"), self, activated=lambda: self.shift_gear(+1))
+        QShortcut(QKeySequence("Shift+Down"), self, activated=lambda: self.shift_gear(-1))
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self._toggle_free_ride)
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.finish_ride)
 
@@ -552,6 +566,23 @@ class MainWindow(QMainWindow):
         self.session.rider_kg = kg
         if self.route is not None:
             self.route.rider_kg = kg
+        self._push_target()
+        self._refresh()
+
+    @property
+    def gears_apply(self) -> bool:
+        """Vrai hors ERG : parcours, mode libre en pente, séance ERG off. Le braquet compte alors."""
+        if self.route_ride:
+            return True
+        if self.free_ride:
+            return self.free.mode is FreeMode.SLOPE
+        return not self.session.erg
+
+    def shift_gear(self, direction: int) -> None:
+        """Braquet virtuel : +1 plus dur, −1 plus souple ; sans effet en ERG (la puissance est imposée)."""
+        if not self.gears_apply:
+            return
+        self.gears.shift(direction)
         self._push_target()
         self._refresh()
 
@@ -714,7 +745,8 @@ class MainWindow(QMainWindow):
                                current_name=self._display_name("trainer", self.source),
                                before_calibration=self._pause_for_calibration,
                                choose_power_meter=self._choose_power_meter,
-                               power_meter_name=self._power_meter_name())
+                               power_meter_name=self._power_meter_name(),
+                               choose_click=self._choose_click, click_name=self._click_name())
         if dialog.exec() == QDialog.Accepted:
             self.set_power_source(dialog.sensor())
 
@@ -752,6 +784,25 @@ class MainWindow(QMainWindow):
             sensor.start()
         self._push_target()
         self._refresh()
+
+    def set_click(self, sensor: BackgroundSensor | None) -> None:
+        """Remplace le Zwift Click (None = aucun) et le démarre."""
+        if self.click is not None:
+            self.click.stop()
+        self.click = sensor
+        if sensor is not None:
+            sensor.start()
+        self._refresh()
+
+    def _click_name(self) -> str:
+        return "aucune" if self.click is None else self._display_name("click", self.click)
+
+    def _choose_click(self, parent: QWidget | None = None) -> str:
+        """Choix du Zwift Click ; renvoie son nom (« aucune »)."""
+        dialog = ClickDialog(self.book, parent or self)
+        if dialog.exec() == QDialog.Accepted:
+            self.set_click(dialog.sensor())
+        return self._click_name()
 
     def _choose_power_meter(self, parent: QWidget | None = None) -> str:
         """Choix du capteur de puissance ; renvoie son nom (« aucun »)."""
@@ -805,6 +856,8 @@ class MainWindow(QMainWindow):
             self.heart_rate.stop()
         if self.power_meter is not None:
             self.power_meter.stop()
+        if self.click is not None:
+            self.click.stop()
         if isinstance(self.source, Trainer):
             self.source.stop()
         super().closeEvent(event)
@@ -1109,6 +1162,9 @@ class MainWindow(QMainWindow):
 
     def _on_tick(self) -> None:
         dt = self.clock.restart() / 1000
+        if self.click is not None:
+            for direction in self.click.take_shifts():
+                self.shift_gear(direction)
         active = self.active
         active.tick(dt)
         self._push_target()
@@ -1155,15 +1211,30 @@ class MainWindow(QMainWindow):
             return round(self.route.speed_kmh, 2)
         speed = getattr(reading, "speed_kmh", None)
         if speed is not None:
-            return speed
+            return round(speed * self._speed_factor(), 2)
         grade = self.free.grade_pct if self.free_ride and self.free.mode is FreeMode.SLOPE else 0.0
         return round(road_speed_kmh(reading.power_w, Slope(grade, self.free.rider_kg)), 2)
+
+    def _speed_factor(self) -> float:
+        """Le volant d'un home trainer réel tourne au braquet du vélo : la vitesse virtuelle suit le
+        braquet virtuel. (Le simulateur donne déjà la vitesse sur la route, d'après la puissance.)"""
+        running = self.active.state is State.RUNNING
+        return self.gears.factor if running and self.gears_apply and isinstance(self.source, Trainer) else 1.0
+
+    def _shown_reading(self):
+        """Dernière mesure, vitesse ramenée au braquet virtuel."""
+        r = self._last_reading
+        if r is None or getattr(r, "speed_kmh", None) is None:
+            return r
+        return dataclasses.replace(r, speed_kmh=self._speed(r))
 
     def _push_target(self) -> None:
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
         active = self.active
         running = active.state is State.RUNNING
         command = active.command if running else None
+        if isinstance(command, Slope):  # hors ERG, le braquet virtuel fait partie de la résistance
+            command = dataclasses.replace(command, gear=self.gears.factor)
         if self.power_meter is not None:
             command = self.power_match.command(command)  # ERG tenu selon le capteur de puissance
         self.source.set_target(command)
@@ -1172,15 +1243,17 @@ class MainWindow(QMainWindow):
         self._refresh_source()
         self._refresh_power_chip()
         self._refresh_heart_chip()
+        self._refresh_click_chip()
+        gear = self.gears.label if self.gears_apply else None
         page = "route" if self.route_ride else "free" if self.free_ride else "workout"
         if not self.tabs[page].isChecked():
             self.tabs[page].setChecked(True)
         if self.route_ride:
-            self.route_panel.refresh(self.route, self._last_reading)
+            self.route_panel.refresh(self.route, self._last_reading, gear)
             self._refresh_heart_rate(self.route_panel.m_heart, self.route)
             return
         if self.free_ride:
-            self.free_panel.refresh(self.free, self._last_reading)
+            self.free_panel.refresh(self.free, self._shown_reading(), gear)
             self._refresh_heart_rate(self.free_panel.m_heart, self.free)
             return
         s = self.session
@@ -1227,6 +1300,8 @@ class MainWindow(QMainWindow):
         self.total_bar.setValue(round(1000 * s.position_s / s.total_s) if s.total_s else 0)
         # Sous la cadence, la vitesse : celle du home trainer, sinon celle estimée (comme dans l'enregistrement).
         sub = "tr/min" if r is None else f"tr/min · {self._speed(r):.1f} km/h".replace(".", ",")
+        if gear:
+            sub += f" · braquet {gear}"
         self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
         self._refresh_heart_rate(self.m_heart, s)
         self.intensity_label.setText(f"{s.intensity_pct} %")
@@ -1339,6 +1414,25 @@ class MainWindow(QMainWindow):
             self._power_color = color
             self.power_chip.setIcon(dot(color))
 
+    def _refresh_click_chip(self) -> None:
+        sensor = self.click
+        self.click_chip_action.setVisible(sensor is not None)
+        if sensor is None:
+            return
+        self._remember("click", sensor)
+        if sensor.state is SensorState.CONNECTED:
+            text, color = f"Braquet {self.gears.label}", GOOD
+            status = sensor.latest()
+            if status is not None and status.battery_pct is not None and status.battery_pct <= 20:
+                text += f" · pile {status.battery_pct} %"
+        else:
+            text, color = f"Click : {sensor.status}", WAIT
+        if self.click_chip.text() != text:
+            self.click_chip.setText(text)
+        if getattr(self, "_click_color", None) != color:
+            self._click_color = color
+            self.click_chip.setIcon(dot(color))
+
     def _refresh_heart_chip(self) -> None:
         sensor = self.heart_rate
         if sensor is None:
@@ -1375,6 +1469,8 @@ class MainWindow(QMainWindow):
             metric.set("Off", f"{self._display_name('hr', sensor)} : {state}")
 
 
+CLICK_TIP = ("Zwift Click : ses boutons + / − changent le braquet virtuel hors ERG "
+             "(parcours, mode libre en pente, séance ERG off)")
 POWER_TIP = ("Capteur de puissance externe (pédales, manivelle) : ses watts font foi "
              "et l'ERG se règle dessus")
 def confirm_stop(parent, action: str, question: str) -> bool:
@@ -1648,6 +1744,37 @@ class PowerMeterDialog(SensorDialog):
         return open_power_meter(kind, **args)
 
 
+class ClickDialog(SensorDialog):
+    """Choix de la commande de vitesses : aucune, ou un Zwift Click en Bluetooth."""
+
+    TITLE = "Commande de vitesses"
+    ROLE = "click"
+    KINDS = [("Aucune : clavier (Maj+↑ / Maj+↓)", None), ("Zwift Click (Bluetooth)", "ble")]
+    DEFAULT_KIND = None
+    SCAN_TEXT = "Recherche des Zwift Click (5 s)… Appuyez sur un bouton du Click pour le réveiller."
+    ANY_DEVICE = "Premier Click trouvé"
+
+    def _extra_rows(self, form: QFormLayout) -> None:
+        note = QLabel("Hors ERG (parcours, mode libre en pente, séance ERG off), les boutons + et − passent "
+                      "24 braquets virtuels : le home trainer durcit ou adoucit la résistance comme si l'on "
+                      "changeait de vitesse. Le braquet 12 est celui du vélo.\n"
+                      "Click v2 : le connecter une fois à l'appli Zwift dans la journée, sinon il "
+                      "se déconnecte au bout d'une minute.")
+        note.setObjectName("metricSub")
+        note.setWordWrap(True)
+        form.addRow("", note)
+
+    def scan_devices(self) -> list:
+        from ..sensors.zwift_click import scan_zwift_clicks
+        return scan_zwift_clicks(timeout=5)
+
+    def sensor(self) -> BackgroundSensor | None:
+        kind, args = self._connect_args()
+        if kind is None:
+            return None
+        return open_zwift_click(address=args["address"])
+
+
 class TrainerDialog(SensorDialog):
     """Choix du home trainer : simulé, en Bluetooth ou en ANT+ (toutes marques)."""
 
@@ -1661,9 +1788,11 @@ class TrainerDialog(SensorDialog):
 
     def __init__(self, book: DeviceBook, parent: QWidget | None = None, *, current: PowerSource | None = None,
                  current_name: str = "", before_calibration=None, choose_power_meter=None,
-                 power_meter_name: str = "aucun") -> None:
+                 power_meter_name: str = "aucun", choose_click=None, click_name: str = "aucune") -> None:
         self.choose_power_meter = choose_power_meter
         self.power_meter_name = power_meter_name
+        self.choose_click = choose_click
+        self.click_name = click_name
         self.current = current
         self.current_name = current_name or getattr(current, "name", "")
         self.before_calibration = before_calibration
@@ -1696,10 +1825,26 @@ class TrainerDialog(SensorDialog):
         self.power_meter_label.setObjectName("metricSub")
         line.addWidget(self.power_meter_label, 1)
         form.addRow("Capteur de puissance", meter_row)
+        click_row = QWidget()
+        line = QHBoxLayout(click_row)
+        line.setContentsMargins(0, 0, 0, 0)
+        self.click_button = QPushButton("Choisir…")
+        self.click_button.setToolTip(CLICK_TIP)
+        self.click_button.clicked.connect(self._choose_click)
+        self.click_button.setEnabled(self.choose_click is not None)
+        line.addWidget(self.click_button)
+        self.click_label = QLabel(self.click_name)
+        self.click_label.setObjectName("metricSub")
+        line.addWidget(self.click_label, 1)
+        form.addRow("Commande de vitesses", click_row)
 
     def _choose_power_meter(self) -> None:
         if self.choose_power_meter is not None:
             self.power_meter_label.setText(self.choose_power_meter(self))
+
+    def _choose_click(self) -> None:
+        if self.choose_click is not None:
+            self.click_label.setText(self.choose_click(self))
 
     def calibrate(self) -> None:
         if self.current is None:
@@ -1778,6 +1923,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         power_kind = None if args.power == "aucun" else args.power
         power_address, power_number = args.power_address, args.power_ant_id
+    click_kind, click_address, _ = book.startup_choice("click", ("ble", None), default=None)
     if args.trainer is None:
         trainer_kind, trainer_address, trainer_number = book.startup_choice("trainer", ("sim", "ble", "ant"))
     else:
@@ -1795,7 +1941,8 @@ def main(argv: list[str] | None = None) -> int:
         QMessageBox.warning(None, "Briques invalides", str(e))
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
     window = MainWindow(workout, profile.ftp, source=source, heart_rate=heart_rate, book=book,
-                        profiles=profiles, profile=profile, power_meter=power_meter)
+                        profiles=profiles, profile=profile, power_meter=power_meter,
+                        click=None if click_kind is None else open_zwift_click(address=click_address))
     window.resize(1400, 780)
     if args.ftp:
         window.ftp_box.setValue(int(args.ftp))
