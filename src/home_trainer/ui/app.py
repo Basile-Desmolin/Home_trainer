@@ -72,7 +72,8 @@ from .power import PowerSource, Reading, SimulatedTrainer, open_power_source, ro
 from .route_ride import RoutePanel, km_text, route_grade_color
 from .theme import GOOD, OFF, WAIT, dot, icon, install, keycaps, number_font, pill, zone_index, zone_label
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
-                      FreeRideSession, RouteSession, State, WorkoutSession, ride_points, ride_title)
+                      FreeRideSession, RouteSession, SecondSampler, State, WorkoutSession, ride_points,
+                      ride_title)
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
@@ -146,7 +147,9 @@ class MainWindow(QMainWindow):
         self.session = WorkoutSession(workout, ftp)
         self.free = FreeRideSession(ftp)
         self.route: RouteSession | None = None
-        self._since_sample = 0.0
+        # Une mesure par seconde de chrono, propre à la sortie en cours (remis à zéro quand elle change).
+        self.sampler = SecondSampler()
+        self._sampled = None
         self._last_reading = None
         self.heart_rate: BackgroundSensor[HeartRateReading] | None = None
         # Capteur de puissance externe : ses watts font foi, et l'ERG du home trainer est corrigé dessus.
@@ -516,7 +519,6 @@ class MainWindow(QMainWindow):
         # Sans cible en puissance (séance en FC roulée aux vitesses), pas d'ERG possible.
         self.session.erg = self._erg_wanted and workout.has_power_targets
         self.erg_button.setEnabled(workout.has_power_targets)
-        self._since_sample = 0.0
         self.chart.set_session(self.session)
         self.title.setText(workout.name)
         count = len(self.session.segments)
@@ -636,7 +638,6 @@ class MainWindow(QMainWindow):
             self.end_ride(self.route)
         self.route = RouteSession(route, self.ftp, self.weight_box.value())
         self.route_panel.set_session(self.route)
-        self._since_sample = 0.0
         self.pages.setCurrentWidget(self.route_panel)
         self.setWindowTitle(f"{route.name} — Home trainer")
         self._push_target()
@@ -656,7 +657,6 @@ class MainWindow(QMainWindow):
         self.end_ride(old)
         self.free = FreeRideSession(self.ftp, old.target_w, old.rider_kg, old.mode, old.grade_pct)
         self.free_panel.chart.set_session(self.free)
-        self._since_sample = 0.0
         self._push_target()
         self._refresh()
 
@@ -1161,11 +1161,17 @@ class MainWindow(QMainWindow):
     # --- boucle ----------------------------------------------------------
 
     def _on_tick(self) -> None:
-        dt = self.clock.restart() / 1000
+        # En nanosecondes : `restart()` rend des millisecondes tronquées (~0,5 ms perdue par tic).
+        dt = self.clock.nsecsElapsed() / 1e9
+        self.clock.restart()
         if self.click is not None:
             for direction in self.click.take_shifts():
                 self.shift_gear(direction)
         active = self.active
+        if active is not self._sampled:
+            self.sampler.reset()
+            self._sampled = active
+        started_s = active.elapsed_s
         active.tick(dt)
         self._push_target()
         running = active.state is State.RUNNING
@@ -1173,13 +1179,11 @@ class MainWindow(QMainWindow):
         reading = self.source.read(dt) if running or isinstance(self.source, Trainer) else None
         reading = self._with_power_meter(reading, dt)
         self._last_reading = reading
+        if active.elapsed_s > started_s:  # chrono avancé (y compris au tic qui termine la séance)
+            self._record_seconds(active, started_s, reading)
+        else:
+            self.sampler.pause()
         if reading is not None and running:
-            self._since_sample += dt
-            if self._since_sample >= 1.0:
-                self._since_sample -= 1.0
-                heart = self.heart_rate.latest() if self.heart_rate is not None else None
-                active.record(reading.power_w, reading.cadence_rpm, heart.bpm if heart else None,
-                              self._speed(reading))
             if active is self.route:
                 active.ride(dt, reading.power_w)
                 if active.state is State.FINISHED:
@@ -1191,6 +1195,20 @@ class MainWindow(QMainWindow):
         self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
         self._refresh()
         self._refresh_mini()
+
+    def _record_seconds(self, active, started_s: float, reading) -> None:
+        """Enregistre les secondes de chrono complétées pendant ce tic (moyennes de la seconde)."""
+        if reading is None:
+            seconds = self.sampler.feed(started_s, active.elapsed_s, None)
+        else:
+            seconds = self.sampler.feed(started_s, active.elapsed_s, reading.power_w, reading.cadence_rpm,
+                                        self._speed(reading))
+        if not seconds:
+            return
+        heart = self.heart_rate.latest() if self.heart_rate is not None else None
+        bpm = heart.bpm if heart is not None and heart.bpm > 0 else None  # 0 : ceinture qui décroche
+        for s in seconds:
+            active.record(s.power_w, s.cadence_rpm, bpm, s.speed_kmh, at=s.at, t=s.t)
 
     def _with_power_meter(self, reading, dt: float):
         """Avec un capteur de puissance qui répond, ses watts (et sa cadence s'il la donne) remplacent

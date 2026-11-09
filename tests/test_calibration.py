@@ -103,12 +103,11 @@ def test_cycling_power_wheel_speed():
         return bytes([0x10, 0x00, 0x96, 0x00]) + revs.to_bytes(4, "little") + event.to_bytes(2, "little")
 
     d = CyclingPowerDecoder()
-    assert d.feed(frame(1000, 0)).speed_kmh is None
-    r = d.feed(frame(1010, 4096))  # 10 tours de 2,096 m en 2 s
+    assert d.feed(frame(1000, 0), now=0.0).speed_kmh is None
+    r = d.feed(frame(1010, 4096), now=2.0)  # 10 tours de 2,096 m en 2 s
     assert r.power_w == 150 and r.speed_kmh == pytest.approx(37.73, abs=0.01)
-    for _ in range(4):
-        r = d.feed(frame(1010, 4096))
-    assert r.speed_kmh == 0
+    assert d.feed(frame(1010, 4096), now=4.0).speed_kmh == pytest.approx(37.73, abs=0.01)  # 2 s : pas encore
+    assert d.feed(frame(1010, 4096), now=4.25).speed_kmh == 0  # roue arrêtée depuis plus de 2 s
 
 
 # --- ANT+ FE-C -------------------------------------------------------------------------

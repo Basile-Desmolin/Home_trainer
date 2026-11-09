@@ -116,8 +116,8 @@ class WorkoutSession:
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None) -> None:
-        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm, heart_rate_bpm,
+               at: float | None = None, t: float | None = None) -> None:
+        self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w, cadence_rpm, heart_rate_bpm,
                                    None, speed_kmh, time.time() if at is None else at, self.index,
                                    self.position_s))
 
@@ -286,9 +286,9 @@ class FreeRideSession:
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None) -> None:
+               at: float | None = None, t: float | None = None) -> None:
         erg = self.mode is FreeMode.ERG
-        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w if erg else None, cadence_rpm,
+        self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w if erg else None, cadence_rpm,
                                    heart_rate_bpm, None if erg else self.grade_pct, speed_kmh,
                                    time.time() if at is None else at))
 
@@ -366,8 +366,8 @@ class RouteSession:
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None) -> None:
-        self.samples.append(Sample(self.elapsed_s, power_w, None, cadence_rpm, heart_rate_bpm,
+               at: float | None = None, t: float | None = None) -> None:
+        self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, None, cadence_rpm, heart_rate_bpm,
                                    self.trainer_grade_pct, self.speed_kmh if speed_kmh is None else speed_kmh,
                                    time.time() if at is None else at))
 
@@ -416,6 +416,65 @@ class RouteSession:
 
 
 # --- sortie enregistrée ------------------------------------------------------
+
+@dataclass(frozen=True)
+class Second:
+    """Une seconde entière du chrono, prête à enregistrer."""
+
+    t: int  # fin de la seconde, en secondes de chrono (1 pour la première)
+    at: float  # heure de la fin de la seconde (secondes depuis 1970)
+    power_w: float  # moyennes de la seconde, chaque lecture pondérée par sa durée
+    cadence_rpm: float | None
+    speed_kmh: float | None
+
+
+class SecondSampler:
+    """Découpe le chrono d'une sortie en secondes entières : une mesure par seconde, ni doublée ni
+    manquante, quelle que soit la gigue des tics, et la moyenne de la seconde plutôt qu'une lecture
+    instantanée (moins de bruit).
+
+    L'heure d'une seconde est l'heure de départ (recalée à chaque reprise après une pause) plus son
+    rang au chrono : elle ne dépend pas de l'instant du tic qui l'enregistre. Une seconde sans aucune
+    lecture n'est pas rendue (capteur muet).
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._anchor: float | None = None  # heure à laquelle le chrono valait 0 (depuis la reprise)
+        self._sums = [0.0, 0.0, 0.0]  # puissance, cadence, vitesse × durée
+        self._weights = [0.0, 0.0, 0.0]
+
+    def pause(self) -> None:
+        """Chrono arrêté : l'heure de départ sera recalée à la reprise (la seconde entamée continue)."""
+        self._anchor = None
+
+    def feed(self, start_s: float, end_s: float, power_w: float | None, cadence_rpm: float | None = None,
+             speed_kmh: float | None = None) -> list[Second]:
+        """Le chrono est passé de `start_s` à `end_s` avec ces valeurs (None : pas de lecture) ;
+        rend les secondes complétées."""
+        if self._anchor is None:
+            self._anchor = time.time() - end_s
+        values = (power_w, cadence_rpm, speed_kmh)
+        out: list[Second] = []
+        at = start_s
+        while at < end_s:
+            boundary = math.floor(at) + 1
+            stop = min(end_s, boundary)
+            for i, v in enumerate(values):
+                if v is not None:
+                    self._sums[i] += v * (stop - at)
+                    self._weights[i] += stop - at
+            at = stop
+            if at >= boundary:
+                if self._weights[0] > 0:
+                    _, c, s = (total / w if w > 0 else None for total, w in zip(self._sums, self._weights))
+                    p = self._sums[0] / self._weights[0]
+                    out.append(Second(boundary, self._anchor + boundary, p, c, s))
+                self._sums, self._weights = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+        return out
+
 
 MIN_RIDE_SAMPLES = 1  # sans aucune seconde pédalée, rien à enregistrer
 

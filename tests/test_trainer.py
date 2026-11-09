@@ -98,11 +98,11 @@ def test_cycling_power_cadence_from_crank_revolutions():
 
 def test_cycling_power_cadence_drops_to_zero_when_pedaling_stops():
     d = CyclingPowerDecoder()
-    d.feed(crank(150, 10, 0))
-    assert d.feed(crank(150, 11, 700)).cadence_rpm > 80
-    for _ in range(3):
-        assert d.feed(crank(0, 11, 700)).cadence_rpm > 80  # simple répétition de la même mesure
-    assert d.feed(crank(0, 11, 700)).cadence_rpm == 0
+    d.feed(crank(150, 10, 0), now=0.0)
+    assert d.feed(crank(150, 11, 700), now=0.25).cadence_rpm > 80
+    for t in (0.5, 1.0, 2.0, 2.25):  # simple répétition de la même mesure, moins de 2 s sans tour
+        assert d.feed(crank(0, 11, 700), now=t).cadence_rpm > 80
+    assert d.feed(crank(0, 11, 700), now=2.5).cadence_rpm == 0
 
 
 def test_cycling_power_skips_balance_and_wheel_data():

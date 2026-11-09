@@ -7,9 +7,12 @@ les pauses, un tour par brique de séance, et le résumé de la sortie.
     points = [ActivityPoint(at=1759480000 + i, power_w=200, cadence_rpm=90, speed_kmh=32) for i in range(60)]
     write_activity(points, "sortie.fit")
 
-`at` est l'heure de la mesure (secondes depuis 1970, UTC). Un trou de plus de
-`PAUSE_GAP_S` secondes entre deux mesures est une pause : le chronomètre
-s'arrête, et la distance n'avance pas.
+`at` est l'heure de la mesure (secondes depuis 1970, UTC), `timer_s` le
+chronomètre de l'application. Un chronomètre arrêté plus de `PAUSE_GAP_S`
+secondes entre deux mesures est une pause : le chronomètre du .fit s'arrête,
+et la distance n'avance pas. Un trou de mesures pendant que le chronomètre
+tourne (capteur muet) n'en est pas une. Sans `timer_s`, tout trou de plus de
+`PAUSE_GAP_S` secondes est une pause.
 """
 
 from __future__ import annotations
@@ -77,19 +80,33 @@ class ActivitySummary:
         return self.distance_m / self.timer_s * 3.6 if self.timer_s else 0.0
 
 
+def _is_pause(prev: ActivityPoint, p: ActivityPoint) -> bool:
+    """Chronomètre arrêté entre deux mesures pendant plus de `PAUSE_GAP_S` : l'écart d'heure moins
+    l'écart de chronomètre quand il est connu (un capteur muet pendant que le chrono tourne n'est pas
+    une pause), sinon l'écart d'heure seul."""
+    stopped = p.at - prev.at
+    if p.timer_s is not None and prev.timer_s is not None:
+        stopped -= p.timer_s - prev.timer_s
+    return stopped > PAUSE_GAP_S
+
+
 def _durations(points: list[ActivityPoint]) -> list[float]:
     """Durée couverte par chaque mesure : l'écart avec la précédente au chronomètre (à défaut à
-    l'horloge), ou `SAMPLE_S` pour la première et après une pause."""
+    l'horloge, hors pause), ou `SAMPLE_S` pour la première."""
     out = []
     for i, p in enumerate(points):
         prev = points[i - 1] if i else None
-        if prev is None or p.at - prev.at > PAUSE_GAP_S:
+        if prev is None:
             gap = SAMPLE_S
         elif p.timer_s is not None and prev.timer_s is not None:
-            gap = p.timer_s - prev.timer_s
+            gap = p.timer_s - prev.timer_s  # le chronomètre fait foi, trou de capteur compris
+            gap = gap if gap > 0 else SAMPLE_S
+        elif p.at - prev.at > PAUSE_GAP_S:
+            gap = SAMPLE_S
         else:
             gap = p.at - prev.at
-        out.append(gap if 0 < gap <= PAUSE_GAP_S else SAMPLE_S)
+            gap = gap if gap > 0 else SAMPLE_S
+        out.append(gap)
     return out
 
 
@@ -197,12 +214,12 @@ def encode_activity(points: list[ActivityPoint], serial_number: int | None = Non
 
     event(start, EVENT_TIMER, EVENT_START)
     for i, (p, distance) in enumerate(zip(points, distances)):
-        if i and p.at - points[i - 1].at > PAUSE_GAP_S:  # pause : chronomètre arrêté pendant le trou
+        if i and _is_pause(points[i - 1], p):  # pause : chronomètre arrêté pendant le trou
             event(_fit_time(points[i - 1].at), EVENT_TIMER, EVENT_STOP)
             event(_fit_time(p.at), EVENT_TIMER, EVENT_START)
         w.write(MESG_RECORD, [
             (F_TIMESTAMP, _fit_time(p.at)),
-            (FieldDef(3, UINT8), _opt(p.heart_rate_bpm)),
+            (FieldDef(3, UINT8), _opt(p.heart_rate_bpm or None)),  # 0 bpm : ceinture qui décroche, pas écrit
             (FieldDef(4, UINT8), _opt(p.cadence_rpm)),
             (FieldDef(5, UINT32), _opt(distance, 100)),
             (FieldDef(6, UINT16), _opt(None if p.speed_kmh is None else p.speed_kmh / 3.6, 1000)),
