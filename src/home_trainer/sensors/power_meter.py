@@ -40,6 +40,15 @@ ANT_STALL_PAGES = 12  # ~3 s sans nouvel événement : on ne pédale plus
 class PowerMeterReading:
     power_w: float
     cadence_rpm: float | None = None
+    balance_left_pct: float | None = None  # part de la jambe gauche, si le capteur mesure chaque jambe
+
+
+def ant_balance_left_pct(pedal_power: int) -> float | None:
+    """Octet « pedal power » de la page 0x10 : bit 7 = part de la jambe droite (bits 0-6, en %).
+    0xFF : capteur sans équilibre ; bit 7 à 0 : jambe non précisée, pas d'équilibre fiable."""
+    if pedal_power == 0xFF or not pedal_power & 0x80 or (pedal_power & 0x7F) > 100:
+        return None
+    return 100.0 - (pedal_power & 0x7F)
 
 
 # --- ANT+ Bicycle Power ----------------------------------------------------------
@@ -78,14 +87,15 @@ class AntPowerDecoder:
     def _power_only_page(self, data: bytes) -> PowerMeterReading:
         events, accumulated = data[1], int.from_bytes(data[4:6], "little")
         cadence = None if data[3] == 0xFF else float(data[3])
+        balance = ant_balance_left_pct(data[2])
         instant = float(int.from_bytes(data[6:8], "little"))
         last, self._last = self._last, {"events": events, "acc": accumulated}
         if last is None:
-            return self._set(instant, cadence)
+            return self._set(instant, cadence, balance)
         d_events = (events - last["events"]) % 256
         if d_events == 0:
             return self._stall()
-        return self._set(((accumulated - last["acc"]) % 65536) / d_events, cadence)
+        return self._set(((accumulated - last["acc"]) % 65536) / d_events, cadence, balance)
 
     def _crank_torque_page(self, data: bytes) -> PowerMeterReading | None:
         events = data[1]
@@ -102,9 +112,9 @@ class AntPowerDecoder:
             return self._stall()
         return self._set(128 * math.pi * d_torque / d_period, cadence)
 
-    def _set(self, power_w: float, cadence: float | None) -> PowerMeterReading:
+    def _set(self, power_w: float, cadence: float | None, balance: float | None = None) -> PowerMeterReading:
         self._stalled = 0
-        self._reading = PowerMeterReading(round(power_w, 1), cadence)
+        self._reading = PowerMeterReading(round(power_w, 1), cadence, balance)
         return self._reading
 
     def _stall(self) -> PowerMeterReading:
@@ -219,7 +229,8 @@ class BlePowerMeter(BackgroundSensor[PowerMeterReading]):
 
         def on_measurement(_char, data: bytearray) -> None:
             reading = decoder.feed(data)
-            self._publish(PowerMeterReading(max(reading.power_w, 0.0), reading.cadence_rpm))
+            self._publish(PowerMeterReading(max(reading.power_w, 0.0), reading.cadence_rpm,
+                                            reading.balance_left_pct))
 
         async with bleak.BleakClient(device, disconnected_callback=lambda _c: disconnected.set()) as client:
             await client.start_notify(BLE_CYCLING_POWER_MEASUREMENT, on_measurement)

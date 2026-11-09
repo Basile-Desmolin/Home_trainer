@@ -1202,13 +1202,14 @@ class MainWindow(QMainWindow):
             seconds = self.sampler.feed(started_s, active.elapsed_s, None)
         else:
             seconds = self.sampler.feed(started_s, active.elapsed_s, reading.power_w, reading.cadence_rpm,
-                                        self._speed(reading))
+                                        self._speed(reading), getattr(reading, "balance_left_pct", None))
         if not seconds:
             return
         heart = self.heart_rate.latest() if self.heart_rate is not None else None
         bpm = heart.bpm if heart is not None and heart.bpm > 0 else None  # 0 : ceinture qui décroche
         for s in seconds:
-            active.record(s.power_w, s.cadence_rpm, bpm, s.speed_kmh, at=s.at, t=s.t)
+            active.record(s.power_w, s.cadence_rpm, bpm, s.speed_kmh, at=s.at, t=s.t,
+                          balance_left_pct=s.balance_left_pct)
 
     def _with_power_meter(self, reading, dt: float):
         """Avec un capteur de puissance qui répond, ses watts (et sa cadence s'il la donne) remplacent
@@ -1217,11 +1218,13 @@ class MainWindow(QMainWindow):
         if meter is None:
             return reading  # capteur muet : on garde la puissance du home trainer plutôt que rien
         if reading is None:
-            return Reading(meter.power_w, meter.cadence_rpm)
+            return Reading(meter.power_w, meter.cadence_rpm, balance_left_pct=meter.balance_left_pct)
         if isinstance(self.source, Trainer):  # le simulateur n'a pas d'écart à mesurer
             self.power_match.update(dt, reading.power_w, meter.power_w)
         cadence = meter.cadence_rpm if meter.cadence_rpm is not None else reading.cadence_rpm
-        return dataclasses.replace(reading, power_w=meter.power_w, cadence_rpm=cadence)
+        # L'équilibre ne vient que du capteur : un home trainer ne mesure que la puissance totale.
+        return dataclasses.replace(reading, power_w=meter.power_w, cadence_rpm=cadence,
+                                   balance_left_pct=meter.balance_left_pct)
 
     def _speed(self, reading) -> float:
         """Vitesse donnée par le home trainer, sinon celle d'un cycliste de ce poids sur le plat (ou la pente)."""

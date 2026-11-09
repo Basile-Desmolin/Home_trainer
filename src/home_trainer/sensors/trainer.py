@@ -96,11 +96,12 @@ class Slope:
 
 @dataclass(frozen=True)
 class TrainerReading:
-    """Mesure du home trainer : mêmes champs que `ui.power.Reading`, plus la vitesse."""
+    """Mesure du home trainer : mêmes champs que `ui.power.Reading`."""
 
     power_w: float
     cadence_rpm: float | None = None
     speed_kmh: float | None = None
+    balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
 
 
 def _clamp_target(watts: float) -> int:
@@ -298,8 +299,11 @@ class CyclingPowerDecoder:
         flags = int.from_bytes(data[:2], "little")
         power = int.from_bytes(data[2:4], "little", signed=True)
         i = 4
-        if flags & 0x0001:
-            i += 1  # équilibre gauche / droite
+        balance = None
+        if flags & 0x0001 and i < len(data):
+            # Équilibre en 1/2 % (bit 1 : de la jambe gauche, sinon jambe non précisée, comptée à gauche).
+            balance = data[i] / 2 if data[i] <= 200 else None
+            i += 1
         if flags & 0x0004:
             i += 2  # couple cumulé
         if flags & 0x0010 and i + 6 <= len(data):
@@ -318,7 +322,7 @@ class CyclingPowerDecoder:
                 elif self._cadence and self._stalled(now, self._rev_at, 60 / self._cadence):
                     self._cadence = 0.0  # plus de tour de pédalier : arrêt
             self._revs, self._event = revs, event
-        return TrainerReading(float(power), self._cadence, self._speed)
+        return TrainerReading(float(power), self._cadence, self._speed, balance)
 
     def _feed_wheel(self, revs: int, event: int, now: float) -> None:
         """Tours de roue cumulés (32 bits) et instant du dernier tour (1/2048 s)."""

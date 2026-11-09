@@ -26,6 +26,7 @@ class Reading:
     power_w: float
     cadence_rpm: float | None = None
     speed_kmh: float | None = None
+    balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
 
 
 class PowerSource(Protocol):

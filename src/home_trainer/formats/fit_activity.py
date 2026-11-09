@@ -57,6 +57,7 @@ class ActivityPoint:
     grade_pct: float | None = None
     lap: int = 0  # numéro de tour (brique de la séance) ; un changement ouvre un nouveau tour
     timer_s: float | None = None  # temps de pédalage au moment de la mesure (chronomètre, pauses exclues)
+    balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class ActivitySummary:
     avg_cadence: float | None
     max_cadence: float | None
     max_speed_kmh: float
+    balance_left_pct: float | None = None  # part du travail fournie par la jambe gauche
 
     @property
     def avg_speed_kmh(self) -> float:
@@ -132,6 +134,15 @@ def normalized_power(powers: list[float], window: int = 30) -> float:
     return (sum(r ** 4 for r in rolling) / len(rolling)) ** 0.25
 
 
+def _balance(points: list[ActivityPoint], durations: list[float]) -> float | None:
+    """Équilibre de la sortie : part du travail de la jambe gauche, chaque seconde pondérée par son
+    travail (puissance × durée), sur les seules secondes qui ont un équilibre."""
+    work = [(p.balance_left_pct, p.power_w * dt) for p, dt in zip(points, durations)
+            if p.balance_left_pct is not None and p.power_w > 0]
+    total = sum(w for _, w in work)
+    return sum(b * w for b, w in work) / total if total > 0 else None
+
+
 def summarize(points: list[ActivityPoint]) -> ActivitySummary:
     if not points:
         raise ValueError("sortie vide : aucune mesure")
@@ -154,6 +165,7 @@ def summarize(points: list[ActivityPoint]) -> ActivitySummary:
         avg_cadence=sum(cadences) / len(cadences) if cadences else None,
         max_cadence=max(cadences) if cadences else None,
         max_speed_kmh=max((p.speed_kmh or 0.0) for p in points),
+        balance_left_pct=_balance(points, durations),
     )
 
 
@@ -165,12 +177,24 @@ def _opt(value: float | None, scale: float = 1.0) -> int | None:
     return None if value is None else int(round(value * scale))
 
 
+# Équilibre dans le .fit, comme l'écrit un compteur Garmin : part de la jambe droite, bit « droite » levé.
+BALANCE_RIGHT = 0x80  # record : % entier (left_right_balance)
+BALANCE_RIGHT_100 = 0x8000  # tour et session : 1/100 % (left_right_balance_100)
+
+
+def _balance_field(left_pct: float | None, per_100: bool) -> int | None:
+    if left_pct is None:
+        return None
+    right = min(max(100.0 - left_pct, 0.0), 100.0)
+    return BALANCE_RIGHT_100 | round(right * 100) if per_100 else BALANCE_RIGHT | round(right)
+
+
 def _summary_fields(s: ActivitySummary, lap: bool) -> list[tuple[FieldDef, object]]:
     """Champs communs aux messages lap (19) et session (18), dont les numéros diffèrent un peu."""
     n = {  # numéro du champ : (lap, session)
         "avg_speed": (13, 14), "max_speed": (14, 15), "avg_hr": (15, 16), "max_hr": (16, 17),
         "avg_cad": (17, 18), "max_cad": (18, 19), "avg_power": (19, 20), "max_power": (20, 21),
-        "np": (33, 34), "work": (41, 48),
+        "np": (33, 34), "work": (41, 48), "balance": (34, 37),
     }
     i = 0 if lap else 1
     return [
@@ -189,6 +213,7 @@ def _summary_fields(s: ActivitySummary, lap: bool) -> list[tuple[FieldDef, objec
         (FieldDef(n["max_power"][i], UINT16), _opt(s.max_power_w)),
         (FieldDef(n["np"][i], UINT16), _opt(s.normalized_power_w)),
         (FieldDef(n["work"][i], UINT32), _opt(s.work_j)),
+        (FieldDef(n["balance"][i], UINT16), _balance_field(s.balance_left_pct, per_100=True)),
     ]
 
 
@@ -225,6 +250,7 @@ def encode_activity(points: list[ActivityPoint], serial_number: int | None = Non
             (FieldDef(6, UINT16), _opt(None if p.speed_kmh is None else p.speed_kmh / 3.6, 1000)),
             (FieldDef(7, UINT16), _opt(max(p.power_w, 0))),
             (FieldDef(9, SINT16), _opt(p.grade_pct, 100)),
+            (FieldDef(30, UINT8), _balance_field(p.balance_left_pct, per_100=False)),
         ])
     event(end, EVENT_TIMER, EVENT_STOP_ALL)
 

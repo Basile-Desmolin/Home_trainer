@@ -8,7 +8,7 @@ import pytest
 
 from home_trainer.sensors import AntPowerDecoder, PowerMatch, PowerMeterReading, Slope, open_power_meter
 from home_trainer.sensors.power_meter import AntPowerMeter, BlePowerMeter, is_power_meter
-from home_trainer.sensors.trainer import BLE_CYCLING_POWER_SERVICE, BLE_FTMS_SERVICE
+from home_trainer.sensors.trainer import BLE_CYCLING_POWER_SERVICE, BLE_FTMS_SERVICE, CyclingPowerDecoder
 
 
 def power_only(events, accumulated, instant, cadence=90):
@@ -58,6 +58,36 @@ def test_ant_power_only_wins_over_crank_torque():
 def test_ant_page_must_be_8_bytes():
     with pytest.raises(ValueError):
         AntPowerDecoder().feed([0x10, 0])
+
+
+def test_ant_left_right_balance():
+    def page(events, pedal_power):
+        p = power_only(events, events * 200, 200)
+        p[2] = pedal_power
+        return p
+
+    d = AntPowerDecoder()
+    assert d.feed(page(1, 0x80 | 49)).balance_left_pct == 51  # 49 % jambe droite (Assioma, Garmin)
+    assert d.feed(page(2, 0xFF)).balance_left_pct is None  # capteur sans équilibre
+    assert d.feed(page(3, 49)).balance_left_pct is None  # jambe non précisée : pas d'équilibre fiable
+    assert d.feed(page(4, 0x80 | 120)).balance_left_pct is None  # valeur impossible
+
+
+def test_ble_left_right_balance():
+    def frame(flags, balance=None):  # 150 W ; drapeau 0x01 : équilibre en 1/2 %, 0x02 : de la jambe gauche
+        extra = bytes([balance]) if balance is not None else b""
+        return flags.to_bytes(2, "little") + (150).to_bytes(2, "little") + extra
+
+    d = CyclingPowerDecoder()
+    assert d.feed(frame(0x03, 102), now=0).balance_left_pct == 51.0
+    assert d.feed(frame(0x01, 97), now=1).balance_left_pct == 48.5  # jambe non précisée : comptée à gauche
+    assert d.feed(frame(0x00), now=2).balance_left_pct is None
+    assert d.feed(frame(0x03, 0xFF), now=3).balance_left_pct is None  # au-delà de 100 %
+    # L'octet d'équilibre précède la cadence : celle-ci reste bien lue.
+    crank = lambda revs, event: frame(0x23, 100) + revs.to_bytes(2, "little") + event.to_bytes(2, "little")  # noqa: E731
+    d.feed(crank(10, 0), now=4)
+    r = d.feed(crank(11, 1024), now=5)
+    assert r.cadence_rpm == 60 and r.balance_left_pct == 50.0 and r.power_w == 150
 
 
 def test_power_match_corrects_erg_target():
@@ -178,6 +208,50 @@ def test_window_uses_power_meter_watts_and_corrects_erg(app, tmp_path):
     assert trainer.target_w == pytest.approx(200, abs=0.5)
     assert not window.power_chip_action.isVisible()
     window.close()
+
+
+def test_balance_comes_from_power_meter_only(app, tmp_path):
+    from home_trainer.bricks import parse_workout
+    from home_trainer.devices import DeviceBook
+    from home_trainer.sensors import TrainerReading
+    from home_trainer.ui.app import MainWindow
+
+    class Meter(Quiet, BlePowerMeter):
+        pass
+
+    window = MainWindow(parse_workout("10m@200"), book=DeviceBook(tmp_path / "appareils.json"))
+    meter = Meter("AA:BB")
+    window.set_power_meter(meter)
+    meter._publish(PowerMeterReading(200, 91, 51.5))
+    trainer = TrainerReading(212, 88, 31.0, balance_left_pct=40.0)  # un home trainer n'en a pas de réel
+    assert window._with_power_meter(trainer, 0.2).balance_left_pct == 51.5
+    assert window._with_power_meter(None, 0.2).balance_left_pct == 51.5
+    window.enter_free_ride()
+    window.free.start()
+    window.free.elapsed_s = 1.0  # une seconde de chrono, enregistrée avec son équilibre
+    window._record_seconds(window.free, 0.0, window._with_power_meter(trainer, 1.0))
+    assert window.free.samples[-1].balance_left_pct == 51.5
+    from home_trainer.ui.session import ride_points
+    assert ride_points(window.free.samples)[-1].balance_left_pct == 51.5  # jusqu'au .fit
+    meter._publish(PowerMeterReading(200, 91))  # capteur sans équilibre
+    assert window._with_power_meter(trainer, 0.2).balance_left_pct is None
+    window.close()
+
+
+def test_second_balance_is_weighted_by_power():
+    """0,5 s à 200 W et 52 % gauche, puis 0,5 s à 100 W et 46 % : (52×200 + 46×100) / 300 = 50,0 %
+    (moyenne simple : 49,0 %). Une lecture à 0 W ou sans équilibre ne compte pas."""
+    from home_trainer.ui.session import SecondSampler
+
+    sampler = SecondSampler()
+    assert sampler.feed(0.0, 0.5, 200, balance_left_pct=52) == []
+    second = sampler.feed(0.5, 1.0, 100, balance_left_pct=46)[0]
+    assert second.balance_left_pct == pytest.approx(50.0)
+    assert second.power_w == pytest.approx(150.0)
+    sampler.feed(1.0, 1.5, 0, balance_left_pct=10)  # roue libre : poids nul
+    assert sampler.feed(1.5, 2.0, 180, balance_left_pct=51)[0].balance_left_pct == pytest.approx(51.0)
+    assert sampler.feed(2.0, 3.0, 180)[0].balance_left_pct is None
+    assert sampler.feed(3.0, 4.0, 0, balance_left_pct=50)[0].balance_left_pct is None
 
 
 def test_power_meter_dialog(app, tmp_path):

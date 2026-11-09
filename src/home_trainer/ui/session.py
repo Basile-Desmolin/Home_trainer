@@ -52,6 +52,7 @@ class Sample:
     at: float | None = None  # heure de la mesure (secondes depuis 1970), pour le .fit de la sortie
     lap: int = 0  # brique de la séance : un tour par brique dans le .fit
     position_s: float | None = None  # place sur l'axe de la séance (diffère de `t` après une brique passée)
+    balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
 
 
 class WorkoutSession:
@@ -116,10 +117,10 @@ class WorkoutSession:
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None, t: float | None = None) -> None:
+               at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
         self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w, cadence_rpm, heart_rate_bpm,
                                    None, speed_kmh, time.time() if at is None else at, self.index,
-                                   self.position_s))
+                                   self.position_s, balance_left_pct))
 
     # --- lecture ---------------------------------------------------------
 
@@ -286,11 +287,11 @@ class FreeRideSession:
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None, t: float | None = None) -> None:
+               at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
         erg = self.mode is FreeMode.ERG
         self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w if erg else None, cadence_rpm,
                                    heart_rate_bpm, None if erg else self.grade_pct, speed_kmh,
-                                   time.time() if at is None else at))
+                                   time.time() if at is None else at, balance_left_pct=balance_left_pct))
 
     @property
     def target_pct(self) -> float | None:
@@ -366,10 +367,10 @@ class RouteSession:
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None, t: float | None = None) -> None:
+               at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
         self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, None, cadence_rpm, heart_rate_bpm,
                                    self.trainer_grade_pct, self.speed_kmh if speed_kmh is None else speed_kmh,
-                                   time.time() if at is None else at))
+                                   time.time() if at is None else at, balance_left_pct=balance_left_pct))
 
     # --- lecture ---------------------------------------------------------
 
@@ -426,6 +427,7 @@ class Second:
     power_w: float  # moyennes de la seconde, chaque lecture pondérée par sa durée
     cadence_rpm: float | None
     speed_kmh: float | None
+    balance_left_pct: float | None = None  # pondéré par puissance × durée : part du travail de la jambe gauche
 
 
 class SecondSampler:
@@ -443,15 +445,19 @@ class SecondSampler:
 
     def reset(self) -> None:
         self._anchor: float | None = None  # heure à laquelle le chrono valait 0 (depuis la reprise)
+        self._clear()
+
+    def _clear(self) -> None:
         self._sums = [0.0, 0.0, 0.0]  # puissance, cadence, vitesse × durée
         self._weights = [0.0, 0.0, 0.0]
+        self._balance = [0.0, 0.0]  # équilibre × puissance × durée, puissance × durée
 
     def pause(self) -> None:
         """Chrono arrêté : l'heure de départ sera recalée à la reprise (la seconde entamée continue)."""
         self._anchor = None
 
     def feed(self, start_s: float, end_s: float, power_w: float | None, cadence_rpm: float | None = None,
-             speed_kmh: float | None = None) -> list[Second]:
+             speed_kmh: float | None = None, balance_left_pct: float | None = None) -> list[Second]:
         """Le chrono est passé de `start_s` à `end_s` avec ces valeurs (None : pas de lecture) ;
         rend les secondes complétées."""
         if self._anchor is None:
@@ -466,13 +472,17 @@ class SecondSampler:
                 if v is not None:
                     self._sums[i] += v * (stop - at)
                     self._weights[i] += stop - at
+            if balance_left_pct is not None and power_w is not None and power_w > 0:
+                self._balance[0] += balance_left_pct * power_w * (stop - at)
+                self._balance[1] += power_w * (stop - at)
             at = stop
             if at >= boundary:
                 if self._weights[0] > 0:
                     _, c, s = (total / w if w > 0 else None for total, w in zip(self._sums, self._weights))
                     p = self._sums[0] / self._weights[0]
-                    out.append(Second(boundary, self._anchor + boundary, p, c, s))
-                self._sums, self._weights = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+                    b = self._balance[0] / self._balance[1] if self._balance[1] > 0 else None
+                    out.append(Second(boundary, self._anchor + boundary, p, c, s, b))
+                self._clear()
         return out
 
 
@@ -482,7 +492,7 @@ MIN_RIDE_SAMPLES = 1  # sans aucune seconde pédalée, rien à enregistrer
 def ride_points(samples: list[Sample]) -> list[ActivityPoint]:
     """Mesures de la séance ou du mode libre, prêtes pour le .fit d'activité."""
     return [ActivityPoint(x.at, x.power_w, x.cadence_rpm, x.heart_rate_bpm, x.speed_kmh, x.grade_pct, x.lap,
-                          x.t) for x in samples if x.at is not None]
+                          x.t, x.balance_left_pct) for x in samples if x.at is not None]
 
 
 def ride_title(session: WorkoutSession | FreeRideSession | RouteSession) -> tuple[str, str]:
