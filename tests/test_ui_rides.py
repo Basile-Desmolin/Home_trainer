@@ -82,10 +82,11 @@ def test_ride_without_pedaling_is_not_saved(window):
     assert not window.outbox.dir.exists() or not list(window.outbox.dir.glob("*.fit"))
 
 
-def test_speed_is_estimated_without_trainer_speed(window):
+def test_speed_is_computed_by_the_application(window):
     from home_trainer.ui.power import Reading
-    assert 30 < window._speed(Reading(200, 90)) < 40
-    assert window._speed(Reading(200, 90, 25.0)) == 25.0
+    window.road_kmh = 31.5  # vitesse calculée (étape 7), avec ou sans vitesse du home trainer
+    assert window._speed(Reading(200, 90)) == 31.5
+    assert window._speed(Reading(200, 90, 25.0)) == 31.5
 
 
 def test_accounts_dialog_keeps_credentials(window):

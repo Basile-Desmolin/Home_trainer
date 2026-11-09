@@ -162,3 +162,32 @@ def road_speed_kmh(power_w: float, slope: Slope, crr: float = DEFAULT_CRR, cw: f
         mid = (lo + hi) / 2
         lo, hi = (mid, hi) if need(mid) < power_w else (lo, mid)
     return lo * 3.6
+
+
+PUSH_FROM_MS = 1.5  # au démarrage, la poussée est celle de cette vitesse (sinon P / v serait infinie à l'arrêt)
+SPEED_STEP_S = 0.05  # pas du calcul : stable même après un gel de l'interface de plusieurs secondes
+MAX_SPEED_MS = 40.0
+
+
+def next_speed_kmh(speed_kmh: float, dt: float, power_w: float, slope: Slope,
+                   crr: float = DEFAULT_CRR, cw: float = DEFAULT_CW) -> float:
+    """Vitesse sur la route `dt` secondes plus tard, en pédalant à `power_w`.
+
+    Mouvement du vélo (cycliste et vélo, masse `slope.total_kg`) : la poussée P / v, moins le roulement,
+    la pente et la traînée de l'air. En roue libre (0 W), le vélo ralentit lentement sur le plat, s'arrête
+    vite en montée et accélère en descente jusqu'à la vitesse où la traînée compense la pente. À puissance
+    constante, la vitesse rejoint `road_speed_kmh` (même équilibre).
+    """
+    if dt <= 0:
+        return speed_kmh
+    mass = slope.total_kg
+    theta = math.atan(slope.grade_pct / 100)
+    weight = mass * G * (math.sin(theta) + crr * math.cos(theta))
+    power_w = max(power_w, 0.0)
+    v = max(speed_kmh, 0.0) / 3.6
+    steps = max(1, math.ceil(dt / SPEED_STEP_S))
+    h = dt / steps
+    for _ in range(steps):
+        force = power_w / max(v, PUSH_FROM_MS) - weight - 0.5 * cw * v * v
+        v = min(max(v + force / mass * h, 0.0), MAX_SPEED_MS)
+    return v * 3.6

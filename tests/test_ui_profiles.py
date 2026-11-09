@@ -58,6 +58,34 @@ def test_hr_max_is_set_in_the_profile_dialog(app, book, tmp_path):
     assert ProfileBook.load(tmp_path / "profils.json").profiles[1].hr_max is None
 
 
+def test_bike_weight_is_set_in_the_profile_dialog_and_used_by_the_window(app, book, tmp_path):
+    import json
+
+    from home_trainer.ui.session import FreeMode
+    dialog = ProfileDialog(book)  # Camille
+    assert dialog.bike_box.value() == 9.0  # par défaut
+    dialog.bike_box.setValue(12.5)
+    dialog.accept()
+    loaded = ProfileBook.load(tmp_path / "profils.json")
+    assert [p.bike_kg for p in loaded.profiles] == [9.0, 12.5]
+    # Profil enregistré avant l'étape 7 (sans poids du vélo) : 9 kg.
+    data = json.loads((tmp_path / "profils.json").read_text(encoding="utf-8"))
+    del data["profiles"][1]["bike_kg"]
+    (tmp_path / "profils.json").write_text(json.dumps(data), encoding="utf-8")
+    assert ProfileBook.load(tmp_path / "profils.json").profiles[1].bike_kg == 9.0
+
+    w = MainWindow(parse_workout("10m@200"), profiles=loaded, profile=loaded.profiles[1])
+    assert w.bike_kg == 12.5 and w._road_slope().total_kg == 58 + 12.5
+    w.enter_free_ride()
+    w.set_free_mode(FreeMode.SLOPE)
+    assert w.free.command.bike_kg == 12.5  # consigne de pente envoyée au home trainer
+    w.session.toggle_erg()
+    assert w.session.command.bike_kg == 12.5
+    w.set_bike_kg(7.0)
+    assert w.free.command.bike_kg == 7.0 and w.session.bike_kg == 7.0
+    w.close()
+
+
 def test_the_heart_card_shows_esie_zones_with_an_hr_max(app, book):
     from home_trainer.sensors import HeartRateReading
 

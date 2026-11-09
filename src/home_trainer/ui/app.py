@@ -50,11 +50,13 @@ from ..heart_zones import to_power
 from ..history import FILE_NAME as HISTORY_FILE, RideHistory
 from ..logs import setup_logging
 from ..keep_awake import KeepAwake
-from ..profiles import Profile, ProfileBook, default_rides_root
+from ..profiles import (MAX_BIKE_KG, MIN_BIKE_KG, SPEED_APP, SPEED_TRAINER, Profile, ProfileBook,
+                        default_rides_root)
 from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
                        Trainer, open_heart_rate_sensor, open_power_meter, open_zwift_click)
+from ..sensors.trainer import DEFAULT_BIKE_KG
 from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
@@ -75,7 +77,7 @@ from .ride_export import DISCARD, RideExport, ask_ride_export
 from .rescue import (DISCARD as RESCUE_DISCARD, RESCUE_EVERY_S, SAVE as RESCUE_SAVE, RescueFile, RescuedRide,
                      ask_rescued, ask_unsaved, duration_text, find_rescued, remove_file, rescue_dir)
 from .power import (SMOOTHING_CHOICES_S, PowerAverage, PowerSource, Reading, SimulatedTrainer, open_power_source,
-                    road_speed_kmh)
+                    next_speed_kmh)
 from .route_ride import RoutePanel, km_text, route_grade_color
 from .theme import (GOOD, OFF, WAIT, dot, hint_label, icon, install, keycaps, number_font, pill, zone_index,
                     zone_label)
@@ -194,6 +196,12 @@ class MainWindow(QMainWindow):
         # Braquets virtuels hors ERG (pignon unique type Zwift Cog), changés au clavier ou au Zwift Click.
         self.gears = VirtualGears()
         self.click: BackgroundSensor | None = None
+        # Vitesse calculée par l'application (séance, mode libre) : celle du vélo sur la route à cette
+        # puissance, avec son élan (roue libre comprise). Le parcours a la sienne (`RouteSession.speed_kmh`).
+        self.road_kmh = 0.0
+        self.bike_kg = DEFAULT_BIKE_KG  # poids du vélo (profil)
+        # Vitesse calculée (« app ») ou celle du home trainer quand il l'envoie (« trainer ») ; choix du profil.
+        self.speed_source = SPEED_APP
 
         self._build_toolbar()
         self._build_body()
@@ -319,8 +327,8 @@ class MainWindow(QMainWindow):
         self.weight_box.setLocale(QLocale(QLocale.French))  # « 68,5 kg »
         self.weight_box.setValue(self.free.rider_kg)
         self.weight_box.valueChanged.connect(self._weight_changed)
-        bar.addWidget(self._chip_box("Poids", self.weight_box, "Poids du cycliste, pour la pente simulée "
-                                     "(mode libre et parcours GPX ; vélo : 9 kg en plus)"))
+        bar.addWidget(self._chip_box("Poids", self.weight_box, "Poids du cycliste, pour la pente simulée et la "
+                                     "vitesse calculée (le poids du vélo s'ajoute : Profil → Changer de cycliste…)"))
         self.profile_action = QAction("Profil…", self)
         self.profile_action.setToolTip("Changer de cycliste : FTP, poids, comptes Strava / Nolio et sorties")
         self.profile_action.triggered.connect(self._choose_profile)
@@ -553,6 +561,7 @@ class MainWindow(QMainWindow):
             self.end_ride(self.session)
         intensity = self.session.intensity_pct
         self.session = WorkoutSession(workout, self.ftp, self.free.rider_kg)
+        self.session.bike_kg = self.bike_kg
         self.session.intensity_pct = intensity
         # Sans cible en puissance (séance en FC roulée aux vitesses), pas d'ERG possible.
         self.session.erg = self._erg_wanted and workout.has_power_targets
@@ -608,6 +617,18 @@ class MainWindow(QMainWindow):
             self.route.rider_kg = kg
         self._push_target()
         self._refresh()
+
+    def set_bike_kg(self, kg: float) -> None:
+        """Poids du vélo (fiche Profil) : s'ajoute à celui du cycliste pour la pente et la vitesse calculée."""
+        self.bike_kg = float(kg)
+        self._apply_bike_kg()
+        self._push_target()
+        self._refresh()
+
+    def _apply_bike_kg(self) -> None:
+        for session in (self.session, self.free, self.route):
+            if session is not None:
+                session.bike_kg = self.bike_kg
 
     @property
     def gears_apply(self) -> bool:
@@ -675,6 +696,7 @@ class MainWindow(QMainWindow):
         if self.route is not None:  # le parcours précédent, même inachevé, est enregistré
             self.end_ride(self.route)
         self.route = RouteSession(route, self.ftp, self.weight_box.value())
+        self.route.bike_kg = self.bike_kg
         self.route_panel.set_session(self.route)
         self.pages.setCurrentWidget(self.route_panel)
         self.setWindowTitle(f"{route.name} — Home trainer")
@@ -694,6 +716,7 @@ class MainWindow(QMainWindow):
         old = self.free
         self.end_ride(old)
         self.free = FreeRideSession(self.ftp, old.target_w, old.rider_kg, old.mode, old.grade_pct)
+        self.free.bike_kg = self.bike_kg
         self.free_panel.chart.set_session(self.free)
         self._push_target()
         self._refresh()
@@ -1310,10 +1333,14 @@ class MainWindow(QMainWindow):
         self.ftp_box.setValue(int(profile.ftp))
         self._ftp_changed()
         self.weight_box.setValue(profile.weight_kg)
+        bike = profile.bike_kg
+        self.set_bike_kg(bike if isinstance(bike, (int, float)) and MIN_BIKE_KG <= bike <= MAX_BIKE_KG
+                         else DEFAULT_BIKE_KG)
         layouts = profile.layouts if isinstance(profile.layouts, dict) else {}
         for mode, grid in self._grids().items():
             grid.set_keys(layouts.get(mode.value))
         self.set_smoothing(profile.power_smoothing_s)
+        self.set_speed_source(profile.speed_source)
         self.brick_beep = profile.brick_beep is not False
         chosen = profile.chart_curves
         self.set_curves(DEFAULT_CURVES if not isinstance(chosen, list) else chosen)
@@ -1336,7 +1363,10 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _card_menu(self, key: str, menu: QMenu) -> None:
-        """Menu du clic droit sur une carte : lissage de la puissance (cartes puissance et W/kg)."""
+        """Menu du clic droit sur une carte : lissage de la puissance (cartes puissance et W/kg), origine de la
+        vitesse (carte vitesse, et carte cadence qui la montre quand la carte vitesse n'est pas à l'écran)."""
+        if key in ("speed", "cadence"):
+            self._speed_menu(menu)
         if key not in ("power", "watts_per_kg"):
             return
         sub = menu.addMenu("Puissance affichée")
@@ -1345,6 +1375,21 @@ class MainWindow(QMainWindow):
             action.setCheckable(True)
             action.setChecked(seconds == self.smoothing_s)
             action.triggered.connect(lambda _=False, s=seconds: self.set_smoothing(s))
+
+    def _speed_menu(self, menu: QMenu) -> None:
+        sub = menu.addMenu("Vitesse")
+        sent = getattr(self._last_reading, "speed_kmh", None) is not None
+        choices = ((SPEED_APP, "Calculée par l'application (puissance, poids, pente)"),
+                   (SPEED_TRAINER, "Celle du home trainer" + ("" if sent else " (non envoyée : vitesse calculée)")))
+        for source, text in choices:
+            action = sub.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(source == self.speed_source)
+            action.triggered.connect(lambda _=False, s=source: self.set_speed_source(s))
+        if self.route_ride:
+            sub.addSeparator()
+            note = sub.addAction("Parcours : toujours la vitesse calculée (la distance en dépend)")
+            note.setEnabled(False)
 
     def set_smoothing(self, seconds: int) -> None:
         """Puissance affichée : instantanée (0) ou moyenne sur `seconds` ; gardé dans le profil."""
@@ -1392,6 +1437,7 @@ class MainWindow(QMainWindow):
                 self._save_rescue(self._sampled)
             self.sampler.reset()
             self._sampled = active
+            self.road_kmh = 0.0
         started_s = active.elapsed_s
         active.tick(dt)
         self._push_target()
@@ -1402,16 +1448,21 @@ class MainWindow(QMainWindow):
         self._last_reading = reading
         self.power_average.feed(dt, reading.power_w if reading is not None else None)
         if active.elapsed_s > started_s:  # chrono avancé (y compris au tic qui termine la séance)
+            # Sans mesure (signal perdu), la puissance compte pour 0 : le vélo continue en roue libre.
+            power = reading.power_w if reading is not None else 0.0
+            self.road_kmh = next_speed_kmh(self.road_kmh, dt, power, self._road_slope())
             self._record_seconds(active, started_s, reading)
         else:
+            if not running:  # à l'arrêt (prêt, pause, fin)
+                self.road_kmh = 0.0
             self.sampler.pause()
         now = time.monotonic()
         if now - self._rescued_at >= RESCUE_EVERY_S:
             self._rescued_at = now
             self._save_rescue(active)
-        if reading is not None and running:
-            if active is self.route:
-                active.ride(dt, reading.power_w)
+        if running:
+            if active is self.route:  # sans mesure (signal perdu) : roue libre, la vitesse n'est pas figée
+                active.ride(dt, reading.power_w if reading is not None else 0.0)
                 if active.state is State.FINISHED:
                     self._push_target()  # arrivée : résistance libre
         if active is self.session:
@@ -1527,14 +1578,29 @@ class MainWindow(QMainWindow):
                                    balance_left_pct=meter.balance_left_pct)
 
     def _speed(self, reading) -> float:
-        """Vitesse donnée par le home trainer, sinon celle d'un cycliste de ce poids sur le plat (ou la pente)."""
+        """Vitesse de la sortie : par défaut celle du vélo sur la route à cette puissance (pente du mode libre,
+        plat en séance), calculée par l'application, ERG compris (avec un pignon unique, la vitesse du home
+        trainer ne suit que la cadence). Au choix, celle du home trainer quand il l'envoie."""
         if self.route_ride:  # sur un parcours, la distance suit la vitesse simulée de la route
             return round(self.route.speed_kmh, 2)
-        speed = getattr(reading, "speed_kmh", None)
-        if speed is not None:
-            return round(speed * self._speed_factor(), 2)
+        trainer = getattr(reading, "speed_kmh", None)
+        if self.speed_source == SPEED_TRAINER and trainer is not None:
+            return round(trainer * self._speed_factor(), 2)
+        return round(self.road_kmh, 2)
+
+    def set_speed_source(self, source: str) -> None:
+        """Vitesse calculée par l'application (`SPEED_APP`) ou celle du home trainer (`SPEED_TRAINER`) ;
+        gardé dans le profil."""
+        self.speed_source = source if source in (SPEED_APP, SPEED_TRAINER) else SPEED_APP
+        if self.profile is not None and self.profile.speed_source != self.speed_source:
+            self.profile.speed_source = self.speed_source
+            self.profiles.save()
+        self._refresh()
+
+    def _road_slope(self) -> Slope:
+        """Route roulée par la vitesse calculée : pente du mode libre en pente, plat sinon."""
         grade = self.free.grade_pct if self.free_ride and self.free.mode is FreeMode.SLOPE else 0.0
-        return round(road_speed_kmh(reading.power_w, Slope(grade, self.free.rider_kg)), 2)
+        return Slope(grade, self.free.rider_kg, self.bike_kg)
 
     def _speed_factor(self) -> float:
         """Le volant d'un home trainer réel tourne au braquet du vélo : la vitesse virtuelle suit le
@@ -1774,10 +1840,10 @@ class MainWindow(QMainWindow):
         r = self._shown_reading()
         if isinstance(active, RouteSession):
             speed = active.speed_kmh  # vitesse simulée sur la route
-        elif r is None or (isinstance(active, FreeRideSession) and r.speed_kmh is None):
-            speed = None  # mode libre : seulement la vitesse donnée par le home trainer
+        elif r is None:
+            speed = None
         else:
-            speed = self._speed(r)  # séance : celle du home trainer, sinon l'estimée (comme l'enregistrement)
+            speed = self._speed(r)  # la même que celle enregistrée
         ftp = self.ftp if isinstance(active, WorkoutSession) else active.ftp or DEFAULT_FTP
         heart, heart_off = self._heart_view()
         gear = self.gears.label if self.gears_apply else None

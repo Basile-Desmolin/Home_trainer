@@ -25,7 +25,7 @@ from ..ride_stats import LiveStats
 from ..route import Route
 from ..sensors.trainer import DEFAULT_BIKE_KG, DEFAULT_WEIGHT_KG, Slope
 from ..workout import Segment, Workout
-from .power import road_speed_kmh
+from .power import next_speed_kmh
 
 DEFAULT_RIDER_KG = DEFAULT_WEIGHT_KG - DEFAULT_BIKE_KG
 MIN_INTENSITY = 1
@@ -63,6 +63,7 @@ class _LiveStatsMixin:
     samples: list[Sample]
     _live: LiveStats | None = None
     manual_lap = 0  # tours manuels ouverts (touche Tab)
+    bike_kg = DEFAULT_BIKE_KG  # poids du vélo (profil) : consignes de pente et vitesse calculée
 
     def new_lap(self) -> bool:
         """Ouvre un nouveau tour (touche Tab). Sans mesure dans le tour en cours, rien ne change :
@@ -229,7 +230,7 @@ class WorkoutSession(_LiveStatsMixin):
     @property
     def command(self) -> float | Slope | None:
         """Consigne pour le home trainer : la cible en ERG, sinon une route plate (résistance libre)."""
-        return self.target_w if self.erg else Slope(0.0, self.rider_kg)
+        return self.target_w if self.erg else Slope(0.0, self.rider_kg, self.bike_kg)
 
     def _finish(self) -> None:
         self.index = len(self.segments)
@@ -310,7 +311,7 @@ class FreeRideSession(_LiveStatsMixin):
     @property
     def command(self) -> float | Slope:
         """Consigne pour le home trainer : des watts en ERG, une `Slope` en pente."""
-        return self.target_w if self.mode is FreeMode.ERG else Slope(self.grade_pct, self.rider_kg)
+        return self.target_w if self.mode is FreeMode.ERG else Slope(self.grade_pct, self.rider_kg, self.bike_kg)
 
     def tick(self, dt: float) -> None:
         if self.state is State.RUNNING:
@@ -334,7 +335,6 @@ class FreeRideSession(_LiveStatsMixin):
 MIN_DIFFICULTY = 0
 MAX_DIFFICULTY = 100
 DIFFICULTY_STEP = 10
-SPEED_RESPONSE_S = 4.0  # inertie du vélo : la vitesse rejoint celle permise par la puissance
 
 
 class RouteSession(_LiveStatsMixin):
@@ -384,8 +384,8 @@ class RouteSession(_LiveStatsMixin):
         """Avance de `dt` secondes en pédalant à `power_w` (sans effet hors « en cours »)."""
         if self.state is not State.RUNNING or dt <= 0:
             return
-        goal = road_speed_kmh(power_w, Slope(self.grade_pct, self.rider_kg))
-        self.speed_kmh += (goal - self.speed_kmh) * (1 - math.exp(-dt / SPEED_RESPONSE_S))
+        self.speed_kmh = next_speed_kmh(self.speed_kmh, dt, power_w,
+                                        Slope(self.grade_pct, self.rider_kg, self.bike_kg))
         self.distance_m = min(self.distance_m + self.speed_kmh / 3.6 * dt, self.route.total_m)
         if self.distance_m >= self.route.total_m:
             self.state = State.FINISHED
@@ -414,7 +414,7 @@ class RouteSession(_LiveStatsMixin):
 
     @property
     def command(self) -> Slope:
-        return Slope(self.trainer_grade_pct, self.rider_kg)
+        return Slope(self.trainer_grade_pct, self.rider_kg, self.bike_kg)
 
     @property
     def remaining_m(self) -> float:

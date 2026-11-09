@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from .config import config_dir
+from .sensors.trainer import DEFAULT_BIKE_KG
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ FILE_NAME = "profils.json"
 PROFILES_DIR = "profils"
 DEFAULT_FTP = 250
 DEFAULT_WEIGHT_KG = 66.0  # poids du cycliste seul, comme la case « Poids »
+MIN_BIKE_KG, MAX_BIKE_KG = 5.0, 30.0  # poids du vélo saisi dans la fiche Profil (9 kg par défaut)
+SPEED_APP, SPEED_TRAINER = "app", "trainer"  # vitesse calculée par l'application, ou celle du home trainer
 FIRST_PROFILE_NAME = "Mon profil"
 RIDES_SUBFOLDER = Path("HomeTrainer") / "Sorties"
 HISTORY_FILE = "historique.json"  # voir home_trainer.history
@@ -52,6 +55,7 @@ class Profile:
     name: str
     ftp: int = DEFAULT_FTP
     weight_kg: float = DEFAULT_WEIGHT_KG
+    bike_kg: float = DEFAULT_BIKE_KG  # poids du vélo : vitesse calculée et consignes de pente
     hr_max: int | None = None  # FC max, demandée à la première séance en fréquence cardiaque
     # Indicateurs choisis par écran (« séance », « libre », « parcours ») : un par place de la grille ;
     # écran absent : disposition d'origine.
@@ -59,6 +63,7 @@ class Profile:
     power_smoothing_s: int = 0  # puissance affichée : instantanée (0) ou moyenne sur 3, 5, 10, 30 s
     brick_beep: bool = True  # séance : bip aux 3 dernières secondes de chaque brique
     chart_curves: list[str] | None = None  # courbes en plus de la puissance ; None : cadence et cardio
+    speed_source: str = SPEED_APP  # vitesse : calculée par l'application, ou celle du home trainer
 
 
 def _slug(name: str) -> str:
