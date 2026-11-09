@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPixmap, QPolygonF
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy
 
 FONTS = Path(__file__).with_name("assets") / "fonts"
 UI_FAMILY = "Barlow"
@@ -24,9 +24,12 @@ ACCENT = "#ffd24a"
 POWER = "#4fc3f7"
 HEART = "#ff5c6c"
 CADENCE = "#b6e36b"
+SPEED = "#c9a3ff"  # courbe de vitesse
 # Zones de Coggan (borne haute en % FTP) et couleurs associées.
 ZONES = [(55, "#7f8c9a"), (76, "#3d8bd9"), (91, "#3fb37f"), (106, "#e7c43a"),
          (121, "#f08a2c"), (151, "#e5484d"), (10_000, "#b84ae0")]
+# Zones de FC de l'échelle ESIE (i1 à i5), aux couleurs des zones de puissance d'effort comparable.
+HEART_ZONES = ["#7f8c9a", "#3d8bd9", "#3fb37f", "#e7c43a", "#e5484d"]
 RAISED = "#2a2f38"  # boutons, pastilles
 HOVER = "#353b46"
 LINE = "#2f3540"
@@ -100,6 +103,15 @@ def pill(color: QColor | str) -> str:
     """Étiquette colorée (« Z4 · Seuil · 95 % FTP »)."""
     return (f"color: {QColor(color).name()}; background: {rgba(color, 0.16)}; border-radius: 6px; "
             f"padding: 3px 9px; font-weight: 600;")
+
+
+def hint_label(text: str = "") -> QLabel:
+    """Ligne d'aide des raccourcis, à droite des boutons : elle prend la place qui reste sans imposer sa
+    largeur à la fenêtre (sur un petit écran, elle est coupée plutôt que d'élargir la fenêtre)."""
+    label = QLabel(text)
+    label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    return label
 
 
 def keycaps(text: str) -> str:

@@ -19,10 +19,10 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QSizePo
 
 from .chart import ACCENT, MUTED, TEXT, hms, paint_panel
 from .free_ride import grade_color, grade_text
-from .indicators import RideView, km_text
+from .indicators import Mode, RideView, km_text
 from .metric import MetricGrid, Slot
 from .session import DIFFICULTY_STEP, RouteSession, State
-from .theme import icon, keycaps, number_font
+from .theme import hint_label, icon, keycaps, number_font
 
 AHEAD_M = 2000.0  # le zoom montre les 2 km à venir
 BEHIND_M = 200.0
@@ -298,7 +298,7 @@ class RoutePanel(QWidget):
         self.title.setObjectName("title")
         layout.addWidget(self.title)
 
-        self.grid = grid = MetricGrid(SLOTS)
+        self.grid = grid = MetricGrid(SLOTS, Mode.ROUTE)
         self.cards = grid.cards
         grid.addWidget(self._build_grade(), 0, 1, 2, 1)
         for c in range(4):
@@ -333,9 +333,8 @@ class RoutePanel(QWidget):
             b.setFocusPolicy(Qt.NoFocus)
             b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
-        buttons.addStretch(1)
-        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] difficulté ±10 %   [Maj+↑] [Maj+↓] braquet"))
-        buttons.addWidget(hint)
+        hint = hint_label(keycaps("[Espace] pause   [↑] [↓] difficulté ±10 %   [Maj+↑] [Maj+↓] braquet   [Tab] tour"))
+        buttons.addWidget(hint, 1)
         layout.addLayout(buttons)
 
     def _build_grade(self) -> QWidget:
@@ -386,8 +385,9 @@ class RoutePanel(QWidget):
         session = view.session
         assert isinstance(session, RouteSession)
         self.grid.refresh(view)
-        self.cards["power"].set_tint(route_grade_color(session.grade_pct) if session.state is State.RUNNING
-                                     else None)
+        if "power" in self.cards:  # la place a pu recevoir un autre indicateur
+            self.cards["power"].set_tint(route_grade_color(session.grade_pct) if session.state is State.RUNNING
+                                         else None)
 
         grade = session.grade_pct
         self.grade_label.setText(grade_text(grade))

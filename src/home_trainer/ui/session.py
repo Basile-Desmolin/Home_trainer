@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 
 from ..formats.fit_activity import ActivityPoint
+from ..ride_stats import LiveStats
 from ..route import Route
 from ..sensors.trainer import DEFAULT_BIKE_KG, DEFAULT_WEIGHT_KG, Slope
 from ..workout import Segment, Workout
@@ -53,9 +54,43 @@ class Sample:
     lap: int = 0  # brique de la séance : un tour par brique dans le .fit
     position_s: float | None = None  # place sur l'axe de la séance (diffère de `t` après une brique passée)
     balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
+    manual_lap: int = 0  # tours manuels (touche Tab) avant cette mesure : un tour de plus dans le .fit
 
 
-class WorkoutSession:
+class _LiveStatsMixin:
+    """Moyennes et max de la sortie en cours (voir `LiveStats`), et tours manuels, communs aux trois modes."""
+
+    samples: list[Sample]
+    _live: LiveStats | None = None
+    manual_lap = 0  # tours manuels ouverts (touche Tab)
+
+    def new_lap(self) -> bool:
+        """Ouvre un nouveau tour (touche Tab). Sans mesure dans le tour en cours, rien ne change :
+        pas de tour vide (deux appuis de suite, ou avant le départ)."""
+        if not self.samples or self.samples[-1].manual_lap != self.manual_lap:
+            return False
+        self.manual_lap += 1
+        return True
+
+    @property
+    def lap_key(self) -> tuple[int, int]:
+        """Tour en cours : brique de la séance (0 hors séance) et tours manuels."""
+        return getattr(self, "index", 0), self.manual_lap
+
+    @property
+    def stats(self) -> LiveStats:
+        if self._live is None:
+            self._live = LiveStats()
+        return self._live.sync(self.samples)
+
+    def average_power(self) -> float | None:
+        return self.stats.average_power
+
+    def average_heart_rate(self) -> float | None:
+        return self.stats.average_heart_rate
+
+
+class WorkoutSession(_LiveStatsMixin):
     def __init__(self, workout: Workout, ftp: float | None = None, rider_kg: float = DEFAULT_RIDER_KG) -> None:
         self.workout = workout
         self.ftp = ftp
@@ -120,7 +155,7 @@ class WorkoutSession:
                at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
         self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w, cadence_rpm, heart_rate_bpm,
                                    None, speed_kmh, time.time() if at is None else at, self.index,
-                                   self.position_s, balance_left_pct))
+                                   self.position_s, balance_left_pct, self.manual_lap))
 
     # --- lecture ---------------------------------------------------------
 
@@ -157,10 +192,6 @@ class WorkoutSession:
         if seg.duration_s is None:
             return None
         return max(seg.duration_s - self.step_elapsed_s, 0.0)
-
-    def average_heart_rate(self) -> float | None:
-        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
-        return sum(values) / len(values) if values else None
 
     @property
     def total_s(self) -> float:
@@ -225,7 +256,7 @@ def _snap(watts: float) -> int:
     return int(max(MIN_FREE_TARGET_W, min(MAX_FREE_TARGET_W, w)))
 
 
-class FreeRideSession:
+class FreeRideSession(_LiveStatsMixin):
     """Mode libre : pas de séance, on règle la consigne à la main, en direct.
 
     En ERG, une puissance (`target_w`, par pas de 5 W) ; en pente, une pente
@@ -291,18 +322,13 @@ class FreeRideSession:
         erg = self.mode is FreeMode.ERG
         self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w if erg else None, cadence_rpm,
                                    heart_rate_bpm, None if erg else self.grade_pct, speed_kmh,
-                                   time.time() if at is None else at, balance_left_pct=balance_left_pct))
+                                   time.time() if at is None else at, balance_left_pct=balance_left_pct,
+                                   manual_lap=self.manual_lap))
 
     @property
     def target_pct(self) -> float | None:
         return self.target_w / self.ftp * 100 if self.ftp else None
 
-    def average_power(self) -> float | None:
-        return sum(x.power_w for x in self.samples) / len(self.samples) if self.samples else None
-
-    def average_heart_rate(self) -> float | None:
-        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
-        return sum(values) / len(values) if values else None
 
 
 MIN_DIFFICULTY = 0
@@ -311,7 +337,7 @@ DIFFICULTY_STEP = 10
 SPEED_RESPONSE_S = 4.0  # inertie du vélo : la vitesse rejoint celle permise par la puissance
 
 
-class RouteSession:
+class RouteSession(_LiveStatsMixin):
     """Parcours GPX : le home trainer simule la pente de la route là où l'on se trouve.
 
     La distance avance selon la vitesse qu'aurait le vélo sur la route
@@ -370,7 +396,8 @@ class RouteSession:
                at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
         self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, None, cadence_rpm, heart_rate_bpm,
                                    self.trainer_grade_pct, self.speed_kmh if speed_kmh is None else speed_kmh,
-                                   time.time() if at is None else at, balance_left_pct=balance_left_pct))
+                                   time.time() if at is None else at, balance_left_pct=balance_left_pct,
+                                   manual_lap=self.manual_lap))
 
     # --- lecture ---------------------------------------------------------
 
@@ -405,12 +432,6 @@ class RouteSession:
     def elevation_m(self) -> float:
         return self.route.elevation_at(self.distance_m)
 
-    def average_power(self) -> float | None:
-        return sum(x.power_w for x in self.samples) / len(self.samples) if self.samples else None
-
-    def average_heart_rate(self) -> float | None:
-        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
-        return sum(values) / len(values) if values else None
 
     def average_speed_kmh(self) -> float | None:
         return self.distance_m / self.elapsed_s * 3.6 if self.elapsed_s > 0 else None
@@ -489,10 +510,38 @@ class SecondSampler:
 MIN_RIDE_SAMPLES = 1  # sans aucune seconde pédalée, rien à enregistrer
 
 
+@dataclass(frozen=True)
+class BrickSummary:
+    """Bilan d'une brique de séance finie : durée roulée, puissance moyenne, cible moyenne."""
+
+    index: int
+    seconds: int
+    power_w: float
+    target_w: float | None
+
+    def text(self) -> str:
+        from .chart import hms
+
+        line = f"Brique {self.index + 1} finie : {hms(self.seconds)} · {self.power_w:.0f} W"
+        if self.target_w:
+            line += f" pour {self.target_w:.0f} W visés ({self.power_w / self.target_w * 100:.0f} %)"
+        return line
+
+
+def brick_summary(samples: list[Sample], index: int) -> BrickSummary | None:
+    """Bilan de la brique `index` d'après ses mesures (une par seconde), None sans mesure."""
+    mine = [x for x in samples if x.lap == index]
+    if not mine:
+        return None
+    targets = [x.target_w for x in mine if x.target_w is not None]
+    return BrickSummary(index, len(mine), sum(x.power_w for x in mine) / len(mine),
+                        sum(targets) / len(targets) if targets else None)
+
+
 def ride_points(samples: list[Sample]) -> list[ActivityPoint]:
     """Mesures de la séance ou du mode libre, prêtes pour le .fit d'activité."""
     return [ActivityPoint(x.at, x.power_w, x.cadence_rpm, x.heart_rate_bpm, x.speed_kmh, x.grade_pct, x.lap,
-                          x.t, x.balance_left_pct) for x in samples if x.at is not None]
+                          x.t, x.balance_left_pct, x.manual_lap) for x in samples if x.at is not None]
 
 
 def ride_title(session: WorkoutSession | FreeRideSession | RouteSession) -> tuple[str, str]:

@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .session import WorkoutSession
-from .theme import (ACCENT, BG, CADENCE, HEART, MUTED, PANEL, POWER, TEXT, ZONES,  # noqa: F401 (réexportés)
-                    ui_font)
+from .theme import (ACCENT, BG, CADENCE, HEART, LINE, MUTED, PANEL, POWER, SPEED, TEXT,  # noqa: F401 (réexportés)
+                    ZONES, ui_font)
 
 DEFAULT_FTP = 250
 RADIUS = 12  # coins des cartes et des graphiques
@@ -21,6 +19,7 @@ RADIUS = 12  # coins des cartes et des graphiques
 POWER_SMOOTH_S = 5
 CADENCE_SMOOTH_S = 5
 HEART_SMOOTH_S = 10
+SPEED_SMOOTH_S = 5
 
 
 def smooth(points: list[tuple[float, float | None]], window_s: float) -> list[tuple[float, float | None]]:
@@ -98,25 +97,101 @@ def zone_color(watts: float | None, ftp: float) -> QColor:
     return QColor(next(color for limit, color in ZONES if pct < limit))
 
 
-def draw_cadence(p: QPainter, area: QRectF, samples, x, labels_left: float) -> None:
-    """Cadence réalisée sur sa propre échelle (0 à 120 tr/min au moins), graduée dans la marge
-    de droite à partir de `labels_left`. Un trou dans les mesures coupe la courbe."""
-    points = [(s.t, s.cadence_rpm) for s in samples]
-    values = [c for _, c in points if c is not None]
-    if len(values) < 2:
-        return
-    hi = max(120, (int(max(values)) // 20 + 1) * 20)
+# Courbes en plus de la puissance, chacune sur sa propre échelle, sans graduation : une étiquette de sa
+# couleur au bout de la courbe, dans la marge de droite, donne la dernière valeur. Le choix des courbes
+# affichées (clic droit sur le graphique) est gardé dans le profil.
+CURVES = {  # clé : (nom du menu, couleur, unité, lissage en s)
+    "cadence": ("Cadence", CADENCE, "tr/min", CADENCE_SMOOTH_S),
+    "heart": ("Cardio", HEART, "bpm", HEART_SMOOTH_S),
+    "speed": ("Vitesse", SPEED, "km/h", SPEED_SMOOTH_S),
+}
+DEFAULT_CURVES = frozenset({"cadence", "heart"})  # la vitesse est en option
+LABELS_MARGIN = 62  # marge de droite : étiquettes au bout des courbes
 
-    def yc(rpm: float) -> float:
-        return area.bottom() - rpm / hi * area.height()
 
-    p.setPen(QColor(CADENCE))
-    width = p.device().width() - labels_left - 2
-    for rpm in range(30, hi, 30):
-        p.drawText(QRectF(labels_left, yc(rpm) - 8, width, 16), Qt.AlignLeft | Qt.AlignVCenter, f"{rpm}")
-    p.drawText(QRectF(labels_left, area.top() - 12, width, 14), Qt.AlignLeft | Qt.AlignVCenter, "rpm")
-    p.setPen(QPen(QColor(CADENCE), 1.2))
-    p.drawPath(trace(smooth(points, CADENCE_SMOOTH_S), x, yc))
+def curve_points(run, key: str) -> list[tuple[float, float | None]]:
+    if key == "heart":  # 0 bpm : ceinture qui décroche, pas une mesure
+        return [(s.t, s.heart_rate_bpm or None) for s in run]
+    return [(s.t, s.cadence_rpm if key == "cadence" else s.speed_kmh) for s in run]
+
+
+def curve_scale(key: str, values: list[float]) -> tuple[float, float]:
+    """Échelle d'une courbe (bas, haut), arrondie, avec de la marge au-dessus de la plus forte valeur."""
+    top = max(values, default=0.0)
+    if key == "heart":
+        return min([60.0] + [v - 5 for v in values]), max(200.0, top + 5)
+    if key == "cadence":
+        return 0.0, float(max(120, (int(top) // 20 + 1) * 20))
+    return 0.0, float(max(50, (int(top) // 10 + 1) * 10))
+
+
+def draw_watts_axis(p: QPainter, area: QRectF, y, peak: float, ftp: float, margin_l: float) -> None:
+    """Watts gradués dans la marge de gauche (avec de fines lignes), et la FTP en pointillés."""
+    step = next(s for s in (50, 100, 200, 500) if peak / s <= 6)
+    p.setPen(QColor(MUTED))
+    w = step
+    while w < peak:
+        level = y(w)
+        if abs(level - y(ftp)) > 12 and level - area.top() > 12:  # pas sur l'étiquette FTP ni sur « W »
+            p.drawText(QRectF(0, level - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, f"{w}")
+        p.setPen(QPen(QColor(LINE), 1))
+        p.drawLine(QPointF(area.left(), level), QPointF(area.right(), level))
+        p.setPen(QColor(MUTED))
+        w += step
+    p.drawText(QRectF(0, area.top() - 14, margin_l - 6, 14), Qt.AlignRight | Qt.AlignVCenter, "W")
+    p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
+    p.drawLine(QPointF(area.left(), y(ftp)), QPointF(area.right(), y(ftp)))
+    p.drawText(QRectF(0, y(ftp) - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, "FTP")
+
+
+def draw_curves(p: QPainter, area: QRectF, runs, x, shown, scales: dict[str, tuple[float, float]] | None = None,
+                labels: bool = True) -> None:
+    """Courbes de `shown` (cadence, cardio, vitesse), un tronçon par élément de `runs` (lissé à part),
+    et leur dernière valeur au bout, dans la marge de droite. `scales` impose une échelle (cardio
+    d'une séance en FC, dont les cibles sont tracées sur la même)."""
+    tags: list[tuple[float, str, str]] = []  # (hauteur, texte, couleur)
+    for key in ("speed", "cadence", "heart"):
+        if key not in shown:
+            continue
+        _, color, unit, smooth_s = CURVES[key]
+        series = [curve_points(run, key) for run in runs]
+        values = [v for points in series for _, v in points if v is not None]
+        if len(values) < 2:
+            continue
+        lo, hi = (scales or {}).get(key) or curve_scale(key, values)
+
+        def yv(v: float, lo=lo, hi=hi) -> float:
+            return area.bottom() - (v - lo) / (hi - lo) * area.height()
+
+        p.setPen(QPen(QColor(color), 1.4 if key == "heart" else 1.2))
+        smoothed = [smooth(points, smooth_s) for points in series]
+        for points in smoothed:
+            p.drawPath(trace(points, x, yv))
+        # Texte : dernière valeur mesurée ; hauteur : bout de la courbe tracée (lissée).
+        last = next(v for points in reversed(series) for _, v in reversed(points) if v is not None)
+        end = next(v for points in reversed(smoothed) for _, v in reversed(points) if v is not None)
+        shown_last = f"{last:.1f}".replace(".", ",") if key == "speed" else f"{last:.0f}"
+        tags.append((yv(end), f"{shown_last} {unit}", color))
+    if labels:
+        draw_end_labels(p, area, tags)
+
+
+def draw_end_labels(p: QPainter, area: QRectF, tags: list[tuple[float, str, str]]) -> None:
+    """Étiquettes au bout des courbes, écartées les unes des autres pour rester lisibles."""
+    height = 15.0
+    placed: list[tuple[float, str, str]] = []
+    for level, text, color in sorted(tags):
+        level = min(max(level, area.top() + height / 2), area.bottom() - height / 2)
+        if placed and level < placed[-1][0] + height:
+            level = placed[-1][0] + height
+        placed.append((level, text, color))
+    overflow = placed[-1][0] - (area.bottom() - height / 2) if placed else 0
+    if overflow > 0:  # trop bas : on remonte le tout
+        placed = [(level - overflow, text, color) for level, text, color in placed]
+    width = p.device().width() - area.right() - 4
+    for level, text, color in placed:
+        p.setPen(QColor(color))
+        p.drawText(QRectF(area.right() + 6, level - height / 2, width, height), Qt.AlignLeft | Qt.AlignVCenter, text)
 
 
 def paint_panel(p: QPainter, widget: QWidget) -> None:
@@ -191,6 +266,7 @@ class WorkoutChart(QWidget):
         self.session: WorkoutSession | None = None
         self.preview = preview
         self.highlight: list = []
+        self.curves: set[str] = set(DEFAULT_CURVES)  # courbes affichées en plus de la puissance
         self.setMinimumHeight(160 if preview else 220)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -205,8 +281,8 @@ class WorkoutChart(QWidget):
         if s is None or not s.segments:
             return
         ftp = s.ftp or DEFAULT_FTP
-        # À droite, la marge porte l'échelle de la cadence (pas en aperçu : rien de réalisé).
-        margin_l, margin_r, margin_t, margin_b = 44, 12 if self.preview else 36, 14, 26
+        # À droite, la marge porte les étiquettes des courbes (pas en aperçu : rien de réalisé).
+        margin_l, margin_r, margin_t, margin_b = 44, 12 if self.preview else LABELS_MARGIN, 14, 26
         area = QRectF(margin_l, margin_t, self.width() - margin_l - margin_r,
                       self.height() - margin_t - margin_b)
         total = max(s.total_s, 1.0)
@@ -233,10 +309,8 @@ class WorkoutChart(QWidget):
         def yh(bpm: float) -> float:
             return area.bottom() - (bpm - lo) / (hi - lo) * area.height()
 
-        # Graduations : FTP et axe du temps.
-        p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
-        p.drawLine(QPointF(area.left(), y(ftp)), QPointF(area.right(), y(ftp)))
-        p.drawText(QRectF(0, y(ftp) - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, "FTP")
+        # Graduations : watts et FTP, axe du temps.
+        draw_watts_axis(p, area, y, peak, ftp, margin_l)
         step = next(v for v in (60, 300, 600, 900, 1800, 3600, 7200) if total / v <= 12)
         p.setPen(QColor(MUTED))
         t = 0
@@ -293,21 +367,15 @@ class WorkoutChart(QWidget):
         for run in runs:
             draw_power(p, run, x, y)
 
-        # Cadence, sur sa propre échelle (graduée dans la marge de droite) ; coupée entre deux tronçons.
-        cadence = [x_ for j, run in enumerate(runs)
-                   for x_ in ([replace(run[0], cadence_rpm=None)] if j else []) + run]
-        draw_cadence(p, area, cadence, x, area.right() + 6)
-
-        # Fréquence cardiaque, sur sa propre échelle (graduée à droite).
-        if len(heart) > 1 or any(seg.low_w is None and seg.step.heart_rate for seg in s.segments):
+        # Séance en FC : ses briques sont tracées sur l'échelle de la FC, graduée à l'intérieur, à droite.
+        if any(seg.low_w is None and seg.step.heart_rate for seg in s.segments):
             p.setPen(QColor(HEART))
             for bpm in range(int(lo // 20 + 1) * 20, int(hi), 40):
                 p.drawText(QRectF(area.right() - 40, yh(bpm) - 8, 38, 16), Qt.AlignRight | Qt.AlignVCenter,
                            f"{bpm}")
-        if len(heart) > 1:
-            p.setPen(QPen(QColor(HEART), 1.4))
-            for run in heart_runs:  # un tronçon par morceau de séance, lissé à part
-                p.drawPath(trace(smooth(run, HEART_SMOOTH_S), x, yh))
+
+        # Cadence, cardio, vitesse (au choix), chacune sur son échelle ; un tronçon par morceau de séance.
+        draw_curves(p, area, runs, x, self.curves, {"heart": (lo, hi)}, labels=not self.preview)
 
         # Curseur de position.
         if self.preview:

@@ -58,6 +58,20 @@ class ActivityPoint:
     lap: int = 0  # numéro de tour (brique de la séance) ; un changement ouvre un nouveau tour
     timer_s: float | None = None  # temps de pédalage au moment de la mesure (chronomètre, pauses exclues)
     balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
+    manual_lap: int = 0  # tours manuels (touche Tab) avant la mesure ; un changement ouvre un nouveau tour
+
+
+def lap_groups(points: list[ActivityPoint]) -> list[list[int]]:
+    """Indices des mesures de chaque tour : un tour change avec la brique (`lap`) ou un tour manuel."""
+    groups: list[list[int]] = []
+    for i, p in enumerate(points):
+        if not groups or (p.lap, p.manual_lap) != (points[i - 1].lap, points[i - 1].manual_lap):
+            groups.append([])
+        groups[-1].append(i)
+    return groups
+
+
+LAP_TRIGGER_MANUAL = 0  # lap_trigger (champ 24 du tour) : tour fermé par l'utilisateur
 
 
 @dataclass(frozen=True)
@@ -254,15 +268,14 @@ def encode_activity(points: list[ActivityPoint], serial_number: int | None = Non
         ])
     event(end, EVENT_TIMER, EVENT_STOP_ALL)
 
-    laps: list[list[ActivityPoint]] = []
-    for p in points:
-        if not laps or p.lap != laps[-1][-1].lap:
-            laps.append([])
-        laps[-1].append(p)
+    laps = [[points[i] for i in group] for group in lap_groups(points)]
     for index, lap_points in enumerate(laps):
         lap = summarize(lap_points)
+        # Tour fermé par la touche Tab : le tour suivant a un compteur de tours manuels plus grand.
+        manual = index + 1 < len(laps) and laps[index + 1][0].manual_lap != lap_points[-1].manual_lap
         w.write(MESG_LAP, [(F_MESSAGE_INDEX, index), (F_TIMESTAMP, _fit_time(lap_points[-1].at)),
                            (F_EVENT, EVENT_LAP), (F_EVENT_TYPE, EVENT_STOP),
+                           (FieldDef(24, ENUM), LAP_TRIGGER_MANUAL if manual else None),
                            (FieldDef(25, ENUM), SPORT_CYCLING), (FieldDef(39, ENUM), SUB_SPORT_INDOOR_CYCLING),
                            *_summary_fields(lap, lap=True)])
     w.write(MESG_SESSION, [(F_MESSAGE_INDEX, 0), (F_TIMESTAMP, end), (F_EVENT, EVENT_SESSION),

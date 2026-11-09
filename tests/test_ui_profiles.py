@@ -40,6 +40,38 @@ def test_first_launch_creates_a_profile(app, tmp_path):
     assert loaded.startup_profile().name == "Basile"
 
 
+def test_hr_max_is_set_in_the_profile_dialog(app, book, tmp_path):
+    dialog = ProfileDialog(book)  # Camille, sans FC max
+    assert dialog.hr_max_box.text() == "non renseignée"
+    dialog.hr_max_box.setValue(188)
+    dialog.list.setCurrentRow(0)  # Basile : toujours sans FC max
+    assert dialog.hr_max_box.text() == "non renseignée"
+    dialog.list.setCurrentRow(1)
+    assert dialog.hr_max_box.value() == 188
+    dialog.accept()
+    loaded = ProfileBook.load(tmp_path / "profils.json")
+    assert [p.hr_max for p in loaded.profiles] == [None, 188]
+    # Retour à « non renseignée » : plus de FC max.
+    dialog = ProfileDialog(loaded)
+    dialog.hr_max_box.setValue(dialog.hr_max_box.minimum())
+    dialog.accept()
+    assert ProfileBook.load(tmp_path / "profils.json").profiles[1].hr_max is None
+
+
+def test_the_heart_card_shows_esie_zones_with_an_hr_max(app, book):
+    from home_trainer.sensors import HeartRateReading
+
+    w = MainWindow(parse_workout("10m@200"), profiles=book, profile=book.profiles[1])
+    w._heart_view = lambda: (HeartRateReading(165), "")
+    w._refresh()
+    bar = w.cards["heart"].body.itemAt(0).widget()
+    assert w.cards["heart"].sub.text() == "" and bar.isHidden()  # sans FC max : pas de zones
+    book.profiles[1].hr_max = 190
+    w._refresh()
+    assert w.cards["heart"].sub.text() == "i3" and not bar.isHidden() and bar.zone == 2
+    w.close()
+
+
 def test_dialog_selects_last_and_cancel_keeps_book(app, book):
     dialog = ProfileDialog(book)
     assert dialog.selected().name == "Camille"

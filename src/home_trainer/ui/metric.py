@@ -3,18 +3,19 @@ partagées par la séance, le mode libre et le parcours."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, QProgressBar, QVBoxLayout, QWidget
 
 from .gauges import ZoneBar
-from .indicators import CATALOG, RideView
-from .theme import TEXT, number_font, tinted_card
+from .indicators import CATALOG, Mode, RideView
+from .theme import HEART_ZONES, TEXT, number_font, tinted_card
 
 # Unité détachée de la valeur et affichée en petit : « 238 W » → « 238 » + « W ».
-UNITS = ("W", "km", "%", "bpm", "rpm", "km/h", "tr/min")
+UNITS = ("W", "W/kg", "km", "%", "bpm", "rpm", "km/h", "tr/min")
 
 
 def split_unit(text: str) -> tuple[str, str]:
@@ -91,34 +92,111 @@ class Slot:
 
 class MetricGrid(QGridLayout):
     """Cartes du catalogue d'indicateurs, placées selon `slots` ; l'écran ajoute ses blocs de commande
-    aux places restantes (`addWidget`). `refresh` met toutes les cartes à jour."""
+    aux places restantes (`addWidget`). `refresh` met toutes les cartes à jour.
 
-    def __init__(self, slots: list[Slot]) -> None:
+    Chaque place peut montrer un autre indicateur du mode (clic droit sur la carte) : `keys` donne
+    l'indicateur de chaque place, dans l'ordre de `slots`. Choisir un indicateur déjà affiché échange
+    les deux places. `changed` signale un choix (None : retour à la disposition d'origine).
+    """
+
+    changed = Signal(object)
+
+    def __init__(self, slots: list[Slot], mode: Mode | None = None) -> None:
         super().__init__()
         self.setSpacing(10)
-        self.cards: dict[str, Metric] = {}
+        self.slots = slots
+        self.mode = mode
+        self.keys = [slot.key for slot in slots]
+        self.cards: dict[str, Metric] = {}  # même dictionnaire pour toute la vie de la grille
         self._gauges: dict[str, ZoneBar | QProgressBar] = {}
-        for slot in slots:
-            indicator = CATALOG[slot.key]
+        self._view: RideView | None = None
+        self.menu_hook: Callable[[str, QMenu], None] | None = None  # ajoute au menu d'une carte (indicateur, menu)
+        self._build()
+
+    @property
+    def defaults(self) -> list[str]:
+        return [slot.key for slot in self.slots]
+
+    def choices(self) -> list[str]:
+        """Indicateurs qui ont un sens sur cet écran, dans l'ordre du catalogue."""
+        return [key for key, i in CATALOG.items() if self.mode is None or self.mode in i.modes]
+
+    def _build(self) -> None:
+        for card in self.cards.values():
+            self.removeWidget(card)
+            card.hide()
+            card.deleteLater()
+        self.cards.clear()
+        self._gauges.clear()
+        for index, (slot, key) in enumerate(zip(self.slots, self.keys)):
+            indicator = CATALOG[key]
             card = Metric(indicator.title, slot.size, indicator.color)
-            if indicator.gauge == "zones":
-                self._gauges[slot.key] = gauge = ZoneBar()
+            if indicator.gauge in ("zones", "heart_zones"):
+                self._gauges[key] = gauge = ZoneBar(colors=HEART_ZONES if indicator.gauge == "heart_zones" else None)
                 card.add(gauge)
             elif indicator.gauge == "progress":
-                self._gauges[slot.key] = bar = QProgressBar()
+                self._gauges[key] = bar = QProgressBar()
                 bar.setTextVisible(False)
                 bar.setFixedHeight(6)
                 bar.setRange(0, 1000)
                 card.add(bar)
-            self.cards[slot.key] = card
+            card.setContextMenuPolicy(Qt.CustomContextMenu)
+            card.customContextMenuRequested.connect(
+                lambda pos, i=index, c=card: self._menu(i).popup(c.mapToGlobal(pos)))
+            card.setToolTip("Clic droit : changer d'indicateur")
+            self.cards[key] = card
             self.addWidget(card, slot.row, slot.col, slot.rows, slot.cols)
+        if self._view is not None:
+            self.refresh(self._view)
+
+    def set_keys(self, keys: list[str] | None) -> None:
+        """Indicateur de chaque place (choix enregistré) ; None ou un choix invalide : disposition d'origine."""
+        valid = (keys is not None and len(keys) == len(self.slots) and len(set(keys)) == len(keys)
+                 and all(k in self.choices() for k in keys))
+        new = list(keys) if valid else self.defaults
+        if new != self.keys:
+            self.keys = new
+            self._build()
+
+    def choose(self, index: int, key: str) -> None:
+        """Met `key` à la place `index` ; s'il était déjà affiché ailleurs, les deux places s'échangent."""
+        keys = list(self.keys)
+        if key in keys:
+            other = keys.index(key)
+            keys[other] = keys[index]
+        keys[index] = key
+        self.set_keys(keys)
+        self.changed.emit(None if self.keys == self.defaults else list(self.keys))
+
+    def reset(self) -> None:
+        self.set_keys(None)
+        self.changed.emit(None)
+
+    def _menu(self, index: int) -> QMenu:
+        menu = QMenu(self.parentWidget())
+        for key in self.choices():
+            action = menu.addAction(CATALOG[key].menu_name)
+            action.setCheckable(True)
+            action.setChecked(key == self.keys[index])
+            action.triggered.connect(lambda _=False, k=key: self.choose(index, k))
+        menu.addSeparator()
+        menu.addAction("Disposition d'origine", self.reset).setEnabled(self.keys != self.defaults)
+        if self.menu_hook is not None:  # réglages propres à l'indicateur (lissage de la puissance…)
+            self.menu_hook(self.keys[index], menu)
+        return menu
 
     def refresh(self, view: RideView) -> None:
+        self._view = view
+        view = replace(view, on_screen=frozenset(self.cards))
         for key, card in self.cards.items():
             shown = CATALOG[key].show(view)
             card.set(shown.value, shown.sub, shown.unit)
+            title = shown.title or CATALOG[key].title
+            if card.title.text() != title:
+                card.title.setText(title)
             gauge = self._gauges.get(key)
             if isinstance(gauge, ZoneBar):
                 gauge.set_zone(shown.zone)
+                gauge.setVisible(CATALOG[key].gauge == "zones" or view.hr_max is not None)  # zones de FC
             elif gauge is not None:
                 gauge.setValue(round(1000 * (shown.progress or 0.0)))

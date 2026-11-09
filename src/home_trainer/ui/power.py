@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import random
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -27,6 +28,35 @@ class Reading:
     cadence_rpm: float | None = None
     speed_kmh: float | None = None
     balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
+
+
+SMOOTHING_CHOICES_S = (0, 3, 5, 10, 30)  # puissance affichée : instantanée (0) ou moyenne sur n secondes
+
+
+class PowerAverage:
+    """Moyenne glissante de la puissance affichée, sur les mesures lues à chaque tic (5 par seconde),
+    pas sur l'enregistrement à une mesure par seconde. Elle ne sert qu'à l'affichage : la sortie
+    enregistrée (et le .fit) garde la puissance brute. Un tic sans mesure (simulateur en pause,
+    capteur muet) vide la moyenne : elle repart des mesures suivantes."""
+
+    def __init__(self, keep_s: float = max(SMOOTHING_CHOICES_S)) -> None:
+        self.keep_s = keep_s
+        self._now = 0.0
+        self._items: deque[tuple[float, float]] = deque()  # (instant, watts)
+
+    def feed(self, dt: float, power_w: float | None) -> None:
+        self._now += dt
+        if power_w is None:
+            self._items.clear()
+            return
+        self._items.append((self._now, power_w))
+        while self._items[0][0] <= self._now - self.keep_s:
+            self._items.popleft()
+
+    def average(self, window_s: float) -> float | None:
+        """Moyenne des mesures des `window_s` dernières secondes (toutes celles reçues, au début)."""
+        kept = [w for t, w in self._items if t > self._now - window_s]
+        return sum(kept) / len(kept) if kept else None
 
 
 class PowerSource(Protocol):

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import logging
+import math
 import sys
 import threading
 import time
@@ -58,13 +59,13 @@ from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
 from .calibration import CalibrationDialog, can_calibrate
-from .chart import ACCENT, HEART, MUTED, TEXT, WorkoutChart, hms, zone_color
+from .chart import ACCENT, CURVES, DEFAULT_CURVES, HEART, MUTED, TEXT, WorkoutChart, hms, zone_color
 from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .gauges import BrickRing
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel, grade_color, grade_text
 from .heart_rate_mode import ask_heart_rate_mode
-from .indicators import RideView
+from .indicators import Mode, RideView
 from .loader import load_workout
 from .metric import Metric, MetricGrid, Slot
 from .mini import MiniInfo, MiniWindow
@@ -73,14 +74,20 @@ from .history import HistoryDialog
 from .ride_export import DISCARD, RideExport, ask_ride_export
 from .rescue import (DISCARD as RESCUE_DISCARD, RESCUE_EVERY_S, SAVE as RESCUE_SAVE, RescueFile, RescuedRide,
                      ask_rescued, ask_unsaved, duration_text, find_rescued, remove_file, rescue_dir)
-from .power import PowerSource, Reading, SimulatedTrainer, open_power_source, road_speed_kmh
+from .power import (SMOOTHING_CHOICES_S, PowerAverage, PowerSource, Reading, SimulatedTrainer, open_power_source,
+                    road_speed_kmh)
 from .route_ride import RoutePanel, km_text, route_grade_color
-from .theme import GOOD, OFF, WAIT, dot, icon, install, keycaps, number_font, pill, zone_index, zone_label
+from .theme import (GOOD, OFF, WAIT, dot, hint_label, icon, install, keycaps, number_font, pill, zone_index,
+                    zone_label)
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
-                      FreeRideSession, RouteSession, SecondSampler, State, WorkoutSession, ride_points,
-                      ride_title)
+                      FreeRideSession, RouteSession, SecondSampler, State, WorkoutSession, brick_summary,
+                      ride_points, ride_title)
 
 log = logging.getLogger(__name__)
+
+BEEP_BEFORE_S = 3  # bip et compte à rebours aux 3 dernières secondes d'une brique
+BRICK_NOTE_S = 8.0  # bilan de la brique finie affiché 8 s
+BRICK_NOTE_MIN_S = 5  # pas de bilan pour une brique passée aussitôt (moins de 5 s roulées)
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
@@ -172,6 +179,14 @@ class MainWindow(QMainWindow):
         self.sampler = SecondSampler()
         self._sampled = None
         self._last_reading = None
+        # Puissance affichée : instantanée (0) ou moyenne sur 3, 5, 10, 30 s (choix du profil).
+        self.power_average = PowerAverage()
+        self.smoothing_s = 0
+        # Changement de brique : bip aux 3 dernières secondes (choix du profil), bilan de la brique finie.
+        self.brick_beep = True
+        self._brick_index: int | None = None  # brique suivie (bilan quand elle change)
+        self._brick_note: tuple[str, float] | None = None  # bilan affiché, jusqu'à quand (time.monotonic)
+        self._last_beep: tuple[int, int] | None = None  # (brique, seconde) du dernier bip
         self.heart_rate: BackgroundSensor[HeartRateReading] | None = None
         # Capteur de puissance externe : ses watts font foi, et l'ERG du home trainer est corrigé dessus.
         self.power_meter: BackgroundSensor[PowerMeterReading] | None = None
@@ -366,9 +381,12 @@ class MainWindow(QMainWindow):
         heading.addWidget(self.subtitle, 1, Qt.AlignBottom)
         layout.addLayout(heading)
 
-        self.workout_grid = grid = MetricGrid(WORKOUT_SLOTS)
+        self.workout_grid = grid = MetricGrid(WORKOUT_SLOTS, Mode.WORKOUT)
         self.cards = grid.cards
         self.m_target = Metric("CIBLE", 64, ACCENT)
+        self.m_target.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.m_target.customContextMenuRequested.connect(self._target_menu)
+        self.m_target.setToolTip("Clic droit : bip avant chaque brique")
         self.step_ring = BrickRing(124)
         self.step_ring.setToolTip("Temps restant sur la brique")
         self.m_target.row.addWidget(self.step_ring, 0, Qt.AlignTop)
@@ -391,6 +409,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.current_label)
 
         self.chart = WorkoutChart()
+        self.chart.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.chart.customContextMenuRequested.connect(lambda pos: self._chart_menu(self.chart, pos))
+        self.chart.setToolTip("Clic droit : courbes affichées")
         layout.addWidget(self.chart, 1)
 
         buttons = QHBoxLayout()
@@ -408,6 +429,7 @@ class MainWindow(QMainWindow):
         self.next_button = QPushButton("Brique suivante")
         self.next_button.setIcon(icon("next"))
         self.next_button.clicked.connect(self._next_step)
+        self.next_button.setToolTip("Raccourci : → ou N")
         self.reset_button = QPushButton("Recommencer")
         self.reset_button.setIcon(icon("restart"))
         self.reset_button.clicked.connect(self.restart_ride)
@@ -422,14 +444,17 @@ class MainWindow(QMainWindow):
             b.setFocusPolicy(Qt.NoFocus)
             b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
-        buttons.addStretch(1)
-        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] ±1 %   [→] brique suivante   [E] ERG   "
-                              "[Maj+↑] [Maj+↓] braquet"))
-        buttons.addWidget(hint)
+        # « → brique suivante » : sur le bouton du même nom (infobulle), pour que la ligne tienne en 1 280 px.
+        hint = hint_label(keycaps("[Espace] pause   [↑] [↓] ±1 %   [E] ERG   [Maj+↑] [Maj+↓] braquet   [Tab] tour"))
+        buttons.addWidget(hint, 1)
         layout.addLayout(buttons)
 
         self.free_panel = FreeRidePanel()
         self.free_panel.chart.set_session(self.free)
+        free_chart = self.free_panel.chart
+        free_chart.setContextMenuPolicy(Qt.CustomContextMenu)
+        free_chart.customContextMenuRequested.connect(lambda pos: self._chart_menu(free_chart, pos))
+        free_chart.setToolTip("Clic droit : courbes affichées")
         self.free_panel.play_button.clicked.connect(self._toggle)
         self.free_panel.reset_button.clicked.connect(self.restart_ride)
         self.free_panel.back_button.clicked.connect(self.leave_free_ride)
@@ -442,6 +467,9 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.free_panel)
 
         self.route_panel = RoutePanel()
+        for mode, grid in self._grids().items():  # indicateurs choisis par clic droit : gardés dans le profil
+            grid.changed.connect(lambda keys, m=mode: self._layout_chosen(m, keys))
+            grid.menu_hook = self._card_menu
         self.route_panel.play_button.clicked.connect(self._toggle)
         self.route_panel.reset_button.clicked.connect(self.restart_ride)
         self.route_panel.back_button.clicked.connect(self.leave_free_ride)
@@ -496,6 +524,9 @@ class MainWindow(QMainWindow):
         # Maj+↑ / Maj+↓ : braquet virtuel plus dur / plus souple, comme les boutons + / − du Zwift Click.
         QShortcut(QKeySequence("Shift+Up"), self, activated=lambda: self.shift_gear(+1))
         QShortcut(QKeySequence("Shift+Down"), self, activated=lambda: self.shift_gear(-1))
+        # Tab : nouveau tour (tour manuel dans le .fit). Le raccourci passe avant le passage d'un bouton à
+        # l'autre, que la fenêtre n'utilise pas (boutons sans focus clavier).
+        QShortcut(QKeySequence(Qt.Key_Tab), self, activated=self.new_lap)
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self._toggle_free_ride)
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.finish_ride)
 
@@ -1279,10 +1310,61 @@ class MainWindow(QMainWindow):
         self.ftp_box.setValue(int(profile.ftp))
         self._ftp_changed()
         self.weight_box.setValue(profile.weight_kg)
+        layouts = profile.layouts if isinstance(profile.layouts, dict) else {}
+        for mode, grid in self._grids().items():
+            grid.set_keys(layouts.get(mode.value))
+        self.set_smoothing(profile.power_smoothing_s)
+        self.brick_beep = profile.brick_beep is not False
+        chosen = profile.chart_curves
+        self.set_curves(DEFAULT_CURVES if not isinstance(chosen, list) else chosen)
         self.profile_action.setText(f"Profil : {profile.name}")
         self.statusBar().showMessage(f"Profil : {profile.name}", 5000)
         self.send_rides()
         QTimer.singleShot(0, self.propose_rescued)  # sorties de secours de ce profil, fenêtre affichée
+
+    def _grids(self) -> dict[Mode, MetricGrid]:
+        return {Mode.WORKOUT: self.workout_grid, Mode.FREE: self.free_panel.grid, Mode.ROUTE: self.route_panel.grid}
+
+    def new_lap(self) -> None:
+        """Touche Tab : ouvre un nouveau tour dans la sortie en cours (tour manuel du .fit)."""
+        active = self.active
+        if active.state is State.RUNNING and active.new_lap():
+            self.statusBar().showMessage(f"Nouveau tour : tour {active.stats.tour_number + 1}", 3000)
+        else:
+            self.statusBar().showMessage("Nouveau tour : seulement pendant la sortie, après au moins une seconde",
+                                         3000)
+        self._refresh()
+
+    def _card_menu(self, key: str, menu: QMenu) -> None:
+        """Menu du clic droit sur une carte : lissage de la puissance (cartes puissance et W/kg)."""
+        if key not in ("power", "watts_per_kg"):
+            return
+        sub = menu.addMenu("Puissance affichée")
+        for seconds in SMOOTHING_CHOICES_S:
+            action = sub.addAction("Instantanée" if seconds == 0 else f"Moyenne sur {seconds} s")
+            action.setCheckable(True)
+            action.setChecked(seconds == self.smoothing_s)
+            action.triggered.connect(lambda _=False, s=seconds: self.set_smoothing(s))
+
+    def set_smoothing(self, seconds: int) -> None:
+        """Puissance affichée : instantanée (0) ou moyenne sur `seconds` ; gardé dans le profil."""
+        self.smoothing_s = seconds if seconds in SMOOTHING_CHOICES_S else 0
+        if self.profile is not None and self.profile.power_smoothing_s != self.smoothing_s:
+            self.profile.power_smoothing_s = self.smoothing_s
+            self.profiles.save()
+        self._refresh()
+
+    def _layout_chosen(self, mode: Mode, keys: list[str] | None) -> None:
+        """Indicateurs d'un écran choisis par clic droit (None : disposition d'origine)."""
+        if self.profile is not None:
+            if not isinstance(self.profile.layouts, dict):
+                self.profile.layouts = {}
+            if keys is None:
+                self.profile.layouts.pop(mode.value, None)
+            else:
+                self.profile.layouts[mode.value] = keys
+            self.profiles.save()
+        self._refresh()
 
     def _choose_profile(self) -> None:
         profile = choose_profile(self.profiles, self.profile, self)
@@ -1318,6 +1400,7 @@ class MainWindow(QMainWindow):
         reading = self.source.read(dt) if running or isinstance(self.source, Trainer) else None
         reading = self._with_power_meter(reading, dt)
         self._last_reading = reading
+        self.power_average.feed(dt, reading.power_w if reading is not None else None)
         if active.elapsed_s > started_s:  # chrono avancé (y compris au tic qui termine la séance)
             self._record_seconds(active, started_s, reading)
         else:
@@ -1331,6 +1414,8 @@ class MainWindow(QMainWindow):
                 active.ride(dt, reading.power_w)
                 if active.state is State.FINISHED:
                     self._push_target()  # arrivée : résistance libre
+        if active is self.session:
+            self._watch_brick()
         for session in (self.session, self.route):  # fin de séance ou arrivée : fenêtre d'enregistrement
             if session is not None and session.state is State.FINISHED:
                 self._ask_at_end(session)
@@ -1338,6 +1423,78 @@ class MainWindow(QMainWindow):
         self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
         self._refresh()
         self._refresh_mini()
+
+    def _watch_brick(self) -> None:
+        """Séance : bip aux 3 dernières secondes d'une brique, bilan de la brique quand elle change."""
+        s = self.session
+        if self._brick_index is None or s.index < self._brick_index:  # première brique, séance recommencée
+            self._brick_index = s.index
+        if s.index != self._brick_index:
+            summary = brick_summary(s.samples, self._brick_index)
+            self._brick_index = s.index
+            if summary is not None and summary.seconds >= BRICK_NOTE_MIN_S:
+                self._brick_note = (summary.text(), time.monotonic() + BRICK_NOTE_S)
+        remaining = s.step_remaining_s
+        if s.state is State.RUNNING and remaining is not None and 0 < remaining <= BEEP_BEFORE_S:
+            key = (s.index, math.ceil(remaining))
+            if key != self._last_beep:
+                self._last_beep = key
+                if self.brick_beep:
+                    self._beep()
+
+    def _beep(self) -> None:
+        QApplication.beep()  # son système de Windows
+
+    def _countdown_s(self) -> int | None:
+        """Secondes avant la brique suivante (3, 2, 1) pendant la séance, sinon None."""
+        s = self.session
+        remaining = s.step_remaining_s
+        if s.state is State.RUNNING and remaining is not None and 0 < remaining <= BEEP_BEFORE_S:
+            return math.ceil(remaining)
+        return None
+
+    def set_brick_beep(self, on: bool) -> None:
+        self.brick_beep = on
+        if self.profile is not None and self.profile.brick_beep != on:
+            self.profile.brick_beep = on
+            self.profiles.save()
+
+    def curves(self) -> set[str]:
+        return set(self.chart.curves)
+
+    def set_curves(self, curves) -> None:
+        """Courbes affichées en plus de la puissance (séance et mode libre) ; gardé dans le profil."""
+        curves = {key for key in curves if key in CURVES}
+        for chart in (self.chart, self.free_panel.chart):
+            chart.curves = set(curves)
+            chart.update()
+        if self.profile is not None:
+            saved = None if curves == DEFAULT_CURVES else sorted(curves)
+            if self.profile.chart_curves != saved:
+                self.profile.chart_curves = saved
+                self.profiles.save()
+
+    def _curves_menu(self) -> QMenu:
+        menu = QMenu(self)
+        for key, (name, _color, _unit, _smooth) in CURVES.items():
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(key in self.chart.curves)
+            action.toggled.connect(lambda on, k=key: self.set_curves(self.curves() | {k} if on
+                                                                     else self.curves() - {k}))
+        return menu
+
+    def _chart_menu(self, chart: QWidget, pos) -> None:
+        self._curves_menu().popup(chart.mapToGlobal(pos))
+
+    def _target_menu(self, pos) -> None:
+        """Clic droit sur la carte cible de la séance : bip avant chaque brique."""
+        menu = QMenu(self)
+        action = menu.addAction("Bip 3 s avant chaque brique")
+        action.setCheckable(True)
+        action.setChecked(self.brick_beep)
+        action.toggled.connect(self.set_brick_beep)
+        menu.popup(self.m_target.mapToGlobal(pos))
 
     def _record_seconds(self, active, started_s: float, reading) -> None:
         """Enregistre les secondes de chrono complétées pendant ce tic (moyennes de la seconde)."""
@@ -1432,7 +1589,8 @@ class MainWindow(QMainWindow):
             # Récup (zone 1, grise) : chiffres en blanc, sinon ils auraient l'air éteints.
             self.m_target.set_color(TEXT if color is None or zone_index(target, self.ftp) == 0 else color)
         self.m_target.set_tint(color)
-        self.cards["power"].set_tint(color)
+        if "power" in self.cards:  # la place a pu recevoir un autre indicateur
+            self.cards["power"].set_tint(color)
         if color is None:
             self.zone_tag.hide()
         else:
@@ -1451,14 +1609,22 @@ class MainWindow(QMainWindow):
                            color or MUTED)
         self.intensity_label.setText(f"{s.intensity_pct} %")
         self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
+        note = self._brick_note if self._brick_note and time.monotonic() < self._brick_note[1] else None
+        countdown = self._countdown_s()
         if s.state is State.FINISHED:
-            self.current_label.setText("Séance terminée")
+            self.current_label.setText(note[0] if note else "Séance terminée")
             self.next_label.setText("")
         else:
-            self.current_label.setText(f"Maintenant : {describe_segment(s.segment, self.ftp, s.intensity_pct)}"
+            # Bilan de la brique qui vient de finir, quelques secondes, à la place de « Maintenant ».
+            self.current_label.setText(note[0] if note else
+                                       f"Maintenant : {describe_segment(s.segment, self.ftp, s.intensity_pct)}"
                                        f"   ·   {brick}")
-            self.next_label.setText(f"Ensuite : {describe_segment(s.next_segment, self.ftp, s.intensity_pct)}"
-                                    if s.next_segment else "Dernière brique")
+            when = "Ensuite" if countdown is None else f"Dans {countdown} s"
+            self.next_label.setText(f"{when} : {describe_segment(s.next_segment, self.ftp, s.intensity_pct)}"
+                                    if s.next_segment else
+                                    "Dernière brique" if countdown is None else f"Fin dans {countdown} s")
+        self.current_label.setStyleSheet(f"color: {ACCENT};" if note else "")
+        self.next_label.setStyleSheet(f"color: {ACCENT}; font-weight: 600;" if countdown is not None else "")
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
         self.play_button.setIcon(icon("pause" if s.state is State.RUNNING else "play", "#18191c"))
@@ -1480,7 +1646,7 @@ class MainWindow(QMainWindow):
         self.mini.popup(self)
 
     def mini_info(self) -> MiniInfo:
-        r = self._last_reading
+        r = self._shown_reading()
         power = f"{r.power_w:.0f} W" if r else "—"
         active = self.active
         status = "En pause" if active.state is State.PAUSED else ""
@@ -1593,10 +1759,19 @@ class MainWindow(QMainWindow):
             self._heart_color = color
             self.heart_chip.setIcon(dot(color))
 
+    def _shown_reading(self):
+        """Dernière mesure, puissance moyennée sur le lissage choisi (affichage seulement)."""
+        r = self._last_reading
+        if r is not None and self.smoothing_s:
+            average = self.power_average.average(self.smoothing_s)
+            if average is not None:
+                r = dataclasses.replace(r, power_w=average)
+        return r
+
     def _ride_view(self) -> RideView:
         """Instantané de la sortie affichée, pour les cartes du catalogue d'indicateurs."""
         active = self.active
-        r = self._last_reading
+        r = self._shown_reading()
         if isinstance(active, RouteSession):
             speed = active.speed_kmh  # vitesse simulée sur la route
         elif r is None or (isinstance(active, FreeRideSession) and r.speed_kmh is None):
@@ -1606,7 +1781,8 @@ class MainWindow(QMainWindow):
         ftp = self.ftp if isinstance(active, WorkoutSession) else active.ftp or DEFAULT_FTP
         heart, heart_off = self._heart_view()
         gear = self.gears.label if self.gears_apply else None
-        return RideView(active, r, ftp, speed, gear, heart, heart_off)
+        return RideView(active, r, ftp, speed, gear, heart, heart_off, self.weight_box.value(),
+                        smoothing_s=self.smoothing_s, hr_max=self.profile.hr_max if self.profile is not None else None)
 
     def _heart_view(self) -> tuple[HeartRateReading | None, str]:
         """Dernière fréquence reçue, sinon pourquoi il n'y en a pas."""

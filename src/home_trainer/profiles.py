@@ -20,7 +20,7 @@ import os
 import re
 import shutil
 import unicodedata
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from .config import config_dir
@@ -53,6 +53,12 @@ class Profile:
     ftp: int = DEFAULT_FTP
     weight_kg: float = DEFAULT_WEIGHT_KG
     hr_max: int | None = None  # FC max, demandée à la première séance en fréquence cardiaque
+    # Indicateurs choisis par écran (« séance », « libre », « parcours ») : un par place de la grille ;
+    # écran absent : disposition d'origine.
+    layouts: dict[str, list[str]] = field(default_factory=dict)
+    power_smoothing_s: int = 0  # puissance affichée : instantanée (0) ou moyenne sur 3, 5, 10, 30 s
+    brick_beep: bool = True  # séance : bip aux 3 dernières secondes de chaque brique
+    chart_curves: list[str] | None = None  # courbes en plus de la puissance ; None : cadence et cardio
 
 
 def _slug(name: str) -> str:

@@ -22,6 +22,20 @@ MIN_HR_MAX = 100
 MAX_HR_MAX = 230
 DEFAULT_HR_MAX = 190
 
+# Zones de FC affichées sous la carte Cardio : échelle ESIE de F. Grappe, en % de la FC max.
+# i1 < 75 %, i2 75-85, i3 85-92, i4 92-96 (seuil), i5 > 96 % ; i6 et i7 n'ont pas de FC (efforts trop courts).
+ESIE_LIMITS_PCT = [75.0, 85.0, 92.0, 96.0]  # bornes hautes de i1 à i4
+ESIE_NAMES = ["i1", "i2", "i3", "i4", "i5"]
+
+
+def esie_zone(bpm: float | None, hr_max: float | None) -> int | None:
+    """Zone ESIE (0 pour i1 … 4 pour i5) de `bpm`, None sans FC ou sans FC max."""
+    if not bpm or not hr_max or hr_max <= 0:
+        return None
+    pct = bpm / hr_max * 100
+    return next((i for i, limit in enumerate(ESIE_LIMITS_PCT) if pct < limit), len(ESIE_LIMITS_PCT))
+
+
 # (% FC au seuil, % FTP) : bornes des zones de Coggan, reliées en ligne droite.
 _ANCHORS = [(56.0, 35.0), (68.0, 55.0), (83.0, 75.0), (94.0, 90.0), (100.0, 100.0), (105.0, 105.0),
             (111.0, 120.0)]

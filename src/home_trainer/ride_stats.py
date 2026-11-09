@@ -121,6 +121,154 @@ def normalized_power(powers: list[float]) -> float:
     return (sum(p ** 4 for p in rolled) / len(rolled)) ** 0.25
 
 
+class LiveStats:
+    """Moyennes, max et puissance normalisée d'une sortie en cours, tenus au fil des mesures.
+
+    `sync(samples)` ne lit que les mesures arrivées depuis l'appel précédent : l'affichage
+    (5 fois par seconde) ne reparcourt pas toute la sortie. Même calcul que `normalized_power` et les
+    moyennes de la sortie, aux arrondis près (`sum()` compense les erreurs d'arrondi, pas une addition
+    au fil de l'eau : écart relatif de l'ordre de 10⁻¹³).
+    Une liste remplacée ou raccourcie (sortie reprise, recommencée) est relue depuis le début.
+    """
+
+    def __init__(self) -> None:
+        self._samples: list | None = None
+        self._last = None  # dernière mesure lue : détecte une liste modifiée
+        self.count = 0
+        self.power_sum = 0.0
+        self.power_max: float | None = None
+        self._hr_sum = 0.0
+        self._hr_count = 0
+        self.heart_rate_max: float | None = None
+        self._cadence_sum = 0.0
+        self._cadence_count = 0
+        self._speed_sum = 0.0
+        self._speed_count = 0
+        self.speed_max: float | None = None
+        self._balance_sum = 0.0
+        self._balance_count = 0
+        self._window: list[float] = []  # 30 dernières puissances (NP)
+        self._window_sum = 0.0
+        self._rolled4_sum = 0.0  # somme des moyennes glissantes sur 30 s, à la puissance 4
+        self._rolled_count = 0
+        self.lap: int | None = None  # brique (tour) de la dernière mesure
+        self._lap_sum = 0.0
+        self._lap_count = 0
+        self._lap_target_sum = 0.0
+        self._lap_target_count = 0
+        self.tour_key: tuple[int, int] | None = None  # tour (brique, tours manuels) de la dernière mesure
+        self.tour_number = 0  # 1 pour le premier tour
+        self.tour_seconds = 0  # une mesure par seconde
+        self._tour_sum = 0.0
+
+    def sync(self, samples: list) -> LiveStats:
+        n = self.count
+        if samples is not self._samples or len(samples) < n or (n and samples[n - 1] is not self._last):
+            self.__init__()
+            self._samples = samples
+        for x in samples[self.count:]:
+            self._add(x)
+        return self
+
+    def _add(self, x) -> None:
+        self._last = x
+        self.count += 1
+        p = x.power_w
+        self.power_sum += p
+        self.power_max = p if self.power_max is None else max(self.power_max, p)
+        if x.heart_rate_bpm:
+            self._hr_sum += x.heart_rate_bpm
+            self._hr_count += 1
+            self.heart_rate_max = max(self.heart_rate_max or 0.0, x.heart_rate_bpm)
+        if x.cadence_rpm:
+            self._cadence_sum += x.cadence_rpm
+            self._cadence_count += 1
+        if x.speed_kmh is not None:
+            self._speed_sum += x.speed_kmh
+            self._speed_count += 1
+            self.speed_max = max(self.speed_max or 0.0, x.speed_kmh)
+        balance = getattr(x, "balance_left_pct", None)
+        if balance is not None:
+            self._balance_sum += balance
+            self._balance_count += 1
+        # NP : même calcul que `normalized_power`, une moyenne glissante de plus par mesure.
+        self._window.append(p)
+        if len(self._window) < NP_WINDOW_S:
+            self._window_sum += p
+        elif len(self._window) == NP_WINDOW_S:
+            self._window_sum = sum(self._window)
+            self._roll()
+        else:
+            self._window_sum += p - self._window.pop(0)
+            self._roll()
+        lap = getattr(x, "lap", 0)
+        if lap != self.lap:
+            self.lap, self._lap_sum, self._lap_count = lap, 0.0, 0
+            self._lap_target_sum, self._lap_target_count = 0.0, 0
+        self._lap_sum += p
+        self._lap_count += 1
+        target = getattr(x, "target_w", None)
+        if target is not None:
+            self._lap_target_sum += target
+            self._lap_target_count += 1
+        tour = (lap, getattr(x, "manual_lap", 0))  # même découpage que les tours du .fit
+        if tour != self.tour_key:
+            self.tour_key, self.tour_seconds, self._tour_sum = tour, 0, 0.0
+            self.tour_number += 1
+        self.tour_seconds += 1
+        self._tour_sum += p
+
+    def _roll(self) -> None:
+        self._rolled4_sum += (self._window_sum / NP_WINDOW_S) ** 4
+        self._rolled_count += 1
+
+    @staticmethod
+    def _ratio(total: float, count: int) -> float | None:
+        return total / count if count else None
+
+    @property
+    def average_power(self) -> float | None:
+        return self._ratio(self.power_sum, self.count)
+
+    @property
+    def normalized_power(self) -> float | None:
+        """NP de la sortie, None avant 30 s (en dessous, `normalized_power` rend la moyenne)."""
+        if not self._rolled_count:
+            return None
+        return (self._rolled4_sum / self._rolled_count) ** 0.25
+
+    @property
+    def average_heart_rate(self) -> float | None:
+        return self._ratio(self._hr_sum, self._hr_count)
+
+    @property
+    def average_cadence(self) -> float | None:
+        return self._ratio(self._cadence_sum, self._cadence_count)
+
+    @property
+    def average_speed_kmh(self) -> float | None:
+        return self._ratio(self._speed_sum, self._speed_count)
+
+    @property
+    def average_balance_left_pct(self) -> float | None:
+        return self._ratio(self._balance_sum, self._balance_count)
+
+    @property
+    def lap_power(self) -> float | None:
+        """Puissance moyenne de la brique (du tour) de la dernière mesure."""
+        return self._ratio(self._lap_sum, self._lap_count)
+
+    @property
+    def tour_power(self) -> float | None:
+        """Puissance moyenne du tour de la dernière mesure."""
+        return self._ratio(self._tour_sum, self.tour_seconds)
+
+    @property
+    def lap_target(self) -> float | None:
+        """Cible moyenne sur les mesures de cette brique qui en avaient une."""
+        return self._ratio(self._lap_target_sum, self._lap_target_count)
+
+
 def _mean(values: Iterable[float | None]) -> float | None:
     kept = [v for v in values if v]
     return sum(kept) / len(kept) if kept else None

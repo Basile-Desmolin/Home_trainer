@@ -15,12 +15,12 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from .chart import (ACCENT, DEFAULT_FTP, HEART, HEART_SMOOTH_S, MUTED, TEXT, draw_cadence, draw_cursor,
-                    draw_power, hms, paint_panel, smooth, trace, zone_color)
-from .indicators import RideView
+from .chart import (ACCENT, DEFAULT_CURVES, DEFAULT_FTP, LABELS_MARGIN, MUTED, TEXT, draw_curves,
+                    draw_cursor, draw_power, draw_watts_axis, hms, paint_panel, zone_color)
+from .indicators import Mode, RideView
 from .metric import MetricGrid, Slot
 from .session import FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, State
-from .theme import icon, keycaps, number_font, zone_index
+from .theme import hint_label, icon, keycaps, number_font, zone_index
 
 BIG_STEP_W = 25
 BIG_STEP_PCT = 2.0
@@ -48,6 +48,7 @@ class FreeRideChart(QWidget):
         super().__init__(parent)
         self.session: FreeRideSession | None = None
         self.window_s = window_s
+        self.curves: set[str] = set(DEFAULT_CURVES)  # courbes affichées en plus de la puissance
         self.setMinimumHeight(220)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
@@ -62,7 +63,7 @@ class FreeRideChart(QWidget):
         if s is None:
             return
         ftp = s.ftp or DEFAULT_FTP
-        margin_l, margin_r, margin_t, margin_b = 44, 36, 14, 26  # à droite : échelle de la cadence
+        margin_l, margin_r, margin_t, margin_b = 44, LABELS_MARGIN, 14, 26  # à droite : étiquettes des courbes
         area = QRectF(margin_l, margin_t, self.width() - margin_l - margin_r,
                       self.height() - margin_t - margin_b)
         end = max(s.elapsed_s, self.window_s)
@@ -84,10 +85,8 @@ class FreeRideChart(QWidget):
         def yg(grade: float) -> float:
             return area.bottom() - (grade - g_lo) / (g_hi - g_lo) * area.height() * 0.6
 
-        # Graduations : FTP et axe du temps (une marque par minute).
-        p.setPen(QPen(QColor(MUTED), 1, Qt.DashLine))
-        p.drawLine(QPointF(area.left(), y(ftp)), QPointF(area.right(), y(ftp)))
-        p.drawText(QRectF(0, y(ftp) - 8, margin_l - 6, 16), Qt.AlignRight | Qt.AlignVCenter, "FTP")
+        # Graduations : watts et FTP, axe du temps (une marque par minute).
+        draw_watts_axis(p, area, y, peak, ftp, margin_l)
         p.setPen(QColor(MUTED))
         t = (int(start) // 60 + (start % 60 > 0)) * 60
         while t <= end:
@@ -121,24 +120,8 @@ class FreeRideChart(QWidget):
         # Puissance réalisée.
         draw_power(p, samples, x, y)
 
-        # Cadence, sur sa propre échelle (graduée dans la marge de droite).
-        draw_cadence(p, area, samples, x, area.right() + 6)
-
-        # Fréquence cardiaque, sur sa propre échelle (graduée à droite).
-        heart = [(x_.t, x_.heart_rate_bpm) for x_ in samples if x_.heart_rate_bpm]
-        if len(heart) > 1:
-            lo = min(60, min(b for _, b in heart) - 5)
-            hi = max(200, max(b for _, b in heart) + 5)
-
-            def yh(bpm: float) -> float:
-                return area.bottom() - (bpm - lo) / (hi - lo) * area.height()
-
-            p.setPen(QColor(HEART))
-            for bpm in range(int(lo // 20 + 1) * 20, int(hi), 40):
-                p.drawText(QRectF(area.right() - 40, yh(bpm) - 8, 38, 16), Qt.AlignRight | Qt.AlignVCenter,
-                           f"{bpm}")
-            p.setPen(QPen(QColor(HEART), 1.4))
-            p.drawPath(trace(smooth(heart, HEART_SMOOTH_S), x, yh))
+        # Cadence, cardio, vitesse (au choix), chacune sur son échelle, valeur au bout.
+        draw_curves(p, area, [samples], x, self.curves)
 
         # Instant présent.
         last = samples[-1] if samples else None
@@ -159,7 +142,7 @@ class FreeRidePanel(QWidget):
         title.setObjectName("title")
         layout.addWidget(title)
 
-        self.grid = grid = MetricGrid(SLOTS)
+        self.grid = grid = MetricGrid(SLOTS, Mode.FREE)
         self.cards = grid.cards
         grid.addWidget(self._build_target(), 0, 1, 2, 2)
         for c in range(4):
@@ -187,9 +170,8 @@ class FreeRidePanel(QWidget):
             b.setFocusPolicy(Qt.NoFocus)
             b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
-        buttons.addStretch(1)
-        self.hint = QLabel()
-        buttons.addWidget(self.hint)
+        self.hint = hint_label()
+        buttons.addWidget(self.hint, 1)
         layout.addLayout(buttons)
         self._set_mode_labels(FreeMode.ERG)
 
@@ -255,8 +237,8 @@ class FreeRidePanel(QWidget):
                 step = BIG_STEP_PCT if big else GRADE_STEP_PCT
                 text = ("+" if direction > 0 else "−") + grade_text(step).replace(" ", "\u202f")
             b.setText(text.replace("-", "−"))
-        self.hint.setText(keycaps("[Espace] pause   [↑] [↓] ±5 W   [Pg↑] [Pg↓] ±25 W" if erg
-                                  else "[Espace] pause   [↑] [↓] ±0,5 %   [Maj+↑] [Maj+↓] braquet"))
+        self.hint.setText(keycaps("[Espace] pause   [↑] [↓] ±5 W   [Pg↑] [Pg↓] ±25 W   [Tab] tour" if erg
+                                  else "[Espace] pause   [↑] [↓] ±0,5 %   [Maj+↑] [Maj+↓] braquet   [Tab] tour"))
 
     def refresh(self, view: RideView) -> None:
         """Cartes du catalogue et consigne ; le braquet virtuel (`view.gear`) est montré en pente."""
@@ -268,7 +250,8 @@ class FreeRidePanel(QWidget):
         erg = session.mode is FreeMode.ERG
         # En ERG, la carte prend la couleur de la zone de la consigne ; en pente, celle de la pente.
         color = zone_color(session.target_w, ftp) if erg else grade_color(session.grade_pct)
-        self.cards["power"].set_tint(color if session.state is State.RUNNING else None)
+        if "power" in self.cards:  # la place a pu recevoir un autre indicateur
+            self.cards["power"].set_tint(color if session.state is State.RUNNING else None)
         dim = erg and zone_index(session.target_w, ftp) == 0  # récup (grise) : chiffres en blanc
         self.target_label.setStyleSheet(f"color: {TEXT if dim else color.name()};")
         self._set_mode_labels(session.mode)

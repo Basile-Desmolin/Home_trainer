@@ -10,10 +10,11 @@ from .theme import MUTED, RAISED, TEXT, ZONES, number_font
 
 
 class ZoneBar(QWidget):
-    """Les 7 zones côte à côte, celle de la puissance en cours allumée."""
+    """Les zones côte à côte (par défaut les 7 de puissance), celle de la valeur en cours allumée."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, colors: list[str] | None = None) -> None:
         super().__init__(parent)
+        self.colors = colors if colors is not None else [color for _, color in ZONES]
         self.zone: int | None = None
         self.setObjectName("plain")
         self.setFixedHeight(10)
@@ -28,9 +29,9 @@ class ZoneBar(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        n, gap = len(ZONES), 3.0
+        n, gap = len(self.colors), 3.0
         w = (self.width() - gap * (n - 1)) / n
-        for i, (_, color) in enumerate(ZONES):
+        for i, color in enumerate(self.colors):
             c = QColor(color)
             on = i == self.zone
             c.setAlpha(255 if on else 70)
