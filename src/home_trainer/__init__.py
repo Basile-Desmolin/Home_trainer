@@ -2,6 +2,6 @@
 
 from .workout import Intensity, PowerTarget, PowerUnit, Repeat, Segment, Step, Workout
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = ["Intensity", "PowerTarget", "PowerUnit", "Repeat", "Segment", "Step", "Workout"]

@@ -12,6 +12,9 @@ en composer en briques « x min à y watts ».
 | Lecture / écriture `.zwo`, `.erg`, `.mrc`, `.fit` | ✅ `src/home_trainer/formats/` |
 | Notation texte des briques + ligne de commande | ✅ `bricks.py`, `cli.py` |
 | Interface de séance (profil complet, temps restant, puissance, intensité ±1 %) | ✅ `src/home_trainer/ui/`, home trainer simulé |
+| Cartes au choix (clic droit) : W/kg, NP, max, vitesse, équilibre G/D, tour, brique… | ✅ `ui/indicators.py`, `ui/metric.py` |
+| Vitesse calculée d'après la puissance, la pente et le poids, élan et roue libre compris | ✅ `ui/power.py` |
+| Sortie de secours (rien de perdu après un plantage) et journal des erreurs | ✅ `ui/rescue.py`, `logs.py` |
 | Capteur cardiaque Bluetooth et ANT+, affiché et enregistré (« Off » sans fréquence) | ✅ `src/home_trainer/sensors/` |
 | Éditeur graphique de briques, enregistrement .zwo/.mrc/.erg/.fit | ✅ `ui/editor.py` |
 | Bibliothèque : séances d'un dossier (sous-dossiers compris), recherche, filtre de durée, aperçu | ✅ `library.py`, `ui/library.py` |
@@ -147,14 +150,48 @@ home-trainer-gui --bricks "10m@150 3x(4m@105% 2m@55%) 10m@110"
 ![Séance](docs/interface.png)
 
 Profil complet de la séance coloré par zones (briques passées estompées, brique
-en cours cerclée de blanc), curseur d'avancement et puissance réalisée, cadence
-(échelle en tr/min à droite) et cardio. Les cartes Puissance et Cible prennent
-la couleur de la zone de la brique en cours, la cible affiche sa zone
-(« Z4 · Seuil · 95 % FTP ») et la suivante, un anneau se vide avec le temps
-restant sur la brique, et la barre des 7 zones sous la puissance allume celle
-où l'on roule. Temps restant au total, cadence, cardio ; intensité réglable
-par pas de 1 % (boutons, ou ↑ ↓, appui long pour défiler). Espace = démarrer
-/ pause, → = brique suivante.
+en cours cerclée de blanc), curseur d'avancement et courbes réalisées :
+puissance (watts gradués à gauche), cadence, cardio et vitesse, chacune nommée
+au bout de son tracé ; un clic droit sur le graphique affiche ou masque chaque
+courbe. Les cartes Puissance et Cible prennent la couleur de la zone de la
+brique en cours, la cible affiche sa zone (« Z4 · Seuil · 95 % FTP ») et la
+suivante, un anneau se vide avec le temps restant sur la brique, et la barre
+des 7 zones sous la puissance allume celle où l'on roule. Intensité réglable
+par pas de 1 % (boutons, ou ↑ ↓, appui long pour défiler).
+
+**Cartes au choix** : un clic droit sur une carte choisit ce qu'elle affiche
+(puissance, W/kg, NP, puissance max, moyenne de la brique, cadence, cardio,
+vitesse, équilibre gauche / droite, tour, temps, reste…) ; le choix est gardé
+dans le profil, écran par écran, et **Disposition d'origine** le défait.
+
+- **Puissance** : instantanée, ou moyenne sur 3, 5, 10 ou 30 s (clic droit,
+  « Puissance affichée ») ; l'enregistrement garde la mesure brute.
+- **Cardio** : avec la FC max du profil, une barre des zones ESIE (i1 à i5)
+  s'allume sous la valeur.
+- **Temps** : en séance, le reste de la brique et de la séance en dessous.
+- **Cadence** : alerte (carte teintée, valeur en orange) après 5 s sous un
+  seuil réglable au clic droit (50 tr/min par défaut, roue libre exclue).
+
+**Changement de brique** : bip et « Dans 3 s : … » avant chaque brique, puis
+le bilan de la brique finie. Au clic droit sur la carte Cible : marche / arrêt,
+son (double bip, bip court, bip montant ou son de Windows), compte à rebours
+de 3, 5 ou 10 s, son distinct à la dernière seconde. En fin de séance, la cible
+affiche « fin » et Espace demande confirmation avant de recommencer.
+
+| Touche | Action |
+| --- | --- |
+| Espace | démarrer / pause |
+| → ou N | brique suivante |
+| ← | brique précédente (reprise là où on l'a quittée) |
+| R | recommencer la brique |
+| Tab | nouveau tour (tour manuel dans le `.fit`) |
+| ↑ ↓, Page↑ Page↓ | intensité ±1 % / ±5 % (mode libre : ±5 W / ±25 W) |
+| E | ERG on / off |
+| P | mode libre : ERG ↔ pente |
+| F11 | plein écran (F11 ou Échap pour sortir) |
+
+Les chiffres grandissent avec la fenêtre (agrandie ou en plein écran), pour
+rester lisibles depuis le vélo.
 
 Les chiffres sont en Barlow Condensed et l'interface en Barlow (polices
 libres, licence OFL, embarquées dans `ui/assets/fonts`) ; couleurs, feuille
@@ -170,7 +207,8 @@ vitesses. ERG on reprend la consigne de la brique en cours.
 - **Sans ERG** : résistance libre, la FC cible s'affiche (en bpm) et l'on
   règle l'effort avec les vitesses ;
 - **En puissance** : chaque cible de FC devient un % FTP d'après la **FC max**
-  (gardée dans le profil). La FC au seuil est estimée à 90 % de la FC max et
+  (gardée dans le profil). La FC au seuil est estimée à 94 % de la FC max
+  (milieu de la zone i4 de l'échelle ESIE) et
   les zones de FC de Coggan sont reliées aux zones de puissance
   (`heart_zones.py`) ; la FC cible reste affichée sous la cible en watts.
 
@@ -180,9 +218,14 @@ dès la sortie terminée.
 
 Quand le logiciel passe en arrière-plan pendant une sortie (fenêtre réduite ou
 autre appli au premier plan), une vignette reste visible au-dessus des autres
-fenêtres (`ui/mini.py`) : puissance cible, puissance mesurée et temps restant
-de la brique (pente et kilomètres restants sur un parcours). Elle se déplace à
-la souris ; un clic ramène le logiciel, et elle disparaît à son retour.
+fenêtres (`ui/mini.py`) : par défaut puissance cible, puissance mesurée et
+temps restant de la brique (pente et kilomètres restants sur un parcours). Un
+clic droit sur une valeur la remplace par une autre (cardio, cadence, vitesse,
+NP…), en ajoute une (5 au plus) ou la retire ; le choix est gardé dans le
+profil pour chaque mode. Elle se déplace à la souris ; un clic ramène le
+logiciel, et elle disparaît à son retour.
+
+![Vignette](docs/mini.png)
 
 Le home trainer réel et le simulateur (`ui/power.py`) offrent la même
 interface `PowerSource` (`set_target`, `read`), voir ci-dessous.
@@ -199,13 +242,17 @@ puissance et cardio). En pause, le home trainer repasse en résistance libre.
 **Retour à la séance** met le mode libre en pause et retrouve la séance là
 où elle en était (Page↑ Page↓ y règlent l'intensité de ±5 %).
 
+En fin de séance, **Continuer en mode libre** (fenêtre d'enregistrement)
+enchaîne en ERG à la cible de la dernière brique, dans la même sortie : un
+seul fichier, la suite formant un tour à part.
+
 ![Mode libre](docs/mode-libre.png)
 
 **Pente simulée** : le bouton **Pente** (en haut de la cible) remplace l'ERG
-par une route en pente, par pas de 0,5 % (↑ ↓) et 2 % (Page↑ Page↓), de
+par une route en pente (ou touche P), par pas de 0,5 % (↑ ↓) et 2 % (Page↑ Page↓), de
 −10 % à +20 %. La résistance dépend alors de la pente, de la vitesse et du
-**poids** saisi à côté de la FTP (cycliste ; 9 kg de vélo s'y ajoutent), ou
-`--weight 70` au lancement. La vitesse simulée s'affiche sous la cadence.
+**poids** saisi à côté de la FTP (cycliste), auquel s'ajoute le **poids du
+vélo** du profil (9 kg par défaut), ou `--weight 70` au lancement.
 
 - ANT+ FE-C : le poids part dans la page 0x37 (configuration utilisateur),
   la pente dans la page 0x33.
@@ -216,6 +263,16 @@ par une route en pente, par pas de 0,5 % (↑ ↓) et 2 % (Page↑ Page↓), de
   (× (cycliste + vélo) / 75), ce qui donne le même effort qu'avec ce poids.
 
 ![Pente simulée](docs/mode-pente.png)
+
+**Vitesse** : dans tous les modes (séance, ERG compris, mode libre, parcours),
+l'appli calcule la vitesse qu'aurait le vélo sur la route d'après la
+puissance, la pente et le poids (cycliste + vélo), avec l'élan : en arrêtant
+de pédaler, le vélo ralentit en roue libre au lieu de s'arrêter net, et
+accélère en descente. 129 W sur le plat donnent ainsi environ 27 km/h, là où
+la vitesse d'un home trainer en ERG suit surtout la cadence. Un clic droit sur
+la carte Vitesse ou Cadence, sous-menu **Vitesse**, permet de reprendre celle
+du home trainer s'il en envoie une. La vitesse affichée est aussi celle
+enregistrée et envoyée à Strava et Nolio.
 
 ### Parcours GPX
 
@@ -289,8 +346,11 @@ dans la pastille du home trainer, ligne **Capteur de puissance** (Bluetooth
 Cycling Power, ou ANT+ Bicycle Power). Une pastille apparaît alors dans le bandeau.
 
 - Ses watts (et sa cadence, s'il la donne) **remplacent ceux du home trainer**
-  à l'écran, sur la courbe et dans la sortie enregistrée. La vitesse reste
-  celle du home trainer. Si le capteur se tait, on revient aux watts du home trainer.
+  à l'écran, sur la courbe et dans la sortie enregistrée. Si le capteur se
+  tait, on revient aux watts du home trainer.
+- Avec un capteur qui mesure chaque jambe (pédales doubles…), l'**équilibre
+  gauche / droite** s'affiche (carte au choix) et s'enregistre dans le `.fit`,
+  seconde par seconde et pour la sortie, comme le fait un compteur Garmin.
 - **L'ERG se règle sur le capteur** : l'appli mesure en continu l'écart entre
   le home trainer et le capteur (moyenne sur ~10 s, seulement quand on pédale)
   et corrige d'autant la consigne. Si le home trainer lit 8 W de trop, on lui
@@ -348,8 +408,12 @@ Au lancement, l'appli demande **qui roule** : on choisit un profil ou on en
 crée un (**Nouveau** : nom, FTP, poids). Chaque profil a sa propre **FTP**,
 son **poids**, ses **comptes Strava / Nolio** et ses **sorties** (avec leurs
 envois en attente) ; les appareils mémorisés et le dossier de la bibliothèque
-sont communs. FTP et poids changés dans leurs pastilles (ou dans l'éditeur)
-sont gardés dans le profil.
+sont communs. FTP et poids changés dans leurs pastilles sont gardés dans le
+profil ; une FTP essayée dans l'éditeur ne l'est qu'avec **Rouler cette
+séance**. La fiche du profil donne aussi la **FC max** (zones de FC, bilan) et
+le **poids du vélo** (vitesse, pente). Les réglages d'affichage (cartes,
+courbes, vignette, puissance lissée, bip, alerte de cadence, source de la
+vitesse) sont gardés par profil.
 
 - **Se souvenir de mon choix** : l'appli reprend directement le dernier
   profil, sans demander. Pour changer de cycliste ou décocher, pastille
@@ -374,10 +438,14 @@ restent lues là où elles sont).
 ## Sorties enregistrées, envoi vers Strava et Nolio
 
 À la fin de chaque sortie (séance, mode libre en ERG ou en pente, parcours GPX), l'appli
-écrit un **`.fit` d'activité** : une mesure par seconde (puissance, cadence,
-cardio, vitesse, distance, pente), les pauses, un tour par brique de séance,
-et le résumé (moyennes, puissance normalisée, travail). Puis elle l'**envoie
-d'elle-même** vers les comptes Strava et Nolio connectés.
+écrit un **`.fit` d'activité** : une mesure par seconde de chrono (moyenne de
+la seconde pour la puissance, la cadence et la vitesse ; cardio, distance,
+pente, équilibre gauche / droite avec un capteur double), les pauses, un tour
+par brique de séance et un tour à chaque appui sur Tab, et le résumé
+(moyennes, puissance normalisée, travail, FTP, TSS et IF). Un parcours GPX y
+ajoute la position GPS, l'altitude lissée et le dénivelé (celui affiché à
+l'écran) : Strava montre la carte et le classe en sortie virtuelle. Puis elle
+l'**envoie d'elle-même** vers les comptes Strava et Nolio connectés.
 
 Une sortie se termine :
 
@@ -398,16 +466,26 @@ Elle est aussi enregistrée d'elle-même, en .fit dans le dossier des sorties :
   fermant l'appli (la sortie en cours n'est jamais perdue).
 
 Toute sortie est enregistrée, même courte (seule une sortie sans aucun
-pédalage ne l'est pas). Sans vitesse donnée par
-le home trainer, elle est calculée comme sur la route (poids saisi, plat ou
-pente simulée), ce qui donne aussi la distance.
+pédalage ne l'est pas).
+
+**Sortie de secours** : pendant une sortie, les mesures sont gardées toutes les
+10 s dans `%APPDATA%\HomeTrainer\secours\`. Après un plantage, une coupure ou
+un enregistrement qui a échoué, l'appli propose au lancement suivant de
+l'**Enregistrer**, de la garder pour **Plus tard** ou de la **Jeter**.
+L'historique et la liste des profils sont copiés (`.bak.json`) avant chaque
+écriture ; un fichier illisible est relu depuis la copie et gardé de côté,
+jamais écrasé. Les erreurs sont notées dans
+`%APPDATA%\HomeTrainer\journaux\home-trainer.log`.
 
 Le dossier proposé est le dossier `sorties` du profil
 (`%APPDATA%\HomeTrainer\profils\<nom>\sorties` sous Windows,
 `~/.config/home-trainer/profils/<nom>/sorties` ailleurs) ; bouton **Ouvrir le dossier des sorties** dans la
 fenêtre **Strava / Nolio…**. Un envoi raté (pas de réseau, appli fermée
 pendant l'envoi) est retenté au lancement suivant, ou avec **Envoyer les
-sorties en attente**.
+sorties en attente**. Un fichier refusé par Strava ou Nolio est mis de côté
+sans bloquer les suivants, et n'est retenté que par ce bouton. À la connexion
+d'un compte, les sorties plus anciennes ne partent pas d'elles-mêmes : la
+fenêtre les compte, et le même bouton les envoie.
 
 ![Strava et Nolio](docs/strava-nolio.png)
 
@@ -415,8 +493,10 @@ sorties en attente**.
 
 La fenêtre **Enregistrer la sortie** commence par le **bilan** de la sortie :
 durée et distance, puissance moyenne, normalisée et max, IF, TSS, travail (kJ),
-FC moyenne et max, cadence moyenne, **temps passé dans chaque zone** de
-puissance (Z1 à Z7, de la FTP du profil) et **meilleures puissances** sur 5 s,
+FC moyenne (et son % de la FC max du profil) et max, cadence moyenne,
+calories (1 kJ fourni ≈ 1 kcal), **temps passé dans chaque zone** de
+puissance (Z1 à Z7, de la FTP du profil) et de FC (i1 à i5, si la FC max est
+renseignée), et **meilleures puissances** sur 5 s,
 1 min, 5 min, 20 min et 1 h. Une meilleure puissance jamais atteinte jusque-là
 par le profil est marquée **★ record**.
 
@@ -479,7 +559,11 @@ apparaît dans le calendrier au bout de quelques instants.
 ### Sécurité
 
 Identifiants et jetons d'accès restent sur l'ordinateur, dans
-`comptes.json` du dossier du profil, jamais dans le dépôt. La
+`comptes.json` du dossier du profil, jamais dans le dépôt. Sous Windows, le
+secret de l'appli API et les jetons y sont **chiffrés** avec la session de
+l'utilisateur (DPAPI) : le fichier copié sur un autre PC ne se déchiffre pas
+(il suffit alors de se reconnecter). Un ancien fichier en clair est réécrit
+chiffré au premier lancement. La
 connexion passe par le navigateur (OAuth 2) : l'appli ne voit jamais le mot
 de passe Strava ou Nolio. **Déconnecter** oublie les jetons.
 
@@ -548,6 +632,10 @@ sans matériel (`tests/test_sensors.py`).
   bibliothèque standard (`urllib`, petit serveur `http.server` sur
   `localhost:8765` pour recevoir le code de connexion) ; envoi `multipart`
   vers Strava, JSON (fichier en base64) vers Nolio (`sync/`).
+- **Chiffrement des jetons** : DPAPI de Windows par `ctypes`, sans
+  dépendance (`sync/secret.py`).
+- **Sons du bip** : fabriqués par l'appli (WAV) et joués par QtMultimedia
+  (`ui/sounds.py`) ; son de Windows si QtMultimedia manque.
 - Interface **PySide6 (Qt)**, Bluetooth via **bleak** (FTMS, et le service
   Wahoo propriétaire en repli), ANT+ via **openant** (profil FE-C) avec une
   clé USB ANT+.
