@@ -57,7 +57,7 @@ def test_brick_summary_text():
 
 
 def test_last_second_of_a_brick_stays_in_its_lap(app, tmp_path):
-    """Étape 8 : la mesure de la dernière seconde d'une brique allait à la brique suivante (enregistrée
+    """La mesure de la dernière seconde d'une brique allait à la brique suivante (enregistrée
     après le tic qui change de brique). Séance 1 min à 200 W puis 30 s à 150 W, mesures à 5 Hz :
     tours du .fit de 59 s et 31 s avant, 60 s et 30 s après ; la dernière seconde de la séance n'ouvre
     plus de tour à elle seule."""
@@ -122,7 +122,7 @@ def fit_laps(samples):
 
 
 def test_previous_brick_resumes_a_brick_skipped_by_mistake():
-    """Étape 11c. Séance 1 min à 200 W, 1 min à 100 W, 1 min à 150 W. Brique 2 passée par erreur (N)
+    """Séance 1 min à 200 W, 1 min à 100 W, 1 min à 150 W. Brique 2 passée par erreur (N)
     à 1:10, 5 s roulées dans la brique 3, puis ← : la brique 2 reprend là où elle a été quittée
     (0:50 restantes), puis la brique 3 entière. Avant : la brique 2 était perdue (0:10 roulées).
     Tours du .fit : 60, 10, 5, 50, 60 s ; 185 s au total."""
@@ -155,7 +155,7 @@ def test_previous_brick_after_a_finished_brick_starts_it_again():
 
 
 def test_restart_brick_opens_a_new_lap():
-    """Étape 11c. Brique 1 (1 min) recommencée à 0:30 (R) : tours du .fit 30, 60, 60 s ; le premier
+    """Brique 1 (1 min) recommencée à 0:30 (R) : tours du .fit 30, 60, 60 s ; le premier
     est marqué fermé par l'utilisateur, comme un tour manuel (Tab)."""
     w = WorkoutSession(parse_workout("1m@200 1m@100"), 250)
     w.start()
@@ -213,7 +213,7 @@ def test_countdown_beeps_and_summary_at_the_end_of_a_brick(app, tmp_path):
     assert len(beeps) == 3
     assert window.session.index == 1
     # Bilan de la brique finie, à la place de « Maintenant ». 0:10 : la mesure de la dernière seconde,
-    # enregistrée au tic qui change de brique, reste dans sa brique (0:09 avant l'étape 8).
+    # enregistrée au tic qui change de brique, reste dans sa brique (0:09 avant la correction).
     assert window.current_label.text() == "Brique 1 finie : 0:10 · 210 W pour 200 W visés (105 %)"
     window._brick_note = (window._brick_note[0], 0.0)  # 8 s plus tard
     window._refresh()
@@ -228,7 +228,7 @@ def test_countdown_beeps_and_summary_at_the_end_of_a_brick(app, tmp_path):
 
 
 def test_beep_sound_and_countdown_length_are_kept_in_the_profile(app, tmp_path):
-    """Étape 11b : compte à rebours de 5 s, bips à 5 s puis aux 3 dernières secondes, la dernière
+    """Compte à rebours de 5 s, bips à 5 s puis aux 3 dernières secondes, la dernière
     signalée ; son et durée gardés dans le profil et repris à la relance."""
     book = ProfileBook(tmp_path / "profils.json", rides_root=tmp_path / "sorties")
     profile = book.create("A")
@@ -286,7 +286,7 @@ class Cadence(Steady):
 
 
 def test_low_cadence_alert_after_five_seconds_under_the_threshold(app, tmp_path):
-    """Étape 11e : seuil de 50 tr/min par défaut ; alerte après 5 s sous le seuil, en orange sur la
+    """Seuil de 50 tr/min par défaut ; alerte après 5 s sous le seuil, en orange sur la
     carte cadence ; une cadence de 0 (roue libre) ne compte pas ; seuil gardé dans le profil."""
     from home_trainer.ui.theme import WAIT
     book = ProfileBook(tmp_path / "profils.json", rides_root=tmp_path / "sorties")

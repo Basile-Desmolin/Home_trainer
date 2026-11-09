@@ -110,8 +110,8 @@ class AntTrainer(Trainer):
     def _interrupt(self) -> None:
         """Appelé par l'interface (changement de home trainer, fermeture) : ne doit pas la figer.
 
-        Audit, « ANT+ : arrêt bloquant après une perte de signal » : la consigne « résistance
-        libre » attendait l'accusé de réception d'un home trainer qui ne répondait plus. Elle part
+        Arrêt bloquant après une perte de signal : la consigne « résistance libre » attendait
+        l'accusé de réception d'un home trainer qui ne répondait plus. Elle part
         maintenant d'un fil à part, attendue au plus `free_on_stop_wait_s`, et seulement si le home
         trainer a parlé il y a moins de 3 s."""
         node, channel = self._node, self._channel

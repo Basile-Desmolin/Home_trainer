@@ -33,7 +33,7 @@ def _time(sample) -> float:
 
 
 def window_samples(samples: list, start: float) -> list:
-    """Mesures à partir de `start` : début trouvé directement (étape 9), sans parcourir toute la
+    """Mesures à partir de `start` : début trouvé directement, sans parcourir toute la
     sortie (les mesures sont dans l'ordre du temps)."""
     return samples[bisect.bisect_left(samples, start, key=_time):]
 

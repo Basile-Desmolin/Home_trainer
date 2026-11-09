@@ -21,8 +21,8 @@ BG = "#16181d"
 PANEL = "#20242c"
 TEXT = "#e8eaed"
 MUTED = "#8b919c"
-DETAIL = "#b4bac4"  # lignes de détail des cartes : plus claires que MUTED, lisibles de loin (étape 11)
-SUB_PX = 14  # taille des lignes de détail des cartes (13 px avant l'étape 11), à l'échelle 1
+DETAIL = "#b4bac4"  # lignes de détail des cartes : plus claires que MUTED, lisibles de loin
+SUB_PX = 14  # taille des lignes de détail des cartes à l'échelle 1
 ACCENT = "#ffd24a"
 POWER = "#4fc3f7"
 HEART = "#ff5c6c"
@@ -142,7 +142,7 @@ def window_scale(width: int, height: int) -> float:
 
 
 def set_style(widget, sheet: str) -> None:
-    """Feuille de style d'un widget, posée seulement si elle change. Étape 9 : posée à chaque
+    """Feuille de style d'un widget, posée seulement si elle change : posée à chaque
     rafraîchissement (5 fois par seconde), elle refaisait le style du widget et le redessinait."""
     if widget.styleSheet() != sheet:
         widget.setStyleSheet(sheet)

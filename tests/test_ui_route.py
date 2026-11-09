@@ -96,7 +96,7 @@ def wiggly_route(n):
 
 
 def old_map_point(route, width, height, lat, lon):
-    """Pixel d'un point tel que le calculait la carte avant l'étape 4 (référence)."""
+    """Pixel d'un point tel que le calculait l'ancienne carte (référence)."""
     points = route.points
     k = math.cos(math.radians(sum(pt.lat for pt in points) / len(points)))
     xs = [pt.lon * k for pt in points]
@@ -121,7 +121,7 @@ def test_route_map_of_a_long_route_is_drawn_quickly_at_the_same_place(app):
     for _ in range(5):
         chart.grab()
     following = (time.perf_counter() - t) / 5
-    assert first < 0.5 and following < 0.05  # avant l'étape 4 : environ 20 s par dessin
+    assert first < 0.5 and following < 0.05  # auparavant : environ 20 s par dessin
     assert 2 < len(chart._trace_xy) < 3000  # simplifié au pixel, au lieu de 20 000 points
     # Départ, arrivée et position aux mêmes pixels qu'avant.
     for lat, lon in ((route.points[0].lat, route.points[0].lon), (route.points[-1].lat, route.points[-1].lon),

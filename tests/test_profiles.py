@@ -20,7 +20,7 @@ def test_create_save_and_load(tmp_path):
 
 
 def test_invalid_settings_fall_back_to_defaults(tmp_path):
-    """Audit, « Profil corrompu » : une FTP vide dans profils.json faisait planter le démarrage."""
+    """Profil corrompu : une FTP vide dans profils.json faisait planter le démarrage."""
     path = tmp_path / "profils.json"
     path.write_text(json.dumps({"profiles": [
         {"id": "a", "name": "A", "ftp": "", "weight_kg": "68,5", "bike_kg": None, "hr_max": "x",

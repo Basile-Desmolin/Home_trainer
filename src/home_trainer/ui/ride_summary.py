@@ -49,7 +49,7 @@ def heart_detail(ride: RideSummary) -> str:
 
 
 POWER_LABELS = [f"Z{i + 1}  {name}" for i, name in enumerate(ZONE_NAMES)]
-# Zones de FC ESIE (étape 11), avec leurs bornes en % de la FC max.
+# Zones de FC ESIE, avec leurs bornes en % de la FC max.
 HEART_LABELS = [f"{name}  {span}" for name, span in zip(
     ESIE_NAMES, ["< 75 %", "75-85 %", "85-92 %", "92-96 %", "> 96 %"])]
 
@@ -120,7 +120,7 @@ class SummaryPanel(QWidget):
             ("FC MOY.", hr, heart_detail(ride)),
             ("FC MAX", number(ride.max_hr_bpm, "bpm"), ""),
             ("CADENCE MOY.", number(ride.avg_cadence_rpm, "rpm"), ""),
-                # Étape 11 : 1 kJ fourni ≈ 1 kcal dépensée.
+                # 1 kJ fourni ≈ 1 kcal dépensée.
             ("CALORIES", number(ride.calories_kcal, "kcal"), "1 kJ ≈ 1 kcal"),
         ]
         for c in range(4):
@@ -179,7 +179,7 @@ class SummaryDialog(QDialog):
     def __init__(self, ride: RideSummary, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Bilan de la sortie")
-        self.setMinimumWidth(700)  # bilan sur 4 colonnes (étape 11)
+        self.setMinimumWidth(700)  # bilan sur 4 colonnes
         layout = QVBoxLayout(self)
         layout.addWidget(SummaryPanel(ride))
         if ride.file:

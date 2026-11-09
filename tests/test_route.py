@@ -62,7 +62,7 @@ def test_rejects_bad_files(tmp_path):
 
 
 def _reference_interpolate(known, d):
-    """Interpolation d'avant l'étape 4 (liste des distances refaite à chaque appel) : la référence."""
+    """Ancienne interpolation (liste des distances refaite à chaque appel) : la référence."""
     import bisect
     if d <= known[0][0]:
         return known[0][1]
@@ -100,7 +100,7 @@ def test_long_gpx_loads_quickly():
     r = parse_gpx(data)
     elapsed = time.perf_counter() - t
     assert r.total_m == pytest.approx(199_990, rel=1e-3)
-    assert elapsed < 2.0  # avant l'étape 4 : une vingtaine de secondes (calcul en N²)
+    assert elapsed < 2.0  # auparavant : une vingtaine de secondes (calcul en N²)
 
 
 def test_session_advances_with_power_and_sends_route_grade():

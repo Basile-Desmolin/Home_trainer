@@ -43,8 +43,8 @@ class Account:
     auto: bool = True  # envoyer chaque sortie dès qu'elle est terminée
     redirect_uri: str = ""  # URL de rappel déclarée dans l'appli API ("" : http://localhost:8765/<service>)
     # Heure de la connexion (secondes depuis 1970) : les sorties commencées avant ne partent pas d'elles-
-    # mêmes (audit, « Arriéré envoyé d'un coup »), seulement par « Envoyer les sorties en attente ».
-    # 0 : compte connecté avant l'étape 8, tout part comme avant.
+    # mêmes (pas d'arriéré envoyé d'un coup), seulement par « Envoyer les sorties en attente ».
+    # 0 : compte connecté avant la version 0.2, tout part comme avant.
     since: float = 0.0
 
     @property
@@ -105,7 +105,7 @@ class AccountBook:
                     values[key] = ""
             book.accounts[name] = Account(**values)
         if plain and secret.available():
-            book.save()  # fichier d'avant l'étape 8 : les secrets ne restent pas en clair
+            book.save()  # fichier d'avant la version 0.2 : les secrets ne restent pas en clair
         return book
 
     def save(self) -> None:

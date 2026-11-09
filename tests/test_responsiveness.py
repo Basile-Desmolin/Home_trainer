@@ -1,4 +1,4 @@
-"""Étape 9 (rapidité) : redessins limités à ce qui change, fenêtre réduite, fermeture."""
+"""Rapidité : redessins limités à ce qui change, fenêtre réduite, fermeture."""
 
 import os
 

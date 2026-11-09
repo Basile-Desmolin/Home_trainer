@@ -198,7 +198,7 @@ def test_each_indicator_has_a_title_and_a_known_gauge():
 
 
 def test_target_in_each_mode_with_its_color():
-    """Étape 10 : la cible de la vignette, reprise de `mini_info` (texte, titre et couleur)."""
+    """La cible de la vignette, reprise de `mini_info` (texte, titre et couleur)."""
     s = workout()  # 10 min à 150 W (60 % FTP, zone 2), puis 5 min à 280 W
     shown = show("target", s)
     assert (shown.value, shown.title, shown.color) == ("150 W", None, zone_color(150, 250).name())
@@ -227,7 +227,7 @@ def test_target_in_each_mode_with_its_color():
 
 
 def test_workout_time_shows_what_remains_of_the_brick_and_the_workout():
-    """Étape 11a : sous le temps écoulé d'une séance, le reste de la brique et de la séance."""
+    """Sous le temps écoulé d'une séance, le reste de la brique et de la séance."""
     s = workout()  # 10 min puis 5 min
     s.start()
     s.tick(400)
@@ -242,7 +242,7 @@ def test_workout_time_shows_what_remains_of_the_brick_and_the_workout():
 
 
 def test_finished_workout_target_says_so():
-    """Étape 11a : séance finie, la cible n'affiche plus « libre »."""
+    """Séance finie, la cible n'affiche plus « libre »."""
     s = workout()
     s.start()
     s.tick(900)

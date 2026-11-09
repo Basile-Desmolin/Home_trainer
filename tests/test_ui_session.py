@@ -169,7 +169,7 @@ def test_skipped_brick_moves_chart_samples_with_the_workout():
 
 
 def test_chart_runs_follow_new_samples_without_recomputing():
-    """Étape 9 : les tronçons du graphique sont prolongés à chaque mesure (même résultat qu'un calcul
+    """Les tronçons du graphique sont prolongés à chaque mesure (même résultat qu'un calcul
     complet), et recalculés si la liste des mesures est remplacée ou raccourcie."""
     s = make()
 

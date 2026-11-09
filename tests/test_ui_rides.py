@@ -62,7 +62,7 @@ def test_finished_workout_is_saved_once(window):
 
 
 def test_continue_in_free_ride_after_a_workout_goes_in_the_same_file(window):
-    """Étape 11d : en fin de séance, « Continuer en mode libre » : la suite démarre en ERG à la
+    """En fin de séance, « Continuer en mode libre » : la suite démarre en ERG à la
     puissance de la dernière brique ; « Terminer » enregistre un seul .fit (séance 2:00, puis mode
     libre 0:30 dans un tour à part), au nom de la séance."""
     from home_trainer.ui.ride_export import CONTINUE
@@ -94,7 +94,7 @@ def test_continue_in_free_ride_after_a_workout_goes_in_the_same_file(window):
 
 
 def test_window_scale_follows_the_window_size():
-    """Étape 11f : facteur 1 jusqu'à 1 280 × 800, puis selon le côté le moins agrandi, 1,8 au plus."""
+    """Facteur 1 jusqu'à 1 280 × 800, puis selon le côté le moins agrandi, 1,8 au plus."""
     from home_trainer.ui.theme import window_scale
     assert window_scale(1280, 800) == 1.0 and window_scale(1000, 700) == 1.0
     assert window_scale(1920, 1080) == 1.35  # 1,5 en largeur, 1,35 en hauteur
@@ -162,7 +162,7 @@ def test_ride_without_pedaling_is_not_saved(window):
 
 def test_speed_is_computed_by_the_application(window):
     from home_trainer.ui.power import Reading
-    window.road_kmh = 31.5  # vitesse calculée (étape 7), avec ou sans vitesse du home trainer
+    window.road_kmh = 31.5  # vitesse calculée, avec ou sans vitesse du home trainer
     assert window._speed(Reading(200, 90)) == 31.5
     assert window._speed(Reading(200, 90, 25.0)) == 31.5
 
@@ -371,7 +371,7 @@ def test_history_problems_are_shown(window, monkeypatch):
 
 
 def test_summary_shows_heart_rate_zones_with_the_profile_max(app):
-    """Étape 11g : bilan avec la FC max du profil : % de FC max sous la FC moyenne, temps par zone de FC."""
+    """Bilan avec la FC max du profil : % de FC max sous la FC moyenne, temps par zone de FC."""
     from home_trainer.ride_stats import RideSummary
     from home_trainer.ui.ride_summary import SummaryPanel
     ride = RideSummary(1_759_480_000, "FC", 190, 250, 200, 200, 200, 38, avg_hr_bpm=27_350 / 180,
@@ -437,7 +437,7 @@ def test_trace_draws_one_point_per_pixel():
 
 
 def test_stroke_draws_the_same_curve_as_a_single_path(app):
-    """Étape 9 : les segments séparés (bouts arrondis) donnent le même dessin qu'un chemin d'un tenant."""
+    """Les segments séparés (bouts arrondis) donnent le même dessin qu'un chemin d'un tenant."""
     import math
 
     from PySide6.QtCore import QPointF, Qt
@@ -496,7 +496,7 @@ def test_restart_resets_every_mode_once_confirmed(window):
 
 
 def test_space_after_the_end_asks_before_starting_again(window):
-    """Étape 11a : séance finie, Espace ne relance plus une séance sans confirmation ; carte cible et
+    """Séance finie, Espace ne relance plus une séance sans confirmation ; carte cible et
     anneau disent que la séance est finie."""
     pedal(window.session, 120)
     window.save_ride = lambda session: True

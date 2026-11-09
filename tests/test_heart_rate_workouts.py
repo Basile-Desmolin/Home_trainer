@@ -54,7 +54,7 @@ def test_heart_rate_erg_round_trip_and_other_formats_refused():
 
 
 def test_conversion_follows_zones():
-    # FC max 190 → FC au seuil 94 % = 178,6 bpm = FTP (milieu de i4, ESIE ; 90 % = 171 bpm avant l'étape 8).
+    # FC max 190 → FC au seuil 94 % = 178,6 bpm = FTP (milieu de i4, ESIE ; 90 % = 171 bpm avant la version 0.2).
     assert ftp_percent_for(178.6, 190) == 100
     assert ftp_percent_for(160, 190) == 84.0  # 89,4 % avec l'ancien seuil
     assert 50 < ftp_percent_for(120, 190) < 56  # endurance (53,6 %)

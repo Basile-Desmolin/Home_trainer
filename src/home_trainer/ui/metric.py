@@ -35,7 +35,7 @@ class Metric(QFrame):
         self.title = QLabel(title)
         self.title.setObjectName("metricTitle")
         self._size = round(size * 1.25)  # police condensée : plus haute à largeur égale
-        self.scale = 1.0  # tailles suivant la fenêtre (étape 11, `set_scale`)
+        self.scale = 1.0  # tailles suivant la fenêtre (`set_scale`)
         self.value = QLabel("—")
         self.unit = QLabel("")
         self.unit.setObjectName("unit")

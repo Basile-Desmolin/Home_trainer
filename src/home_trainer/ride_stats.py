@@ -59,8 +59,8 @@ class RideSummary:
     zone_s: list[float] = field(default_factory=lambda: [0.0] * len(ZONE_NAMES))
     best_w: dict[int, float] = field(default_factory=dict)  # durée (s) -> meilleure puissance moyenne
     file: str | None = None  # fichier enregistré
-    # Étape 11 : FC max du profil au moment de la sortie, et temps dans chaque zone de FC ESIE (i1 à i5) ;
-    # vides sans FC max ou sans cardio (sorties d'avant l'étape 11 aussi).
+    # FC max du profil au moment de la sortie, et temps dans chaque zone de FC ESIE (i1 à i5) ;
+    # vides sans FC max ou sans cardio (sorties d'avant la version 0.2 aussi).
     hr_max: float | None = None
     hr_zone_s: list[float] = field(default_factory=list)
 

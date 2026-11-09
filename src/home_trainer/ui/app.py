@@ -164,7 +164,7 @@ class MainWindow(QMainWindow):
         self._rescued_at = time.monotonic()
         self._proposing = False
         self._closed = False  # fenêtre fermée : plus rien à proposer (proposition différée par QTimer)
-        # Tailles des chiffres suivant la fenêtre (étape 11) : facteur recalculé peu après un redimensionnement.
+        # Tailles des chiffres suivant la fenêtre : facteur recalculé peu après un redimensionnement.
         self.scale = 1.0
         self._scale_timer = QTimer(self)
         self._scale_timer.setSingleShot(True)
@@ -1043,7 +1043,7 @@ class MainWindow(QMainWindow):
         self.end_ride(self.free, send=False)
         if self.route is not None:
             self.end_ride(self.route, send=False)
-        # Étape 9 : la fenêtre disparaît tout de suite. Les capteurs s'arrêtent ensemble (3 s au plus en
+        # La fenêtre disparaît tout de suite. Les capteurs s'arrêtent ensemble (3 s au plus en
         # tout, au lieu de 3 s chacun, home trainer libéré d'abord), puis l'envoi de la dernière sortie
         # finit en arrière-plan (`CLOSE_SEND_WAIT_S` au plus ; sinon il repart au prochain lancement).
         self.hide()
@@ -1629,7 +1629,7 @@ class MainWindow(QMainWindow):
                 self._ask_at_end(session)
         # Pas de veille tant qu'une sortie est en cours, même en pause.
         self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
-        # Fenêtre réduite : rien n'est à l'écran, l'affichage attend (étape 9). L'enregistrement, le
+        # Fenêtre réduite : rien n'est à l'écran, l'affichage attend. L'enregistrement, le
         # secours et la vignette continuent ; la fenêtre rouverte est remise à jour aussitôt (`changeEvent`).
         if not self.isMinimized():
             self._refresh()

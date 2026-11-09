@@ -135,7 +135,7 @@ def trace(points: list[tuple[float, float | None]], x, y) -> list[list[QPointF]]
 class TracedCurve:
     """Une courbe d'un tronçon de sortie, lissée puis réduite au pixel, tenue au fil des mesures.
 
-    Étape 9 : refaire le lissage et la réduction de toute une sortie de 3 h à chaque dessin coûtait
+    Refaire le lissage et la réduction de toute une sortie de 3 h à chaque dessin coûtait
     ~60 ms par courbe. Une nouvelle mesure ne change que la fin de la courbe lissée (moyenne
     centrée : la dernière demi-fenêtre) ; seule cette fin est refaite. Même résultat que
     `trace(smooth(...))` sur toute la courbe (à l'arrondi des sommes près)."""
@@ -221,7 +221,7 @@ def follow(cache: dict | None, key, run: list, value, window_s: float, x: TimeAx
 def stroke(p: QPainter, pen: QPen, lines: list[list[QPointF]]) -> None:
     """Trace les morceaux d'une courbe en segments séparés, aux bouts arrondis (jonctions invisibles).
 
-    Étape 9 : un chemin d'un seul tenant de 1 500 points anticrénelé coûte ~100 ms à Qt (contour
+    Un chemin d'un seul tenant de 1 500 points anticrénelé coûte ~100 ms à Qt (contour
     calculé d'un bloc), les mêmes segments séparés ~3 ms, pour un rendu identique à l'œil."""
     pen = QPen(pen)
     pen.setCapStyle(Qt.RoundCap)
@@ -447,7 +447,7 @@ class WorkoutChart(QWidget):
 
     def refresh(self) -> None:
         """Redessine seulement si quelque chose de visible a changé : nouvelle mesure, curseur passé à un
-        autre pixel, brique, intensité ou état (étape 9 : le tic de 200 ms redessinait une sortie de 3 h
+        autre pixel, brique, intensité ou état (le tic de 200 ms redessinait une sortie de 3 h
         5 fois par seconde, alors que le curseur y avance d'un pixel toutes les quelques secondes).
         Un changement de séance, de courbes ou de taille redessine de lui-même (`update`)."""
         s = self.session

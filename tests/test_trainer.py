@@ -48,7 +48,7 @@ POWER_ONLY = bytes([0x41, 0x00, 0xC8, 0x00])  # « More Data » (pas de vitesse)
 
 
 def test_split_frames_keep_the_power_instead_of_zero():
-    """Audit, « Trame sans puissance » : un home trainer qui envoie vitesse et cadence dans une trame,
+    """Trame sans puissance : un home trainer qui envoie vitesse et cadence dans une trame,
     la puissance dans une autre. À 200 W constants, 8 trames par seconde : chaque trame lue seule
     donne 0, 200, 0, 200… (moyenne 100 W) ; assemblées, 200 W partout (moyenne 200 W)."""
     frames = [POWER_ONLY, SPEED_CADENCE] * 4
@@ -253,7 +253,7 @@ class FlakyClient(FakeClient):
 
 
 def test_refused_write_is_retried_without_dropping_the_connection(monkeypatch):
-    """Audit, « Une écriture Bluetooth refusée coupe la connexion » (environ 15 s sans données)."""
+    """Une écriture Bluetooth refusée coupait la connexion (environ 15 s sans données)."""
     monkeypatch.setattr(trainer_ble, "WRITE_RETRY_S", 0.1)
     trainer, client, stop = BleTrainer("AA:BB"), FlakyClient(fails=2), threading.Event()
     run_ftms(trainer, client, stop)  # se termine normalement : pas d'exception, pas de reconnexion
@@ -291,7 +291,7 @@ class ResetClient(FakeClient):
 
 
 def test_lost_control_is_requested_again_and_the_target_resent():
-    """Audit, « Contrôle du home trainer jamais redemandé » : ERG ignoré en silence après une
+    """Contrôle du home trainer jamais redemandé : ERG ignoré en silence après une
     réinitialisation du home trainer."""
     trainer, client, stop = BleTrainer("AA:BB"), ResetClient(), threading.Event()
     run_ftms(trainer, client, stop)
@@ -320,7 +320,7 @@ class FakeNode:
 
 
 def test_ant_stop_does_not_freeze_the_interface():
-    """Audit, « ANT+ : arrêt bloquant après une perte de signal » (10 s ou plus)."""
+    """ANT+ : arrêt bloquant après une perte de signal (10 s ou plus)."""
     import time
 
     trainer, channel, node = AntTrainer(), SilentChannel(hang_s=5), FakeNode()

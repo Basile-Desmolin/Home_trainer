@@ -1,4 +1,4 @@
-"""Étape 12 : données ajoutées au .fit d'activité (FTP, TSS, IF ; altitude et position du parcours GPX)."""
+"""Données ajoutées au .fit d'activité (FTP, TSS, IF ; altitude et position du parcours GPX)."""
 
 import os
 

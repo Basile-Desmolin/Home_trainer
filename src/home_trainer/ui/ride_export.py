@@ -47,7 +47,7 @@ class RideExportDialog(QDialog):
                  parent: QWidget | None = None, can_continue: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle("Enregistrer la sortie")
-        self.setMinimumWidth(700)  # bilan sur 4 colonnes (étape 11)
+        self.setMinimumWidth(700)  # bilan sur 4 colonnes
         self.choice: RideExport | str | None = None
         layout = QVBoxLayout(self)
         self.panel: SummaryPanel | None = None

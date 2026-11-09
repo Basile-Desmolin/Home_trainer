@@ -145,8 +145,8 @@ class BackgroundSensor(Generic[T]):
 
 def stop_all(sensors, timeout: float = 3.0) -> None:
     """Arrête des capteurs ensemble : tous reçoivent l'ordre d'arrêt, puis on les attend au plus
-    `timeout` secondes en tout (étape 9 : arrêtés un par un, la fermeture attendait jusqu'à
-    3 s par capteur). `None` dans la liste est ignoré."""
+    `timeout` secondes en tout (arrêtés un par un, la fermeture attendait jusqu'à 3 s par
+    capteur). `None` dans la liste est ignoré."""
     sensors = [s for s in sensors if s is not None]
     for sensor in sensors:
         try:

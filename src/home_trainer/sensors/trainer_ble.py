@@ -129,7 +129,7 @@ class BleTrainer(Trainer):
             now = time.monotonic()
             if control_lost and now - control_asked_at >= CONTROL_RETRY_S:
                 # Après une réinitialisation, le home trainer ignore ERG et pente tant qu'on ne
-                # redemande pas le contrôle (audit, « Contrôle du home trainer jamais redemandé »).
+                # redemande pas le contrôle.
                 control_lost, control_asked_at = False, now
                 log.info("%s : contrôle FTMS perdu, redemandé", self.name)
                 await client.write_gatt_char(BLE_FTMS_CONTROL_POINT, ftms_request_control(), response=True)
@@ -177,8 +177,8 @@ class BleTrainer(Trainer):
     async def _control_loop(self, send, stop: threading.Event, disconnected: asyncio.Event, calibrate) -> None:
         """Transmet les consignes (ou lance une calibration) jusqu'à l'arrêt ou la déconnexion.
 
-        Une écriture refusée ne coupe plus la connexion (audit : environ 15 s sans données ni
-        consigne) : la consigne repart au bout de `WRITE_RETRY_S` ; seulement après
+        Une écriture refusée ne coupe pas la connexion (ce qui faisait environ 15 s sans données
+        ni consigne) : la consigne repart au bout de `WRITE_RETRY_S` ; seulement après
         `MAX_WRITE_FAILURES` échecs de suite, on se reconnecte."""
         failures, retry_at = 0, 0.0
         while not stop.is_set() and not disconnected.is_set():

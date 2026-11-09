@@ -1,4 +1,4 @@
-"""Étape 7 : vitesse calculée par l'application d'après la puissance (ERG compris), avec l'élan du vélo.
+"""Vitesse calculée par l'application d'après la puissance (ERG compris), avec l'élan du vélo.
 
 Avant : en séance, la vitesse était celle du home trainer ; avec un pignon unique (Zwift Cog) en ERG, elle
 ne suivait que la cadence (sortie du 7 novembre 2026 : ~19 km/h à 129 W). Le parcours rejoignait la vitesse

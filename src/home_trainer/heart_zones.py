@@ -12,7 +12,7 @@ FTP) est prise à 94 % de la FC max, milieu de la zone i4 « seuil » de l'éche
 ESIE (92-96 %), la même que la barre de zones sous la carte Cardio ; puis les
 bornes des zones de Coggan en % de la FC au seuil sont reliées à celles des
 zones de puissance. C'est une estimation : elle varie d'un cycliste à l'autre.
-Jusqu'à l'étape 8, le seuil était à 90 % : à FC max 190, 160 bpm donnaient
+Jusqu'à la version 0.2, le seuil était à 90 % : à FC max 190, 160 bpm donnaient
 89,4 % FTP, ils donnent 84,0 %.
 """
 

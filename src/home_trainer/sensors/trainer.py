@@ -134,7 +134,7 @@ class IndoorBikeData:
 
     Beaucoup de home trainers découpent leurs mesures en deux notifications (drapeau « More
     Data ») : l'une avec vitesse et cadence, l'autre avec la puissance. Lue seule, la première
-    donnait 0 W (audit, « Trame sans puissance ») : la moitié des mesures à 0, une moyenne de la
+    donnait 0 W : la moitié des mesures à 0, une moyenne de la
     seconde divisée par deux. Un champ absent reprend sa dernière valeur reçue, si elle a moins de
     `hold_s` secondes ; sinon il manque (puissance : 0 W, comme avant).
     """

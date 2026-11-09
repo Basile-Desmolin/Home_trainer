@@ -133,7 +133,7 @@ MINUTES   WATTS
 
 
 def test_erg_and_mrc_read_the_decimal_comma():
-    """Audit, « Virgule décimale » : `10,50  200` était lu 10 min à 50 W, sans erreur."""
+    """Virgule décimale : `10,50  200` était lu 10 min à 50 W, sans erreur."""
     data = b"[COURSE DATA]\n0,00\t200\n10,50\t200\n10,50\t100\n12\t100\n[END COURSE DATA]"
     assert format_bricks(decode_workout(data, ".erg").steps) == "10m30s@200W 1m30s@100W"
     mrc = b"[COURSE HEADER]\nFTP = 252,5\nMINUTES PERCENT\n[END COURSE HEADER]\n" \

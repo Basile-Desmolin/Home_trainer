@@ -1,6 +1,6 @@
 """Vignette au premier plan quand le logiciel passe en arrière-plan pendant une sortie (Qt hors écran).
 
-Étape 10 : ses valeurs viennent du catalogue d'indicateurs, choisies au clic droit, mode par mode,
+Ses valeurs viennent du catalogue d'indicateurs, choisies au clic droit, mode par mode,
 et gardées dans le profil."""
 
 import os
@@ -52,7 +52,7 @@ def test_mini_shows_only_in_background_during_a_ride(window):
 
 
 def test_mini_shows_target_power_and_remaining(window):
-    """Valeurs d'origine en séance : les mêmes qu'avant l'étape 10."""
+    """Valeurs d'origine en séance : celles d'avant le choix des valeurs."""
     window.session.start()
     window.session.tick(15)
     window.background = True

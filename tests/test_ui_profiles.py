@@ -68,7 +68,7 @@ def test_bike_weight_is_set_in_the_profile_dialog_and_used_by_the_window(app, bo
     dialog.accept()
     loaded = ProfileBook.load(tmp_path / "profils.json")
     assert [p.bike_kg for p in loaded.profiles] == [9.0, 12.5]
-    # Profil enregistré avant l'étape 7 (sans poids du vélo) : 9 kg.
+    # Profil enregistré avant la version 0.2 (sans poids du vélo) : 9 kg.
     data = json.loads((tmp_path / "profils.json").read_text(encoding="utf-8"))
     del data["profiles"][1]["bike_kg"]
     (tmp_path / "profils.json").write_text(json.dumps(data), encoding="utf-8")

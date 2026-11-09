@@ -1,4 +1,4 @@
-"""Sons du bip avant un changement de brique, fabriqués et joués par l'application (étape 11).
+"""Sons du bip avant un changement de brique, fabriqués et joués par l'application.
 
 Chaque son est un petit fichier WAV (mono, 16 bits, 44,1 kHz) écrit une fois dans le dossier
 temporaire, puis joué par `QSoundEffect` (QtMultimedia). Sans QtMultimedia, ou si le son ne se

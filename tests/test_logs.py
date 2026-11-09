@@ -1,4 +1,4 @@
-"""Journal des erreurs (audit, « Pas de fichier de log »)."""
+"""Journal des erreurs."""
 
 import logging
 import sys

@@ -1,6 +1,7 @@
 # Comparer deux `.fit` (application / Garmin)
 
-Scripts d'analyse de l'étape 1 (constat dans `docs/suivi/ROADMAP_ARCHIVE.md`). Ils lisent les `.fit` avec
+Scripts qui comparent une même sortie enregistrée par l'application et par un compteur Garmin
+(chrono, secondes doublées ou manquantes, puissance, bruit). Ils lisent les `.fit` avec
 `garmin-fit-sdk` et ont besoin de numpy et matplotlib (`.venv\Scripts\python.exe -m pip install numpy matplotlib`).
 Les fichiers de sorties restent hors du dépôt : on passe leur chemin en argument.
 

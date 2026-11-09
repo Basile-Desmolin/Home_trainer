@@ -43,7 +43,7 @@ def heart_ride():
 
 
 def test_heart_rate_zones_percent_of_max_and_calories():
-    """Étape 11g. FC max 190 : 130 bpm = 68 % (i1), 150 = 79 % (i2), 170 = 89 % (i3), 180 = 95 % (i4),
+    """FC max 190 : 130 bpm = 68 % (i1), 150 = 79 % (i2), 170 = 89 % (i3), 180 = 95 % (i4),
     185 = 97 % (i5) ; les 10 s sans FC ne vont dans aucune zone. FC moyenne 27 350 / 180 = 151,9 bpm,
     soit 80 % de la FC max ; max 185 = 97 %. 190 s à 200 W = 38 kJ ≈ 38 kcal."""
     r = summarize(heart_ride(), 250, "FC", 1_759_480_000, hr_max=190)
@@ -61,7 +61,7 @@ def test_heart_zones_survive_the_history_and_old_entries_still_load():
     again = RideSummary.from_dict(json.loads(json.dumps(r.to_dict())))
     assert again.hr_zone_s == [60, 60, 30, 20, 10] and again.hr_max == 190
     old = r.to_dict()
-    del old["hr_zone_s"], old["hr_max"]  # sortie enregistrée avant l'étape 11
+    del old["hr_zone_s"], old["hr_max"]  # sortie enregistrée avant la version 0.2
     before = RideSummary.from_dict(old)
     assert before.hr_zone_s == [] and before.hr_max is None
     broken = dict(r.to_dict(), hr_zone_s=[1, 2])  # liste incomplète (fichier modifié à la main)
@@ -133,7 +133,7 @@ def test_weeks_and_fitness():
 
 
 def test_unreadable_history_without_backup_is_empty_and_kept_aside(tmp_path):
-    """Audit, « Historique écrasé » : un fichier illisible était écrasé par la sortie suivante."""
+    """Historique écrasé : un fichier illisible était écrasé par la sortie suivante."""
     path = tmp_path / "historique.json"
     path.write_text("pas du json", encoding="utf-8")
     h = RideHistory.load(path)
@@ -171,7 +171,7 @@ def test_unreadable_ride_is_kept_as_is(tmp_path):
 
 
 def test_failed_history_write_is_reported_and_changes_nothing(tmp_path, monkeypatch):
-    """Audit, « Échec d'écriture de l'historique silencieux »."""
+    """Un échec d'écriture de l'historique passait sous silence."""
     path = tmp_path / "historique.json"
     h = RideHistory.load(path)
     h.add(summarize(ride([200] * 600), 250, "Un", at(date(2026, 10, 1))))

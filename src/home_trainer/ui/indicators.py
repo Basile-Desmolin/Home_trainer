@@ -107,7 +107,7 @@ class Indicator:
     modes: frozenset[Mode] = ALL_MODES  # écrans où l'indicateur a un sens
     gauge: str | None = None  # « zones » (puissance), « heart_zones » (FC, ESIE) ou « progress » : barre sous la valeur
     label: str = ""  # nom dans le menu du clic droit (par défaut, le titre en minuscules)
-    on_grid: bool = True  # proposé aux cartes des écrans ; sinon, vignette seulement (étape 10)
+    on_grid: bool = True  # proposé aux cartes des écrans ; sinon, vignette seulement
 
     @property
     def menu_name(self) -> str:

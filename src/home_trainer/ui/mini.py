@@ -2,7 +2,7 @@
 
 Ses valeurs viennent du catalogue d'indicateurs (`indicators.py`) : par défaut cible, puissance et temps
 restant ; au clic droit sur une valeur, on la remplace, on en ajoute une (5 au plus) ou on la retire.
-Le choix est propre à chaque mode (séance, libre, parcours) et gardé dans le profil (étape 10).
+Le choix est propre à chaque mode (séance, libre, parcours) et gardé dans le profil.
 Elle se déplace à la souris ; un clic (sans glisser) ramène la fenêtre principale."""
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .theme import LINE, MUTED, PANEL, number_font, set_style, ui_font
 MARGIN = 16  # écart au bord de l'écran, position par défaut (en haut à droite)
 DRAG_PX = 4  # au-delà, le clic devient un déplacement
 MAX_PLACES = 5
-# Valeurs d'origine de chaque mode : ce que montrait la vignette avant l'étape 10.
+# Valeurs d'origine de chaque mode : ce que montrait la vignette avant qu'on puisse les choisir.
 DEFAULTS: dict[Mode, list[str]] = {
     Mode.WORKOUT: ["target", "power", "brick_remaining"],
     Mode.FREE: ["target", "power", "elapsed"],
@@ -43,7 +43,7 @@ def foreground_window() -> tuple[int, bool] | None:
     None hors Windows (ou Qt hors écran) : on s'en tient alors à l'état de l'application tenu par Qt.
 
     Qt peut croire l'application active après le menu du clic droit de la vignette, alors que la fenêtre
-    principale est restée derrière : la vignette se cachait (étape 10)."""
+    principale est restée derrière : la vignette se cachait."""
     if sys.platform != "win32" or QGuiApplication.platformName() != "windows":
         return None
     import ctypes

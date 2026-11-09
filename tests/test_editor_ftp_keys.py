@@ -1,5 +1,5 @@
-"""Étape 8b : l'éditeur garde ce qu'il ne montre pas ; FTP de l'éditeur, --ftp et --weight ;
-raccourcis rendus après la case FTP ou Poids (audit, section « Autres »)."""
+"""L'éditeur garde ce qu'il ne montre pas ; FTP de l'éditeur, --ftp et --weight ;
+raccourcis rendus après la case FTP ou Poids."""
 
 import os
 
@@ -56,7 +56,7 @@ def test_unchanged_step_is_kept_whole_and_changed_one_keeps_intensity_and_notes(
 
 
 def test_editor_keeps_notes_zones_and_description_of_an_imported_zwo(app):
-    """Audit, « L'éditeur perd des informations »."""
+    """L'éditeur perdait des informations."""
     workout = decode_workout(ZWO, ".zwo")
     editor = WorkoutEditor(workout, 250)
     editor.tree.topLevelItem(1).setText(COL_POWER, "90")  # on ne touche qu'à la brique du milieu
@@ -78,7 +78,7 @@ def _window(app, tmp_path, ftp=250):
 
 
 def test_ftp_tried_in_the_editor_then_closed_is_not_applied(app, tmp_path, monkeypatch):
-    """Audit, « FTP modifiée à votre insu » : « Fermer » appliquait quand même la FTP au profil."""
+    """FTP modifiée à l'insu du cycliste : « Fermer » appliquait quand même la FTP au profil."""
     window, book, profile = _window(app, tmp_path)
 
     def try_ftp_then(result):
@@ -109,7 +109,7 @@ def test_command_line_ftp_and_weight_are_for_this_session_only(app, tmp_path):
 
 
 def test_shortcuts_work_at_launch_and_after_the_ftp_box(app, tmp_path):
-    """Audit, « Raccourcis bloqués » : le curseur restait dans la case FTP, Espace n'arrivait plus."""
+    """Raccourcis bloqués : le curseur restait dans la case FTP, Espace n'arrivait plus."""
     window, _book, _profile = _window(app, tmp_path)
     window.show()
     window.activateWindow()

@@ -1,9 +1,8 @@
-"""Constat de l'étape 1 (sortie du 7 novembre 2026, comparée au Garmin) : défauts d'enregistrement,
-corrigés à l'étape 1b.
+"""Défauts d'enregistrement trouvés en comparant une sortie à celle d'un compteur Garmin (même
+capteur de puissance), et corrigés : chrono, secondes doublées ou manquantes, 0 bpm, fausse pause,
+cadence fantôme.
 
 Chaque test décrit le comportement attendu, avec l'avant et l'après en docstring quand un calcul change.
-Un défaut constaté mais pas encore corrigé s'y ajoute marqué `xfail(strict=True)`, marque retirée à la
-correction.
 """
 
 import os

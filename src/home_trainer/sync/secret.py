@@ -1,12 +1,12 @@
 """Secrets de `comptes.json` (secret de l'appli API, jetons d'accès) chiffrés par Windows (DPAPI).
 
-Audit, « Jetons stockés en clair » : ils étaient lisibles par quiconque copiait le fichier.
+Auparavant stockés en clair, ils étaient lisibles par quiconque copiait le fichier.
 DPAPI chiffre avec la session Windows de l'utilisateur : le fichier copié sur un autre PC ou lu
 par un autre compte ne se déchiffre pas (il faut alors se reconnecter). Rien à installer : l'API
 de Windows est appelée par `ctypes`. Ailleurs que sous Windows, les valeurs restent en clair.
 
 Une valeur chiffrée s'écrit « dpapi:<base64> » ; une valeur sans ce préfixe (fichier d'avant
-l'étape 8) est lue telle quelle, puis réécrite chiffrée.
+la version 0.2) est lue telle quelle, puis réécrite chiffrée.
 """
 
 from __future__ import annotations

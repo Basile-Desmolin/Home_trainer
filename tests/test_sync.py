@@ -190,7 +190,7 @@ def test_nolio_upload_is_base64_json(book, tmp_path):
 
 
 def test_nolio_refusal_mentioning_import_is_not_a_success(book, tmp_path):
-    """Audit, « Faux succès Nolio » : un refus contenant « imported » comptait comme envoyé."""
+    """Faux succès Nolio : un refus contenant « imported » comptait comme envoyé."""
     connected(book, "nolio")
     path = tmp_path / "s.fit"
     path.write_bytes(b"FITDATA")
@@ -228,7 +228,7 @@ def test_outbox_sends_pending_and_retries_failures(book, outbox):
 
 
 def test_rejected_file_does_not_block_the_next_ones(book, outbox):
-    """Audit, « File d'envoi bloquée » : un fichier refusé bloquait toutes les sorties suivantes."""
+    """File d'envoi bloquée : un fichier refusé bloquait toutes les sorties suivantes."""
     connected(book, "strava")
     old = outbox.add(ride(start=T0), "Ancienne")
     new = outbox.add(ride(start=T0 + 86400), "Nouvelle")
@@ -244,7 +244,7 @@ def test_rejected_file_does_not_block_the_next_ones(book, outbox):
 
 
 def test_rides_from_before_the_connection_only_leave_on_request(book, outbox):
-    """Audit, « Arriéré envoyé d'un coup » : connecter un compte envoyait toutes les anciennes sorties."""
+    """Arriéré envoyé d'un coup : connecter un compte envoyait toutes les anciennes sorties."""
     old = outbox.add(ride(start=T0), "Ancienne")
     connected(book, "nolio").since = T0 + 86400  # connecté le lendemain
     new = outbox.add(ride(start=T0 + 2 * 86400), "Nouvelle")
@@ -278,7 +278,7 @@ def test_connection_time_is_set_once_and_cleared_on_disconnect(book):
 
 @pytest.mark.skipif(not secret.available(), reason="DPAPI : Windows seulement")
 def test_secrets_are_encrypted_in_the_file(book):
-    """Audit, « Jetons stockés en clair »."""
+    """Jetons stockés en clair."""
     connected(book, "strava")
     book.save()
     text = book.path.read_text(encoding="utf-8")
@@ -344,7 +344,7 @@ def test_network_failure_still_stops_the_service_for_this_pass(book, outbox):
 
 
 def test_renewed_token_is_saved_even_if_sending_stops(book, outbox):
-    """Audit, « Jetons enregistrés trop tard » : le jeton renouvelé n'était gardé qu'à la fin."""
+    """Jetons enregistrés trop tard : le jeton renouvelé n'était gardé qu'à la fin."""
     a = connected(book, "strava")
     a.expires_at = 0
     outbox.add(ride(start=T0), "A")

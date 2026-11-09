@@ -55,7 +55,7 @@ class Sample:
     position_s: float | None = None  # place sur l'axe de la séance (diffère de `t` après une brique passée)
     balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
     manual_lap: int = 0  # tours manuels (touche Tab) avant cette mesure : un tour de plus dans le .fit
-    # Parcours GPX seulement (étape 12) : place sur la trace, altitude lissée, D+ et D− depuis le départ.
+    # Parcours GPX seulement : place sur la trace, altitude lissée, D+ et D− depuis le départ.
     lat: float | None = None
     lon: float | None = None
     altitude_m: float | None = None
@@ -159,7 +159,7 @@ class WorkoutSession(_LiveStatsMixin):
             self._finish()
 
     def previous_step(self) -> None:
-        """Revient à la brique précédente (saut accidentel, étape 11) : reprise là où elle a été
+        """Revient à la brique précédente (saut accidentel) : reprise là où elle a été
         quittée si elle a été passée avant son terme, sinon à son début. Le temps écoulé continue ;
         le .fit ouvre un nouveau tour (le numéro de brique change). Sur la première brique : elle
         recommence."""
@@ -178,7 +178,7 @@ class WorkoutSession(_LiveStatsMixin):
         self.step_elapsed_s = done if seg.duration_s and done < seg.duration_s - 1 else 0.0
 
     def restart_step(self) -> None:
-        """Recommence la brique en cours à son début (étape 11). Le temps écoulé continue ; le .fit
+        """Recommence la brique en cours à son début. Le temps écoulé continue ; le .fit
         ouvre un nouveau tour, comme la touche Tab."""
         if self.state is State.FINISHED:
             return
@@ -235,9 +235,9 @@ class WorkoutSession(_LiveStatsMixin):
         """Mesures placées sur l'axe de la séance, pour le graphique, en tronçons roulés d'une
         traite : passer une brique avant son terme fait sauter l'axe sans faire avancer le temps
         écoulé, et ouvre un nouveau tronçon (rien n'a été roulé sur la partie sautée). Revenir en
-        arrière (brique précédente ou recommencée, étape 11) ouvre aussi un tronçon.
+        arrière (brique précédente ou recommencée) ouvre aussi un tronçon.
 
-        Étape 9 : tenu au fil des mesures (seules les nouvelles sont placées) ; recalculé en entier
+        Tenu au fil des mesures (seules les nouvelles sont placées) ; recalculé en entier
         si la liste a été remplacée ou raccourcie. Le résultat est partagé : ne pas le modifier."""
         samples = self.samples
         n, runs = 0, []
@@ -358,7 +358,7 @@ class FreeRideSession(_LiveStatsMixin):
         self.after: WorkoutSession | None = None  # séance dont ce mode libre est la suite (même fichier)
 
     def continue_from(self, workout: WorkoutSession) -> None:
-        """Suite d'une séance finie, dans le même fichier (étape 11) : ses mesures sont reprises (même
+        """Suite d'une séance finie, dans le même fichier : ses mesures sont reprises (même
         liste, donc même secours), le temps continue, et le mode libre forme un tour à part."""
         self.samples = workout.samples
         self.elapsed_s = workout.elapsed_s
