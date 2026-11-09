@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, Q
 
 from .gauges import ZoneBar
 from .indicators import CATALOG, Mode, RideView
-from .theme import HEART_ZONES, TEXT, number_font, tinted_card
+from .theme import HEART_ZONES, TEXT, number_font, set_style, tinted_card
 
 # Unité détachée de la valeur et affichée en petit : « 238 W » → « 238 » + « W ».
 UNITS = ("W", "W/kg", "km", "%", "bpm", "rpm", "km/h", "tr/min")
@@ -62,7 +62,7 @@ class Metric(QFrame):
         self.body.addWidget(widget)
 
     def set_color(self, color: str | QColor) -> None:
-        self.value.setStyleSheet(f"color: {QColor(color).name()}; background: transparent;")
+        set_style(self.value, f"color: {QColor(color).name()}; background: transparent;")
 
     def set_tint(self, color: str | QColor | None) -> None:
         """Teinte la carte (zone de puissance en cours) ; None : carte neutre."""

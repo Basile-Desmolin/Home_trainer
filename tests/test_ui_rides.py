@@ -330,11 +330,50 @@ def test_smooth_keeps_gaps_and_steadies_heart_rate():
 def test_trace_draws_one_point_per_pixel():
     from home_trainer.ui.chart import trace
     points = [(t / 4, 120.0 + t % 2) for t in range(400)]  # 4 mesures par pixel
-    path = trace(points, lambda t: t, lambda v: v)
-    assert path.elementCount() == 100
-    assert all(abs(path.elementAt(i).y - 120.5) < 1e-9 for i in range(path.elementCount()))
+    lines = trace(points, lambda t: t, lambda v: v)
+    assert len(lines) == 1 and len(lines[0]) == 100
+    assert all(abs(q.y() - 120.5) < 1e-9 for q in lines[0])
+    assert [q.x() for q in lines[0][:2]] == [0.375, 1.375]  # moyenne des 4 mesures du pixel
+    # Un trou du capteur coupe la courbe : deux morceaux, rien ne relie 10 à 30.
     gap = trace([(0, 1.0), (1, 1.0), (2, None), (3, 1.0), (4, 1.0)], lambda t: t * 10, lambda v: v)
-    assert [gap.elementAt(i).isMoveTo() for i in range(gap.elementCount())] == [True, False, True, False]
+    assert [[q.x() for q in line] for line in gap] == [[0, 10], [30, 40]]
+    assert trace([(0, None)], lambda t: t, lambda v: v) == []
+
+
+def test_stroke_draws_the_same_curve_as_a_single_path(app):
+    """Étape 9 : les segments séparés (bouts arrondis) donnent le même dessin qu'un chemin d'un tenant."""
+    import math
+
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
+
+    from home_trainer.ui.chart import stroke
+    line = [QPointF(5 + i * 3, 50 + 30 * math.sin(i / 3)) for i in range(60)]
+    images = []
+    for draw in ("path", "segments"):
+        img = QImage(200, 100, QImage.Format_ARGB32)
+        img.fill(Qt.black)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#ffffff"), 2)
+        if draw == "path":
+            pen.setJoinStyle(Qt.RoundJoin)
+            pen.setCapStyle(Qt.RoundCap)
+            path = QPainterPath(line[0])
+            for q in line[1:]:
+                path.lineTo(q)
+            p.setPen(pen)
+            p.drawPath(path)
+        else:
+            stroke(p, pen, [line])
+        p.end()
+        images.append(img)
+    path, segments = ([QColor(img.pixel(x, y)).red() for x in range(200) for y in range(100)] for img in images)
+    lit = sum(a > 128 for a in path)
+    # Même empreinte : aucun pixel allumé d'un côté et éteint de l'autre.
+    assert lit > 300 and not any((a > 128 and b < 32) or (b > 128 and a < 32) for a, b in zip(path, segments))
+    # Aux jonctions, les bords anticrénelés se superposent : à peine plus d'encre (mesuré : +2,5 %).
+    assert abs(sum(segments) - sum(path)) <= 0.05 * sum(path)
 
 
 def test_stopping_mid_ride_asks_first_and_cancel_keeps_riding(window):

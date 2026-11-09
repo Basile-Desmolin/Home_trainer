@@ -10,17 +10,19 @@ porte la logique, testée sans Qt).
 
 from __future__ import annotations
 
+import bisect
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from .chart import (ACCENT, DEFAULT_CURVES, DEFAULT_FTP, LABELS_MARGIN, MUTED, TEXT, draw_curves,
-                    draw_cursor, draw_power, draw_watts_axis, hms, paint_panel, zone_color)
+from .chart import (ACCENT, DEFAULT_CURVES, DEFAULT_FTP, LABELS_MARGIN, MUTED, TEXT, TimeAxis, draw_curves,
+                    draw_cursor, draw_power, draw_watts_axis, hms, paint_panel, traced_runs, zone_color)
 from .indicators import Mode, RideView
 from .metric import MetricGrid, Slot
 from .session import FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, State
-from .theme import hint_label, icon, keycaps, number_font, zone_index
+from .theme import hint_label, icon, keycaps, number_font, set_icon, set_style, zone_index
 
 BIG_STEP_W = 25
 BIG_STEP_PCT = 2.0
@@ -36,6 +38,18 @@ def grade_text(grade_pct: float) -> str:
 
 def grade_color(grade_pct: float) -> QColor:
     return QColor(next(color for limit, color in GRADES if grade_pct < limit))
+
+
+def _time(sample) -> float:
+    return sample.t
+
+
+def window_samples(samples: list, start: float) -> list:
+    """Mesures à partir de `start` : début trouvé directement (étape 9), sans parcourir toute la
+    sortie (les mesures sont dans l'ordre du temps)."""
+    return samples[bisect.bisect_left(samples, start, key=_time):]
+
+
 WINDOW_S = 600  # la courbe montre les 10 dernières minutes
 # Cartes du catalogue d'indicateurs ; la consigne occupe le milieu (lignes 0 et 1, colonnes 1 et 2).
 SLOTS = [Slot("power", 0, 0, 52), Slot("heart", 0, 3, 40), Slot("cadence", 1, 0, 30), Slot("elapsed", 1, 3, 30)]
@@ -68,7 +82,7 @@ class FreeRideChart(QWidget):
                       self.height() - margin_t - margin_b)
         end = max(s.elapsed_s, self.window_s)
         start = end - self.window_s
-        samples = [x for x in s.samples if x.t >= start]
+        samples = window_samples(s.samples, start)
         erg = s.mode is FreeMode.ERG
         peak = max([x.power_w for x in samples] + [x.target_w or 0 for x in samples]
                    + [s.target_w if erg else 0, ftp]) * 1.15
@@ -76,8 +90,7 @@ class FreeRideChart(QWidget):
         grades = [x.grade_pct for x in samples if x.grade_pct is not None] + ([] if erg else [s.grade_pct])
         g_lo, g_hi = min(grades + [0.0]) - 2, max(grades + [10.0])
 
-        def x(t: float) -> float:
-            return area.left() + (t - start) / self.window_s * area.width()
+        x = TimeAxis(area.left(), start, area.width() / self.window_s)
 
         def y(w: float) -> float:
             return area.bottom() - w / peak * area.height()
@@ -118,7 +131,7 @@ class FreeRideChart(QWidget):
                        grade_text(s.grade_pct))
 
         # Puissance réalisée.
-        draw_power(p, samples, x, y)
+        draw_power(p, traced_runs(None, "power", [samples], x), y)
 
         # Cadence, cardio, vitesse (au choix), chacune sur son échelle, valeur au bout.
         draw_curves(p, area, [samples], x, self.curves)
@@ -253,7 +266,7 @@ class FreeRidePanel(QWidget):
         if "power" in self.cards:  # la place a pu recevoir un autre indicateur
             self.cards["power"].set_tint(color if session.state is State.RUNNING else None)
         dim = erg and zone_index(session.target_w, ftp) == 0  # récup (grise) : chiffres en blanc
-        self.target_label.setStyleSheet(f"color: {TEXT if dim else color.name()};")
+        set_style(self.target_label, f"color: {TEXT if dim else color.name()};")
         self._set_mode_labels(session.mode)
         if erg:
             self.target_label.setText(f"{session.target_w} W")
@@ -271,5 +284,5 @@ class FreeRidePanel(QWidget):
         }.get(session.state, ""))
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre"}.get(session.state,
                                                                                          "Démarrer"))
-        self.play_button.setIcon(icon("pause" if session.state is State.RUNNING else "play", "#18191c"))
+        set_icon(self.play_button, "pause" if session.state is State.RUNNING else "play", "#18191c")
         self.chart.update()

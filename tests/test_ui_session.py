@@ -166,3 +166,32 @@ def test_skipped_brick_moves_chart_samples_with_the_workout():
     s.tick(1)
     s.record(220)
     assert [[x.t for x in run] for run in s.chart_runs] == [[10], [65, 66]]
+
+
+def test_chart_runs_follow_new_samples_without_recomputing():
+    """Étape 9 : les tronçons du graphique sont prolongés à chaque mesure (même résultat qu'un calcul
+    complet), et recalculés si la liste des mesures est remplacée ou raccourcie."""
+    s = make()
+
+    def fresh():
+        s._runs_cache = None
+        return [[(x.t, x.power_w) for x in run] for run in s.chart_runs]
+
+    s.start()
+    seen = []
+    for i in range(30):
+        s.tick(1)
+        s.record(100 + i)
+        if i == 9:
+            s.next_step()  # brique passée : nouveau tronçon
+        runs = s.chart_runs
+        seen.append([[(x.t, x.power_w) for x in run] for run in runs])
+    assert seen[-1] == fresh() and len(seen[-1]) == 2
+    first = s.chart_runs[0]
+    s.tick(1)
+    s.record(200)
+    assert s.chart_runs[0] is first  # prolongé, pas recalculé
+    del s.samples[-5:]  # liste raccourcie
+    assert [[(x.t, x.power_w) for x in run] for run in s.chart_runs] == fresh()
+    s.samples = list(s.samples[:3])  # liste remplacée
+    assert [[x.t for x in run] for run in s.chart_runs] == [[1, 2, 3]]

@@ -55,7 +55,7 @@ from ..profiles import (MAX_BIKE_KG, MIN_BIKE_KG, SPEED_APP, SPEED_TRAINER, Prof
 from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
-                       Trainer, open_heart_rate_sensor, open_power_meter, open_zwift_click)
+                       Trainer, open_heart_rate_sensor, open_power_meter, open_zwift_click, stop_all)
 from ..sensors.trainer import DEFAULT_BIKE_KG
 from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
@@ -79,8 +79,8 @@ from .rescue import (DISCARD as RESCUE_DISCARD, RESCUE_EVERY_S, SAVE as RESCUE_S
 from .power import (SMOOTHING_CHOICES_S, PowerAverage, PowerSource, Reading, SimulatedTrainer, open_power_source,
                     next_speed_kmh)
 from .route_ride import RoutePanel, km_text, route_grade_color
-from .theme import (GOOD, OFF, WAIT, dot, hint_label, icon, install, keycaps, number_font, pill, zone_index,
-                    zone_label)
+from .theme import (GOOD, OFF, WAIT, dot, hint_label, icon, install, keycaps, number_font, pill, set_icon, set_style,
+                    zone_index, zone_label)
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
                       FreeRideSession, RouteSession, SecondSampler, State, WorkoutSession, brick_summary,
                       ride_points, ride_title)
@@ -951,15 +951,13 @@ class MainWindow(QMainWindow):
         self.end_ride(self.free, send=False)
         if self.route is not None:
             self.end_ride(self.route, send=False)
+        # Étape 9 : la fenêtre disparaît tout de suite. Les capteurs s'arrêtent ensemble (3 s au plus en
+        # tout, au lieu de 3 s chacun, home trainer libéré d'abord), puis l'envoi de la dernière sortie
+        # finit en arrière-plan (`CLOSE_SEND_WAIT_S` au plus ; sinon il repart au prochain lancement).
+        self.hide()
+        stop_all([self.heart_rate, self.power_meter, self.click,
+                  self.source if isinstance(self.source, Trainer) else None])
         self.send_rides(wait_s=CLOSE_SEND_WAIT_S)
-        if self.heart_rate is not None:
-            self.heart_rate.stop()
-        if self.power_meter is not None:
-            self.power_meter.stop()
-        if self.click is not None:
-            self.click.stop()
-        if isinstance(self.source, Trainer):
-            self.source.stop()
         super().closeEvent(event)
 
     def _open_file(self) -> None:
@@ -1510,8 +1508,17 @@ class MainWindow(QMainWindow):
                 self._ask_at_end(session)
         # Pas de veille tant qu'une sortie est en cours, même en pause.
         self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
-        self._refresh()
+        # Fenêtre réduite : rien n'est à l'écran, l'affichage attend (étape 9). L'enregistrement, le
+        # secours et la vignette continuent ; la fenêtre rouverte est remise à jour aussitôt (`changeEvent`).
+        if not self.isMinimized():
+            self._refresh()
         self._refresh_mini()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange and not self.isMinimized():
+            # Différé d'un tour : la fenêtre peut changer d'état pendant sa construction.
+            QTimer.singleShot(0, lambda: None if self._closed or self.isMinimized() else self._refresh())
 
     def _watch_brick(self) -> None:
         """Séance : bip aux 3 dernières secondes d'une brique, bilan de la brique quand elle change."""
@@ -1699,11 +1706,11 @@ class MainWindow(QMainWindow):
             self.zone_tag.hide()
         else:
             self.zone_tag.setText(f"{zone_label(target, self.ftp)}  ·  {target / self.ftp * 100:.0f} % FTP")
-            self.zone_tag.setStyleSheet(pill(color))
+            set_style(self.zone_tag, pill(color))
             self.zone_tag.show()
         self.erg_button.setChecked(s.erg)
         self.erg_button.setText("ERG on" if s.erg else "ERG off")
-        self.erg_button.setIcon(icon("check", "#6fd3a3") if s.erg else QIcon())
+        set_icon(self.erg_button, "check" if s.erg else None, "#6fd3a3")
         remaining = s.step_remaining_s
         seg = s.segment
         fraction = (remaining / seg.duration_s if remaining is not None and seg is not None and seg.duration_s
@@ -1712,7 +1719,7 @@ class MainWindow(QMainWindow):
         self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick,
                            color or MUTED)
         self.intensity_label.setText(f"{s.intensity_pct} %")
-        self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
+        set_style(self.intensity_label, f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
         note = self._brick_note if self._brick_note and time.monotonic() < self._brick_note[1] else None
         countdown = self._countdown_s()
         if s.state is State.FINISHED:
@@ -1727,12 +1734,12 @@ class MainWindow(QMainWindow):
             self.next_label.setText(f"{when} : {describe_segment(s.next_segment, self.ftp, s.intensity_pct)}"
                                     if s.next_segment else
                                     "Dernière brique" if countdown is None else f"Fin dans {countdown} s")
-        self.current_label.setStyleSheet(f"color: {ACCENT};" if note else "")
-        self.next_label.setStyleSheet(f"color: {ACCENT}; font-weight: 600;" if countdown is not None else "")
+        set_style(self.current_label, f"color: {ACCENT};" if note else "")
+        set_style(self.next_label, f"color: {ACCENT}; font-weight: 600;" if countdown is not None else "")
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
-        self.play_button.setIcon(icon("pause" if s.state is State.RUNNING else "play", "#18191c"))
-        self.chart.update()
+        set_icon(self.play_button, "pause" if s.state is State.RUNNING else "play", "#18191c")
+        self.chart.refresh()
 
     # --- vignette en arrière-plan ------------------------------------------
 

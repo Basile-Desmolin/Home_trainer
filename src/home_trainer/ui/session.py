@@ -118,6 +118,7 @@ class WorkoutSession(_LiveStatsMixin):
         self.exported = False  # sortie déjà enregistrée en .fit (et envoyée)
         self.export_asked = False  # fenêtre d'enregistrement déjà ouverte à la fin
         self._changes: list[_BrickChange] = []  # changements de brique, du premier au dernier
+        self._runs_cache: tuple | None = None  # tronçons du graphique déjà placés (voir `chart_runs`)
 
     # --- commandes -------------------------------------------------------
 
@@ -199,16 +200,26 @@ class WorkoutSession(_LiveStatsMixin):
     def chart_runs(self) -> list[list[Sample]]:
         """Mesures placées sur l'axe de la séance, pour le graphique, en tronçons roulés d'une
         traite : passer une brique avant son terme fait sauter l'axe sans faire avancer le temps
-        écoulé, et ouvre un nouveau tronçon (rien n'a été roulé sur la partie sautée)."""
-        runs: list[list[Sample]] = []
-        previous: Sample | None = None
-        for x in self.samples:
+        écoulé, et ouvre un nouveau tronçon (rien n'a été roulé sur la partie sautée).
+
+        Étape 9 : tenu au fil des mesures (seules les nouvelles sont placées) ; recalculé en entier
+        si la liste a été remplacée ou raccourcie. Le résultat est partagé : ne pas le modifier."""
+        samples = self.samples
+        n, runs = 0, []
+        cache = self._runs_cache
+        if cache is not None:
+            seen, done, last, kept = cache
+            if seen is samples and len(samples) >= done and (not done or samples[done - 1] is last):
+                n, runs = done, kept
+        previous: Sample | None = samples[n - 1] if n else None
+        for x in samples[n:]:
             jumped = (previous is not None and x.position_s is not None and previous.position_s is not None
                       and x.position_s - previous.position_s > x.t - previous.t + 1.0)
             if not runs or jumped:
                 runs.append([])
             runs[-1].append(x if x.position_s is None else replace(x, t=x.position_s))
             previous = x
+        self._runs_cache = (samples, len(samples), samples[-1] if samples else None, runs)
         return runs
 
     @property

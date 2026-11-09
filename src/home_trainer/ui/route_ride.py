@@ -22,7 +22,7 @@ from .free_ride import grade_color, grade_text
 from .indicators import Mode, RideView, km_text
 from .metric import MetricGrid, Slot
 from .session import DIFFICULTY_STEP, RouteSession, State
-from .theme import hint_label, icon, keycaps, number_font
+from .theme import hint_label, icon, keycaps, number_font, set_icon, set_style
 
 AHEAD_M = 2000.0  # le zoom montre les 2 km à venir
 BEHIND_M = 200.0
@@ -391,12 +391,12 @@ class RoutePanel(QWidget):
 
         grade = session.grade_pct
         self.grade_label.setText(grade_text(grade))
-        self.grade_label.setStyleSheet(f"color: {route_grade_color(grade).name()};")
+        set_style(self.grade_label, f"color: {route_grade_color(grade).name()};")
         sent = session.trainer_grade_pct
         self.grade_sub.setText(f"altitude {session.elevation_m:.0f} m"
                                + ("" if sent == grade else f" · home trainer {grade_text(sent)}"))
         self.difficulty_label.setText(f"difficulté {session.difficulty_pct} %")
-        self.difficulty_label.setStyleSheet(f"color: {TEXT if session.difficulty_pct == 100 else ACCENT};")
+        set_style(self.difficulty_label, f"color: {TEXT if session.difficulty_pct == 100 else ACCENT};")
 
         self.status_label.setText({
             State.READY: "Démarrez et pédalez : la pente de la route arrive dans le home trainer.",
@@ -407,6 +407,6 @@ class RoutePanel(QWidget):
         }.get(session.state, ""))
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(session.state, "Démarrer"))
-        self.play_button.setIcon(icon("pause" if session.state is State.RUNNING else "play", "#18191c"))
+        set_icon(self.play_button, "pause" if session.state is State.RUNNING else "play", "#18191c")
         for chart in (self.ahead, self.profile, self.map):
             chart.update()

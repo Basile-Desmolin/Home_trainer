@@ -10,7 +10,7 @@ from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QVBoxLayout, QWidget
 
-from .theme import LINE, MUTED, PANEL, TEXT, number_font, ui_font
+from .theme import LINE, MUTED, PANEL, TEXT, number_font, set_style, ui_font
 
 MARGIN = 16  # écart au bord de l'écran, position par défaut (en haut à droite)
 DRAG_PX = 4  # au-delà, le clic devient un déplacement
@@ -82,7 +82,7 @@ class MiniWindow(QWidget):
             if value.text() != text:
                 value.setText(text)
         color = QColor(info.color).name() if info.color is not None else TEXT
-        self.values[0].setStyleSheet(f"color: {color};")
+        set_style(self.values[0], f"color: {color};")
         self.status.setText(info.status)
         self.status.setVisible(bool(info.status))
         self.adjustSize()

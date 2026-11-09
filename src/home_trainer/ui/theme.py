@@ -127,6 +127,29 @@ def keycaps(text: str) -> str:
     return f"<span style='color:{MUTED};'>{''.join(out)}</span>"
 
 
+def set_style(widget, sheet: str) -> None:
+    """Feuille de style d'un widget, posée seulement si elle change. Étape 9 : posée à chaque
+    rafraîchissement (5 fois par seconde), elle refaisait le style du widget et le redessinait."""
+    if widget.styleSheet() != sheet:
+        widget.setStyleSheet(sheet)
+
+
+def set_icon(widget, name: str | None, color: str = TEXT) -> None:
+    """Icône dessinée (`icon`) d'un bouton, None : aucune ; redessinée seulement si elle change."""
+    _set_icon(widget, (name, color), lambda: icon(name, color) if name else QIcon())
+
+
+def set_dot(widget, color: str) -> None:
+    """Pastille d'état (`dot`) d'un bouton, redessinée seulement si sa couleur change."""
+    _set_icon(widget, ("dot", color), lambda: dot(color))
+
+
+def _set_icon(widget, key: tuple, make) -> None:
+    if getattr(widget, "_icon_key", None) != key:
+        widget.setIcon(make())
+        widget._icon_key = key
+
+
 def dot(color: str, size: int = 10) -> QIcon:
     """Pastille d'état (vert : connecté, orange : en cours, gris : rien)."""
     pix = QPixmap(size * 2, size * 2)
