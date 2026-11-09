@@ -16,11 +16,15 @@ from .base import SensorState
 from .ble import BleDevice, _bleak, advertises, scan_async
 from .trainer import (BLE_CYCLING_POWER_MEASUREMENT, BLE_FTMS_CONTROL_POINT, BLE_FTMS_SERVICE, BLE_FTMS_STATUS,
                       BLE_INDOOR_BIKE_DATA, BLE_TRAINER_SERVICES, BLE_WAHOO_CONTROL_POINT, BLE_WAHOO_SERVICE,
-                      FTMS_REQUEST_CONTROL, FTMS_SPIN_DOWN_CONTROL, CyclingPowerDecoder, Trainer, TargetThrottle,
-                      WAHOO_UNLOCK, ftms_command_for, ftms_request_control, ftms_spin_down, ftms_start,
-                      parse_ftms_response, parse_indoor_bike_data, wahoo_commands_for, wahoo_init_spindown)
+                      FTMS_CONTROL_NOT_PERMITTED, FTMS_REQUEST_CONTROL, FTMS_SPIN_DOWN_CONTROL, CyclingPowerDecoder,
+                      IndoorBikeData, Trainer, TargetThrottle, WAHOO_UNLOCK, ftms_command_for, ftms_request_control,
+                      ftms_spin_down, ftms_start, parse_ftms_response, wahoo_commands_for, wahoo_init_spindown)
 
 log = logging.getLogger(__name__)
+
+MAX_WRITE_FAILURES = 3  # consignes refusées de suite avant de se reconnecter
+WRITE_RETRY_S = 1.0  # attente avant de renvoyer une consigne refusée
+CONTROL_RETRY_S = 2.0  # au plus une nouvelle demande de contrôle FTMS toutes les 2 s
 
 
 def scan_trainers(timeout: float = 5.0) -> list[BleDevice]:
@@ -77,9 +81,12 @@ class BleTrainer(Trainer):
         loop = asyncio.get_running_loop()
         control_granted: asyncio.Future = loop.create_future()
         ftms_spindown = True  # passe à False si le home trainer ne calibre pas en FTMS
+        control_lost = False  # consigne refusée faute de contrôle (home trainer réinitialisé) : le redemander
+        control_asked_at = -1e9  # dernière demande de contrôle après une perte (au plus une par CONTROL_RETRY_S)
+        bike_data = IndoorBikeData()  # trames découpées : un champ absent reprend sa dernière valeur
 
         def on_control_point(_char, data: bytearray) -> None:
-            nonlocal ftms_spindown
+            nonlocal ftms_spindown, control_lost
             response = parse_ftms_response(data)
             if response is None:
                 return
@@ -94,10 +101,15 @@ class BleTrainer(Trainer):
             elif not response.ok:
                 log.warning("%s : commande %#04x refusée (%s)", self.name, response.request, response.message)
                 self._set_state(self.state, f"consigne refusée : {response.message}")
+                if response.result == FTMS_CONTROL_NOT_PERMITTED and response.request != FTMS_REQUEST_CONTROL:
+                    control_lost = True
+                    if time.monotonic() - control_asked_at >= CONTROL_RETRY_S:
+                        # La consigne repart au tour suivant, contrôle redemandé avant ; par la boucle, pour
+                        # passer après `_target_sent` quand le refus arrive pendant l'écriture.
+                        loop.call_soon_threadsafe(self.throttle.reset)
 
         await client.start_notify(BLE_FTMS_CONTROL_POINT, on_control_point)
-        await client.start_notify(BLE_INDOOR_BIKE_DATA,
-                                  lambda _c, data: self._publish(parse_indoor_bike_data(data)))
+        await client.start_notify(BLE_INDOOR_BIKE_DATA, lambda _c, data: self._publish(bike_data.feed(data)))
         try:  # état de la calibration ; facultatif dans la norme
             await client.start_notify(BLE_FTMS_STATUS, lambda _c, data: self.calibration.on_ftms_status(data))
         except Exception:  # noqa: BLE001
@@ -113,6 +125,15 @@ class BleTrainer(Trainer):
         self._set_state(SensorState.CONNECTED, "FTMS")
 
         async def send(target: float | None) -> None:
+            nonlocal control_lost, control_asked_at
+            now = time.monotonic()
+            if control_lost and now - control_asked_at >= CONTROL_RETRY_S:
+                # Après une réinitialisation, le home trainer ignore ERG et pente tant qu'on ne
+                # redemande pas le contrôle (audit, « Contrôle du home trainer jamais redemandé »).
+                control_lost, control_asked_at = False, now
+                log.info("%s : contrôle FTMS perdu, redemandé", self.name)
+                await client.write_gatt_char(BLE_FTMS_CONTROL_POINT, ftms_request_control(), response=True)
+                await client.write_gatt_char(BLE_FTMS_CONTROL_POINT, ftms_start(), response=True)
             await client.write_gatt_char(BLE_FTMS_CONTROL_POINT, ftms_command_for(target), response=True)
 
         unlocked = False
@@ -154,7 +175,12 @@ class BleTrainer(Trainer):
         await self._control_loop(send, stop, disconnected, calibrate)
 
     async def _control_loop(self, send, stop: threading.Event, disconnected: asyncio.Event, calibrate) -> None:
-        """Transmet les consignes (ou lance une calibration) jusqu'à l'arrêt ou la déconnexion."""
+        """Transmet les consignes (ou lance une calibration) jusqu'à l'arrêt ou la déconnexion.
+
+        Une écriture refusée ne coupe plus la connexion (audit : environ 15 s sans données ni
+        consigne) : la consigne repart au bout de `WRITE_RETRY_S` ; seulement après
+        `MAX_WRITE_FAILURES` échecs de suite, on se reconnecte."""
+        failures, retry_at = 0, 0.0
         while not stop.is_set() and not disconnected.is_set():
             if self._calibration_due():
                 try:
@@ -162,9 +188,23 @@ class BleTrainer(Trainer):
                 except Exception as e:  # noqa: BLE001 (commande refusée par le home trainer)
                     self.calibration.fail(f"calibration impossible : {e}")
             due, target = self._pending_target()
-            if due:
-                await send(target)
-                self._target_sent(target)
+            if due and time.monotonic() >= retry_at:
+                try:
+                    await send(target)
+                except Exception as e:  # noqa: BLE001 (écriture refusée ou sans réponse)
+                    failures += 1
+                    if disconnected.is_set():
+                        break
+                    if failures >= MAX_WRITE_FAILURES:
+                        raise RuntimeError(f"consigne refusée {failures} fois de suite ({e})") from e
+                    log.warning("%s : consigne non transmise (%s), nouvel essai", self.name, e)
+                    self._set_state(self.state, "consigne non transmise, nouvel essai")
+                    retry_at = time.monotonic() + WRITE_RETRY_S
+                else:
+                    if failures:
+                        self._set_state(self.state, self.protocol or "")
+                    failures = 0
+                    self._target_sent(target)
             await asyncio.sleep(0.2)
         self.calibration.cancel()
         if disconnected.is_set():

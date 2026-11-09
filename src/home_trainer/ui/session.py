@@ -57,6 +57,17 @@ class Sample:
     manual_lap: int = 0  # tours manuels (touche Tab) avant cette mesure : un tour de plus dans le .fit
 
 
+@dataclass(frozen=True)
+class _BrickChange:
+    """Changement de brique : temps écoulé à ce moment, et la brique quittée (numéro, consigne et
+    place sur l'axe de la séance à sa fin)."""
+
+    elapsed_s: float
+    index: int
+    target_w: float | None
+    position_s: float
+
+
 class _LiveStatsMixin:
     """Moyennes et max de la sortie en cours (voir `LiveStats`), et tours manuels, communs aux trois modes."""
 
@@ -106,6 +117,7 @@ class WorkoutSession(_LiveStatsMixin):
         self.samples: list[Sample] = []
         self.exported = False  # sortie déjà enregistrée en .fit (et envoyée)
         self.export_asked = False  # fenêtre d'enregistrement déjà ouverte à la fin
+        self._changes: list[_BrickChange] = []  # changements de brique, du premier au dernier
 
     # --- commandes -------------------------------------------------------
 
@@ -132,6 +144,8 @@ class WorkoutSession(_LiveStatsMixin):
         """Passe à la brique suivante (« tour »), indispensable pour une brique ouverte."""
         if self.state is State.FINISHED:
             return
+        # La brique quittée, pour les mesures de ses dernières secondes enregistrées après ce changement.
+        self._changes.append(_BrickChange(self.elapsed_s, self.index, self.target_w, self.position_s))
         self.index += 1
         self.step_elapsed_s = 0.0
         if self.index >= len(self.segments):
@@ -148,15 +162,27 @@ class WorkoutSession(_LiveStatsMixin):
                 self.elapsed_s += dt
                 return
             self.elapsed_s += remaining
+            self.step_elapsed_s += remaining  # fin de la brique : consigne et position de sa dernière seconde
             dt -= remaining
             self.next_step()
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
                at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
-        self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w, cadence_rpm, heart_rate_bpm,
-                                   None, speed_kmh, time.time() if at is None else at, self.index,
-                                   self.position_s, balance_left_pct, self.manual_lap))
+        """Enregistre la seconde de chrono qui finit à `t` (par défaut : maintenant).
+
+        Elle va à la brique en cours au milieu de cette seconde : la mesure de la seconde 600 d'une
+        brique de 10 min, enregistrée au tic qui passe à la brique suivante, reste dans la brique de
+        10 min (tour du .fit de 600 s, et non 599 s ; bilan « 10:00 »)."""
+        t = self.elapsed_s if t is None else t
+        index, target, position = self.index, self.target_w, self.position_s
+        for change in reversed(self._changes):
+            if change.elapsed_s <= t - 0.5:
+                break
+            index, target, position = change.index, change.target_w, change.position_s
+        self.samples.append(Sample(t, power_w, target, cadence_rpm, heart_rate_bpm, None, speed_kmh,
+                                   time.time() if at is None else at, index, position, balance_left_pct,
+                                   self.manual_lap))
 
     # --- lecture ---------------------------------------------------------
 

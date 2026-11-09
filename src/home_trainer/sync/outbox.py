@@ -14,6 +14,7 @@ import logging
 import os
 import secrets
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -107,17 +108,20 @@ class Outbox:
             self._write(data)
         return path
 
-    def pending(self, services: list[str], retry_rejected: bool = False) -> list[tuple[str, str]]:
+    def pending(self, services: list[str], retry_rejected: bool = False,
+                since: dict[str, float] | None = None) -> list[tuple[str, str]]:
         """(fichier, service) pas encore envoyés, des plus anciens aux plus récents.
 
-        Un fichier refusé par le service n'en fait partie qu'avec `retry_rejected` (envoi demandé)."""
+        Un fichier refusé par le service n'en fait partie qu'avec `retry_rejected` (envoi demandé).
+        `since` (service → heure de connexion) : une sortie commencée avant n'en fait pas partie."""
         out = []
         for name, entry in sorted(self.entries().items()):
             sent = entry.get("sent", {})
             if not (self.dir / name).exists():
                 continue
             out += [(name, s) for s in services if not sent.get(s, {}).get("ok")
-                    and (retry_rejected or not sent.get(s, {}).get("rejected"))]
+                    and (retry_rejected or not sent.get(s, {}).get("rejected"))
+                    and _start(entry) >= (since or {}).get(s, 0.0)]
         return out
 
     def mark(self, report: SendReport) -> None:
@@ -145,8 +149,21 @@ class Outbox:
         return report
 
 
+def _start(entry: dict) -> float:
+    """Heure de départ d'une sortie de la file (son identifiant pour Nolio) ; 0 si inconnue."""
+    try:
+        return float(entry.get("external_id") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def auto_services(book: AccountBook) -> list[str]:
     return [s for s in SERVICES if book[s].connected and book[s].auto]
+
+
+def connection_times(book: AccountBook) -> dict[str, float]:
+    """Heure de connexion de chaque compte : l'envoi automatique ne prend pas les sorties d'avant."""
+    return {s: book[s].since for s in SERVICES}
 
 
 def send_pending(outbox: Outbox, book: AccountBook, http: Http = urllib_http,
@@ -156,12 +173,14 @@ def send_pending(outbox: Outbox, book: AccountBook, http: Http = urllib_http,
     Les jetons renouvelés sont enregistrés après chaque fichier (et même si l'envoi
     s'interrompt). Un compte qui échoue (réseau, accès refusé) n'est pas retenté pour
     les fichiers suivants de ce passage ; un fichier refusé n'arrête pas les suivants,
-    et n'est renvoyé qu'avec `retry_rejected` (envoi demandé par l'utilisateur).
+    et n'est renvoyé qu'avec `retry_rejected` (envoi demandé par l'utilisateur). Les
+    sorties d'avant la connexion d'un compte ne partent aussi que sur demande.
     """
     services = {s: open_service(s, book[s], http) for s in auto_services(book)}
     reports, failed = [], set()
+    since = None if retry_rejected else connection_times(book)
     try:
-        for name, key in outbox.pending(list(services), retry_rejected):
+        for name, key in outbox.pending(list(services), retry_rejected, since):
             if key in failed or (only is not None and name != only):
                 continue
             report = outbox.send(name, services[key])
@@ -198,12 +217,14 @@ def start_connect(service: Service, port: int = CALLBACK_PORT) -> Authorization:
 
 
 def finish_connect(service: Service, book: AccountBook, auth: Authorization, code: str) -> None:
-    """Échange le code contre les jetons et les garde."""
+    """Échange le code contre les jetons et les garde, avec l'heure de connexion."""
     try:
         service.exchange_code(code, auth.redirect_uri)
     except SyncError as e:
         raise SyncError(f"{e} (URL de rappel envoyée : {auth.redirect_uri}, elle doit être exactement "
                         f"celle déclarée chez {service.label})") from e
+    if not service.account.since:
+        service.account.since = time.time()
     book.save()
 
 

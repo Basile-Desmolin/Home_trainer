@@ -8,12 +8,13 @@
 """
 
 from .accounts import Account, AccountBook
-from .outbox import (Authorization, Outbox, SendReport, auto_services, connect, finish_connect, send_pending,
-                     start_connect)
+from .outbox import (Authorization, Outbox, SendReport, auto_services, connect, connection_times, finish_connect,
+                     send_pending, start_connect)
 from .services import Nolio, Strava, UploadResult, open_service
 from .web import FileRejected, SyncError, parse_callback
 
 __all__ = ["Account", "AccountBook", "Authorization", "FileRejected", "Nolio", "Outbox", "SendReport", "Strava",
            "SyncError",
-           "UploadResult", "auto_services", "connect", "finish_connect", "open_service", "parse_callback",
+           "UploadResult", "auto_services", "connect", "connection_times", "finish_connect", "open_service",
+           "parse_callback",
            "send_pending", "start_connect"]

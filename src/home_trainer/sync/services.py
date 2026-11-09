@@ -203,7 +203,8 @@ class Nolio(Service):
         if r.ok:  # 202 : Nolio met le fichier dans sa file de traitement
             return UploadResult("https://www.nolio.io/", "envoyée")
         text = r.text().lower()
-        if r.status == 400 and any(word in text for word in ("already", "déjà", "imported")):
+        # Doublon seulement : un refus qui parle d'import (« could not be imported ») reste un refus.
+        if r.status == 400 and any(word in text for word in ("already", "déjà", "duplicate", "doublon")):
             return UploadResult("https://www.nolio.io/", "déjà présente sur Nolio")
         raise self._fail("envoi", r, file_level=True)
 

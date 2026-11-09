@@ -14,7 +14,9 @@ from home_trainer.bricks import parse_workout
 from home_trainer.formats.fit_activity import ActivityPoint, activity_file_name, encode_activity, summarize
 from home_trainer.sync import (AccountBook, Nolio, Outbox, Strava, SyncError, connect, finish_connect, parse_callback,
                                send_pending, start_connect)
-from home_trainer.sync.web import Response, local_callback, multipart, wait_for_code
+from home_trainer.sync import secret
+from home_trainer.sync.outbox import Authorization
+from home_trainer.sync.web import FileRejected, Response, local_callback, multipart, wait_for_code
 from home_trainer.ui.session import FreeMode, FreeRideSession, State, WorkoutSession, ride_points, ride_title
 
 T0 = 1_759_480_000  # 3 octobre 2025, 8 h 26 UTC
@@ -187,6 +189,17 @@ def test_nolio_upload_is_base64_json(book, tmp_path):
     assert payload["id_partner"] == "1759480000" and payload["title"] == "Mode libre"
 
 
+def test_nolio_refusal_mentioning_import_is_not_a_success(book, tmp_path):
+    """Audit, « Faux succès Nolio » : un refus contenant « imported » comptait comme envoyé."""
+    connected(book, "nolio")
+    path = tmp_path / "s.fit"
+    path.write_bytes(b"FITDATA")
+    with pytest.raises(FileRejected):
+        Nolio(book["nolio"], FakeHttp((400, {"detail": "File could not be imported"}))).upload(path, "t", "", "1")
+    duplicate = FakeHttp((400, {"detail": "This activity has already been imported"}))
+    assert Nolio(book["nolio"], duplicate).upload(path, "t", "", "1").message == "déjà présente sur Nolio"
+
+
 def test_nolio_token_uses_basic_auth(book):
     a = book["nolio"]
     a.client_id, a.client_secret = "id", "sec"
@@ -228,6 +241,77 @@ def test_rejected_file_does_not_block_the_next_ones(book, outbox):
     assert send_pending(outbox, book, FakeHttp()) == []
     reports = send_pending(outbox, book, FakeHttp((201, {"id": 3, "activity_id": 9})), retry_rejected=True)
     assert [(r.file, r.ok) for r in reports] == [(old.name, True)]
+
+
+def test_rides_from_before_the_connection_only_leave_on_request(book, outbox):
+    """Audit, « Arriéré envoyé d'un coup » : connecter un compte envoyait toutes les anciennes sorties."""
+    old = outbox.add(ride(start=T0), "Ancienne")
+    connected(book, "nolio").since = T0 + 86400  # connecté le lendemain
+    new = outbox.add(ride(start=T0 + 2 * 86400), "Nouvelle")
+    reports = send_pending(outbox, book, FakeHttp((202, {})))
+    assert [r.file for r in reports] == [new.name]
+    assert send_pending(outbox, book, FakeHttp()) == []  # l'ancienne ne part toujours pas d'elle-même
+    reports = send_pending(outbox, book, FakeHttp((202, {})), retry_rejected=True)  # bouton des comptes
+    assert [r.file for r in reports] == [old.name]
+
+
+def test_account_connected_before_step_8_sends_as_before(book, outbox):
+    connected(book, "nolio")  # since = 0 : comptes déjà connectés, rien ne change
+    old = outbox.add(ride(start=T0), "Ancienne")
+    assert [r.file for r in send_pending(outbox, book, FakeHttp((202, {})))] == [old.name]
+
+
+def test_connection_time_is_set_once_and_cleared_on_disconnect(book):
+    a = book["nolio"]
+    a.client_id, a.client_secret = "id", "sec"
+    auth = Authorization("https://x", "s", "http://localhost:8765/nolio")
+    token = (200, {"access_token": "a", "refresh_token": "r", "expires_in": 86400})
+    before = time.time()
+    finish_connect(Nolio(a, FakeHttp(token)), book, auth, "CODE")
+    first = a.since
+    assert first >= before
+    finish_connect(Nolio(a, FakeHttp(token)), book, auth, "CODE")  # jeton renouvelé : même heure
+    assert a.since == first and AccountBook.load(book.path)["nolio"].since == first
+    a.disconnect()
+    assert a.since == 0
+
+
+@pytest.mark.skipif(not secret.available(), reason="DPAPI : Windows seulement")
+def test_secrets_are_encrypted_in_the_file(book):
+    """Audit, « Jetons stockés en clair »."""
+    connected(book, "strava")
+    book.save()
+    text = book.path.read_text(encoding="utf-8")
+    assert '"secret"' not in text and '"tok"' not in text and '"ref"' not in text and "dpapi:" in text
+    loaded = AccountBook.load(book.path)["strava"]
+    assert (loaded.client_secret, loaded.access_token, loaded.refresh_token) == ("secret", "tok", "ref")
+    assert loaded.client_id == "123"  # l'identifiant n'est pas un secret
+
+
+@pytest.mark.skipif(not secret.available(), reason="DPAPI : Windows seulement")
+def test_old_plain_file_is_read_then_rewritten_encrypted(tmp_path):
+    path = tmp_path / "comptes.json"
+    path.write_text(json.dumps({"nolio": {"client_id": "id", "client_secret": "sec", "access_token": "tok",
+                                          "refresh_token": "ref"}}), encoding="utf-8")
+    book = AccountBook.load(path)
+    assert book["nolio"].connected and book["nolio"].refresh_token == "ref"
+    assert '"ref"' not in path.read_text(encoding="utf-8")
+    assert AccountBook.load(path)["nolio"].refresh_token == "ref"
+
+
+def test_unreadable_secret_and_unreadable_file(tmp_path):
+    path = tmp_path / "comptes.json"
+    # Chiffré ailleurs (autre PC) : illisible ici, le compte est à reconnecter, le reste demeure.
+    path.write_text(json.dumps({"strava": {"client_id": "id", "client_secret": "dpapi:AAAA",
+                                           "refresh_token": "dpapi:!!"}}), encoding="utf-8")
+    book = AccountBook.load(path)
+    assert (book["strava"].client_id, book["strava"].refresh_token, book["strava"].connected) == ("id", "", False)
+    # Fichier abîmé : gardé de côté à la première écriture, pas écrasé.
+    path.write_text('{"strava": {"client_id": "id", "cli', encoding="utf-8")
+    book = AccountBook.load(path)
+    book.save()
+    kept = list(tmp_path.glob("comptes.illisible-*.json"))
+    assert len(kept) == 1 and kept[0].read_text(encoding="utf-8").startswith('{"strava"')
 
 
 def test_http_4xx_on_upload_is_a_file_refusal_but_not_401_or_429(book, outbox):

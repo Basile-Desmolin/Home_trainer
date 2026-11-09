@@ -56,6 +56,55 @@ def test_brick_summary_text():
     assert brick_summary(w.samples, 5) is None
 
 
+def test_last_second_of_a_brick_stays_in_its_lap(app, tmp_path):
+    """Étape 8 : la mesure de la dernière seconde d'une brique allait à la brique suivante (enregistrée
+    après le tic qui change de brique). Séance 1 min à 200 W puis 30 s à 150 W, mesures à 5 Hz :
+    tours du .fit de 59 s et 31 s avant, 60 s et 30 s après ; la dernière seconde de la séance n'ouvre
+    plus de tour à elle seule."""
+    fit_sdk = pytest.importorskip("garmin_fit_sdk")
+    from home_trainer.formats.fit_activity import encode_activity
+    from home_trainer.ui.session import ride_points
+
+    window = MainWindow(parse_workout("1m@200 30s@150"), source=Steady(210.0),
+                        book=DeviceBook(tmp_path / "d.json"))
+    window.timer.stop()
+    window.clock = Clock()
+    window._toggle()
+    for _ in range(460):  # 92 s : la séance (90 s) est finie
+        window._on_tick()
+    samples = window.session.samples
+    assert len(samples) == 90 and [x.t for x in samples] == list(range(1, 91))
+    assert [x.lap for x in samples] == [0] * 60 + [1] * 30
+    assert (samples[59].target_w, samples[60].target_w, samples[-1].target_w) == (200, 150, 150)
+    assert (samples[59].position_s, samples[-1].position_s) == (60, 90)
+    msgs, errors = fit_sdk.Decoder(fit_sdk.Stream.from_byte_array(bytearray(
+        encode_activity(ride_points(samples))))).read()
+    assert errors == []
+    assert [lap["total_timer_time"] for lap in msgs["lap_mesgs"]] == [60, 30]
+    assert brick_summary(samples, 0).seconds == 60
+    window.close()
+
+
+def test_skipped_brick_keeps_the_seconds_before_the_skip(app):
+    """Brique passée à la main (N) au milieu d'une seconde : la seconde va à la brique où elle a
+    surtout été roulée (celle du milieu de la seconde)."""
+    w = WorkoutSession(parse_workout("10m@200 5m@150 5m@100"), 250)
+    w.start()
+    for _ in range(5):
+        w.tick(1)
+        w.record(200, t=w.elapsed_s)
+    w.tick(0.7)
+    w.next_step()  # à 5,7 s : la seconde 6 (5 à 6 s) a surtout été roulée dans la brique 1
+    w.tick(0.3)
+    w.record(200, t=6)
+    w.tick(0.2)
+    w.next_step()  # à 6,2 s : la seconde 7 (6 à 7 s) a surtout été roulée dans la brique 3
+    w.tick(0.8)
+    w.record(100, t=7)
+    assert [x.lap for x in w.samples] == [0, 0, 0, 0, 0, 0, 2]
+    assert [x.target_w for x in w.samples[-2:]] == [200, 100]
+
+
 def test_countdown_beeps_and_summary_at_the_end_of_a_brick(app, tmp_path):
     book = ProfileBook(tmp_path / "profils.json", rides_root=tmp_path / "sorties")
     profile = book.create("A")
@@ -78,10 +127,9 @@ def test_countdown_beeps_and_summary_at_the_end_of_a_brick(app, tmp_path):
         window._on_tick()
     assert len(beeps) == 3
     assert window.session.index == 1
-    # Bilan de la brique finie, à la place de « Maintenant ». 0:09 et non 0:10 : la mesure de la dernière
-    # seconde est enregistrée après le tic qui change de brique, avec la brique suivante (défaut d'origine,
-    # noté pour l'étape 8 ; il décale aussi d'une seconde les tours du .fit).
-    assert window.current_label.text() == "Brique 1 finie : 0:09 · 210 W pour 200 W visés (105 %)"
+    # Bilan de la brique finie, à la place de « Maintenant ». 0:10 : la mesure de la dernière seconde,
+    # enregistrée au tic qui change de brique, reste dans sa brique (0:09 avant l'étape 8).
+    assert window.current_label.text() == "Brique 1 finie : 0:10 · 210 W pour 200 W visés (105 %)"
     window._brick_note = (window._brick_note[0], 0.0)  # 8 s plus tard
     window._refresh()
     assert window.current_label.text().startswith("Maintenant : ")

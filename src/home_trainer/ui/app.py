@@ -33,7 +33,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QElapsedTimer, QLocale, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QElapsedTimer, QEvent, QLocale, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -128,6 +128,22 @@ def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) 
     return f"{duration} à {target}{name}"
 
 
+class _LeaveFieldOnEnter(QObject):
+    """Filtre d'une case (FTP, poids) : Entrée ou Échap la valide puis appelle `leave` (le clavier
+    revient à la fenêtre ; sans cela la case garde Espace, +, −, E, N et les raccourcis se taisent)."""
+
+    def __init__(self, leave, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._leave = leave
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (API Qt)
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape):
+            obj.interpretText()
+            self._leave()  # la case perd le focus : editingFinished part (FTP appliquée)
+            return True
+        return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self, workout: Workout, ftp: float = DEFAULT_FTP,
                  source: PowerSource | None = None,
@@ -147,6 +163,7 @@ class MainWindow(QMainWindow):
         self._closed = False  # fenêtre fermée : plus rien à proposer (proposition différée par QTimer)
         self.ask_rescued = ask_rescued  # sortie retrouvée au lancement (remplaçable dans les tests)
         self.ask_unsaved = ask_unsaved  # ni .fit ni secours : Réessayer / Jeter
+        self._keep_in_profile = True  # FTP et poids changés : gardés dans le profil (sauf `--ftp`, `--weight`)
         # Avec un profil, ses comptes et son dossier des sorties remplacent `accounts` et `outbox`.
         self.profiles = profiles if profiles is not None else ProfileBook()
         self.profile: Profile | None = None
@@ -329,6 +346,10 @@ class MainWindow(QMainWindow):
         self.weight_box.valueChanged.connect(self._weight_changed)
         bar.addWidget(self._chip_box("Poids", self.weight_box, "Poids du cycliste, pour la pente simulée et la "
                                      "vitesse calculée (le poids du vélo s'ajoute : Profil → Changer de cycliste…)"))
+        # Entrée ou Échap valide la case et rend le clavier aux raccourcis (Espace, +, −, E, N…).
+        self._field_keys = _LeaveFieldOnEnter(lambda: self.pages.setFocus(), self)
+        for box in (self.ftp_box, self.weight_box):
+            box.installEventFilter(self._field_keys)
         self.profile_action = QAction("Profil…", self)
         self.profile_action.setToolTip("Changer de cycliste : FTP, poids, comptes Strava / Nolio et sorties")
         self.profile_action.triggered.connect(self._choose_profile)
@@ -373,7 +394,11 @@ class MainWindow(QMainWindow):
 
     def _build_body(self) -> None:
         self.pages = QStackedWidget()
+        # Un clic ailleurs que dans une case reprend le clavier : les raccourcis remarchent. Au lancement,
+        # le clavier est là aussi, pas dans la case FTP.
+        self.pages.setFocusPolicy(Qt.ClickFocus)
         self.setCentralWidget(self.pages)
+        self.pages.setFocus()
         root = QWidget()
         self.pages.addWidget(root)
         layout = QVBoxLayout(root)
@@ -607,8 +632,20 @@ class MainWindow(QMainWindow):
             self._push_target()
             self._refresh()
 
+    def set_session_ftp_weight(self, ftp: float | None = None, weight_kg: float | None = None) -> None:
+        """FTP et poids pour cette session seulement (`--ftp`, `--weight`) : le profil ne change pas."""
+        self._keep_in_profile = False
+        try:
+            if ftp:
+                self.ftp_box.setValue(int(ftp))
+                self._ftp_changed()
+            if weight_kg:
+                self.weight_box.setValue(weight_kg)
+        finally:
+            self._keep_in_profile = True
+
     def _weight_changed(self, kg: float) -> None:
-        if self.profile is not None and self.profile.weight_kg != kg:
+        if self._keep_in_profile and self.profile is not None and self.profile.weight_kg != kg:
             self.profile.weight_kg = kg
             self.profiles.save()
         self.free.rider_kg = kg
@@ -772,7 +809,7 @@ class MainWindow(QMainWindow):
         if self.ftp_box.value() == self.ftp:
             return
         self.ftp = self.ftp_box.value()
-        if self.profile is not None:
+        if self._keep_in_profile and self.profile is not None:
             self.profile.ftp = int(self.ftp)
             self.profiles.save()
         self.free.ftp = self.ftp
@@ -787,6 +824,7 @@ class MainWindow(QMainWindow):
         # Garder l'avancement : seule la conversion % FTP → W change.
         self.session.index, self.session.step_elapsed_s, self.session.elapsed_s = index, step_elapsed, elapsed
         self.session.state, self.session.samples = state, samples
+        self.session._changes = s._changes  # briques déjà quittées (dernière seconde d'une brique)
         self._refresh()
 
     def set_power_source(self, source: PowerSource) -> None:
@@ -998,7 +1036,7 @@ class MainWindow(QMainWindow):
         editor = WorkoutEditor(workout, self.ftp, self, directory=self.directory)
         accepted = editor.exec() == QDialog.Accepted
         self.directory = editor.directory
-        if editor.ftp != self.ftp:
+        if accepted and editor.ftp != self.ftp:  # « Fermer » : la FTP essayée dans l'éditeur est abandonnée
             self.ftp_box.setValue(int(editor.ftp))
             self._ftp_changed()
         result = editor.workout()
@@ -2298,6 +2336,9 @@ def main(argv: list[str] | None = None) -> int:
     book = DeviceBook.load()
     documents = documents_folder()
     profiles = ProfileBook.load(rides_root=default_rides_root(documents))  # sorties dans Documents
+    if profiles.problem:  # le fichier illisible sera gardé de côté (profils.illisible-…) à la première écriture
+        QMessageBox.warning(None, "Profils", profiles.problem + "\nLe fichier illisible est gardé à côté de "
+                            f"{profiles.path}.")
     profiles.migrate_legacy()  # comptes et sorties d'avant les profils → premier profil
     profiles.migrate_rides()  # sorties encore dans AppData → Documents
     if args.profile:
@@ -2340,11 +2381,7 @@ def main(argv: list[str] | None = None) -> int:
                         click=None if click_kind is None else open_zwift_click(address=click_address),
                         rescue_dir=rescue_dir())
     window.resize(1400, 780)
-    if args.ftp:
-        window.ftp_box.setValue(int(args.ftp))
-        window._ftp_changed()
-    if args.weight:
-        window.weight_box.setValue(args.weight)
+    window.set_session_ftp_weight(args.ftp, args.weight)
     window.set_library(Library.load(documents=documents))
     window.show()
     if args.file:  # fichier passé en argument, ou glissé sur l'icône

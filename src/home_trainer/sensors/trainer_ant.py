@@ -104,12 +104,29 @@ class AntTrainer(Trainer):
                     log.debug("%s : consigne non transmise (%s)", self.name, e)
             done.wait(0.25)
 
+    # Arrêt : attente au plus pour la consigne « résistance libre » (sans réponse, on n'attend pas plus).
+    free_on_stop_wait_s = 0.5
+
     def _interrupt(self) -> None:
+        """Appelé par l'interface (changement de home trainer, fermeture) : ne doit pas la figer.
+
+        Audit, « ANT+ : arrêt bloquant après une perte de signal » : la consigne « résistance
+        libre » attendait l'accusé de réception d'un home trainer qui ne répondait plus. Elle part
+        maintenant d'un fil à part, attendue au plus `free_on_stop_wait_s`, et seulement si le home
+        trainer a parlé il y a moins de 3 s."""
         node, channel = self._node, self._channel
-        if channel is not None and self.state is SensorState.CONNECTED:
-            try:  # résistance libre plutôt que de laisser la dernière consigne ERG
-                channel.send_acknowledged_data(fec_page_for(None))
-            except Exception:  # noqa: BLE001 (home trainer déjà hors de portée)
-                pass
+        if channel is not None and self.state is SensorState.CONNECTED and self.latest() is not None:
+            sent = threading.Event()
+
+            def free() -> None:
+                try:  # résistance libre plutôt que de laisser la dernière consigne ERG
+                    channel.send_acknowledged_data(fec_page_for(None))
+                except Exception:  # noqa: BLE001 (home trainer déjà hors de portée)
+                    pass
+                finally:
+                    sent.set()
+
+            threading.Thread(target=free, name=f"arrêt {self.name}", daemon=True).start()
+            sent.wait(self.free_on_stop_wait_s)
         if node is not None:
             node.stop()

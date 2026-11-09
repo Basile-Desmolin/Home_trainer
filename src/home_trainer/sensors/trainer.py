@@ -119,11 +119,44 @@ def _u16(value: int) -> bytes:
 # --- Bluetooth FTMS : mesures ------------------------------------------------
 
 def parse_indoor_bike_data(data: bytes | bytearray) -> TrainerReading:
-    """Décode une notification « Indoor Bike Data » (0x2AD2).
+    """Décode une notification « Indoor Bike Data » (0x2AD2) seule (puissance absente : 0 W).
 
     Les champs présents dépendent des drapeaux (16 bits) ; attention, le bit 0
-    est inversé : à 0, la vitesse instantanée est présente.
+    est inversé : à 0, la vitesse instantanée est présente. Pour un home trainer,
+    voir `IndoorBikeData`, qui assemble les trames découpées.
     """
+    speed, cadence, power = _indoor_bike_fields(data)
+    return TrainerReading(float(power or 0), cadence, speed)
+
+
+class IndoorBikeData:
+    """Assemble les trames « Indoor Bike Data » d'un home trainer.
+
+    Beaucoup de home trainers découpent leurs mesures en deux notifications (drapeau « More
+    Data ») : l'une avec vitesse et cadence, l'autre avec la puissance. Lue seule, la première
+    donnait 0 W (audit, « Trame sans puissance ») : la moitié des mesures à 0, une moyenne de la
+    seconde divisée par deux. Un champ absent reprend sa dernière valeur reçue, si elle a moins de
+    `hold_s` secondes ; sinon il manque (puissance : 0 W, comme avant).
+    """
+
+    hold_s = 2.0
+
+    def __init__(self) -> None:
+        self._last: dict[str, tuple[float, float]] = {}  # champ → (valeur, heure de réception)
+
+    def feed(self, data: bytes | bytearray, now: float | None = None) -> TrainerReading:
+        now = time.monotonic() if now is None else now
+        values = dict(zip(("speed", "cadence", "power"), _indoor_bike_fields(data)))
+        for key, value in values.items():
+            if value is not None:
+                self._last[key] = (value, now)
+            elif key in self._last and now - self._last[key][1] <= self.hold_s:
+                values[key] = self._last[key][0]
+        return TrainerReading(float(values["power"] or 0), values["cadence"], values["speed"])
+
+
+def _indoor_bike_fields(data: bytes | bytearray) -> tuple[float | None, float | None, float | None]:
+    """(vitesse km/h, cadence tr/min, puissance W) d'une trame ; None pour un champ absent."""
     if len(data) < 2:
         raise ValueError("trame FTMS trop courte")
     flags = int.from_bytes(data[:2], "little")
@@ -152,12 +185,13 @@ def parse_indoor_bike_data(data: bytes | bytearray) -> TrainerReading:
         take(2, signed=True)  # niveau de résistance
     if flags & 0x0040:
         power = take(2, signed=True)
-    return TrainerReading(float(power or 0), cadence, speed)
+    return speed, cadence, None if power is None else float(power)
 
 
 # --- Bluetooth FTMS : consignes ----------------------------------------------
 
 FTMS_REQUEST_CONTROL = 0x00
+FTMS_CONTROL_NOT_PERMITTED = 0x05  # code de réponse : contrôle non accordé (perdu après une réinitialisation)
 FTMS_RESET = 0x01
 FTMS_SET_TARGET_POWER = 0x05
 FTMS_START_OR_RESUME = 0x07
