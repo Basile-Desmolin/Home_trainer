@@ -22,7 +22,8 @@ from ..config import config_dir
 from ..formats.fit_activity import ActivityPoint, activity_file_name, write_activity
 from .accounts import SERVICES, AccountBook
 from .services import Service, open_service
-from .web import CALLBACK_PORT, Http, SyncError, local_callback, parse_callback, urllib_http, wait_for_code
+from .web import (CALLBACK_PORT, FileRejected, Http, SyncError, local_callback, parse_callback, urllib_http,
+                  wait_for_code)
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class SendReport:
     ok: bool
     message: str
     url: str | None = None
+    rejected: bool = False  # refus du fichier lui-même : plus d'envoi automatique, le compte reste utilisable
 
     def __str__(self) -> str:
         label = {"strava": "Strava", "nolio": "Nolio"}.get(self.service, self.service)
@@ -105,14 +107,17 @@ class Outbox:
             self._write(data)
         return path
 
-    def pending(self, services: list[str]) -> list[tuple[str, str]]:
-        """(fichier, service) pas encore envoyés, des plus anciens aux plus récents."""
+    def pending(self, services: list[str], retry_rejected: bool = False) -> list[tuple[str, str]]:
+        """(fichier, service) pas encore envoyés, des plus anciens aux plus récents.
+
+        Un fichier refusé par le service n'en fait partie qu'avec `retry_rejected` (envoi demandé)."""
         out = []
         for name, entry in sorted(self.entries().items()):
             sent = entry.get("sent", {})
             if not (self.dir / name).exists():
                 continue
-            out += [(name, s) for s in services if not sent.get(s, {}).get("ok")]
+            out += [(name, s) for s in services if not sent.get(s, {}).get("ok")
+                    and (retry_rejected or not sent.get(s, {}).get("rejected"))]
         return out
 
     def mark(self, report: SendReport) -> None:
@@ -120,7 +125,7 @@ class Outbox:
             data = self._read()
             entry = data.setdefault(report.file, {"title": Path(report.file).stem, "sent": {}})
             entry.setdefault("sent", {})[report.service] = {"ok": report.ok, "message": report.message,
-                                                            "url": report.url}
+                                                            "url": report.url, "rejected": report.rejected}
             self._write(data)
 
     def send(self, name: str, service: Service) -> SendReport:
@@ -129,10 +134,13 @@ class Outbox:
             result = service.upload(self.dir / name, entry.get("title") or Path(name).stem,
                                     entry.get("description", ""), entry.get("external_id") or Path(name).stem)
             report = SendReport(name, service.key, True, result.message, result.url)
+        except FileRejected as e:
+            report = SendReport(name, service.key, False, str(e), rejected=True)
         except SyncError as e:
             report = SendReport(name, service.key, False, str(e))
         except OSError as e:
-            report = SendReport(name, service.key, False, f"{service.label} : fichier illisible ({e})")
+            report = SendReport(name, service.key, False, f"{service.label} : fichier illisible ({e})",
+                                rejected=True)
         self.mark(report)
         return report
 
@@ -142,23 +150,28 @@ def auto_services(book: AccountBook) -> list[str]:
 
 
 def send_pending(outbox: Outbox, book: AccountBook, http: Http = urllib_http,
-                 only: str | None = None) -> list[SendReport]:
+                 only: str | None = None, retry_rejected: bool = False) -> list[SendReport]:
     """Envoie tout ce qui attend vers les comptes connectés en envoi automatique.
 
-    Les jetons renouvelés sont enregistrés. Un compte qui échoue (réseau, accès
-    refusé) n'est pas retenté pour les fichiers suivants de ce passage.
+    Les jetons renouvelés sont enregistrés après chaque fichier (et même si l'envoi
+    s'interrompt). Un compte qui échoue (réseau, accès refusé) n'est pas retenté pour
+    les fichiers suivants de ce passage ; un fichier refusé n'arrête pas les suivants,
+    et n'est renvoyé qu'avec `retry_rejected` (envoi demandé par l'utilisateur).
     """
     services = {s: open_service(s, book[s], http) for s in auto_services(book)}
     reports, failed = [], set()
-    for name, key in outbox.pending(list(services)):
-        if key in failed or (only is not None and name != only):
-            continue
-        report = outbox.send(name, services[key])
-        reports.append(report)
-        if not report.ok:
-            failed.add(key)
-    if services:
-        book.save()
+    try:
+        for name, key in outbox.pending(list(services), retry_rejected):
+            if key in failed or (only is not None and name != only):
+                continue
+            report = outbox.send(name, services[key])
+            book.save()  # jeton peut-être renouvelé pendant cet envoi
+            reports.append(report)
+            if not report.ok and not report.rejected:
+                failed.add(key)
+    finally:
+        if services:
+            book.save()
     return reports
 
 

@@ -1,7 +1,9 @@
 """Bilan d'une sortie (puissances, zones, TSS) et historique des sorties (records, semaines, forme)."""
 
+import json
 from dataclasses import dataclass
 from datetime import date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -98,7 +100,57 @@ def test_weeks_and_fitness():
     assert 0 < ctl < atl  # beaucoup de TSS ces derniers jours : fatigue au-dessus de la condition
 
 
-def test_unreadable_history_is_empty(tmp_path):
+def test_unreadable_history_without_backup_is_empty_and_kept_aside(tmp_path):
+    """Audit, « Historique écrasé » : un fichier illisible était écrasé par la sortie suivante."""
     path = tmp_path / "historique.json"
     path.write_text("pas du json", encoding="utf-8")
-    assert RideHistory.load(path).rides == []
+    h = RideHistory.load(path)
+    assert h.rides == [] and "sans copie de secours" in h.problem
+    h.add(summarize(ride([200] * 600), 250, "Nouvelle", at(date(2026, 11, 8))))
+    assert h.set_aside is not None and h.set_aside.read_text(encoding="utf-8") == "pas du json"
+    assert h.set_aside.name.startswith("historique.illisible-")
+    assert [r.title for r in RideHistory.load(path).rides] == ["Nouvelle"]
+
+
+def test_unreadable_history_is_read_back_from_its_backup(tmp_path):
+    path = tmp_path / "historique.json"
+    h = RideHistory.load(path)
+    h.add(summarize(ride([200] * 600), 250, "Un", at(date(2026, 10, 1))))
+    h.add(summarize(ride([210] * 600), 250, "Deux", at(date(2026, 10, 2))))
+    # La copie de secours est la version d'avant la dernière écriture.
+    assert [r["title"] for r in json.loads((tmp_path / "historique.bak.json").read_text("utf-8"))["rides"]] == ["Un"]
+    path.write_text('{"rides": [', encoding="utf-8")  # fichier tronqué (coupure, OneDrive)
+    back = RideHistory.load(path)
+    assert [r.title for r in back.rides] == ["Un"] and "copie de secours" in back.problem
+    back.add(summarize(ride([220] * 600), 250, "Trois", at(date(2026, 10, 3))))
+    assert [r.title for r in RideHistory.load(path).rides] == ["Un", "Trois"]
+    assert back.set_aside.read_text(encoding="utf-8") == '{"rides": ['
+
+
+def test_unreadable_ride_is_kept_as_is(tmp_path):
+    path = tmp_path / "historique.json"
+    good = summarize(ride([200] * 600), 250, "Bonne", at(date(2026, 10, 1)))
+    broken = {"title": "abîmée", "start": "pas une date"}
+    path.write_text(json.dumps({"rides": [good.to_dict(), broken]}), encoding="utf-8")
+    h = RideHistory.load(path)
+    assert [r.title for r in h.rides] == ["Bonne"] and h.problem is None
+    h.add(summarize(ride([210] * 600), 250, "Nouvelle", at(date(2026, 10, 2))))
+    assert broken in json.loads(path.read_text(encoding="utf-8"))["rides"]
+
+
+def test_failed_history_write_is_reported_and_changes_nothing(tmp_path, monkeypatch):
+    """Audit, « Échec d'écriture de l'historique silencieux »."""
+    path = tmp_path / "historique.json"
+    h = RideHistory.load(path)
+    h.add(summarize(ride([200] * 600), 250, "Un", at(date(2026, 10, 1))))
+
+    def locked(*_a, **_k):
+        raise PermissionError("fichier verrouillé")
+
+    monkeypatch.setattr(Path, "write_text", locked)
+    with pytest.raises(OSError):
+        h.add(summarize(ride([210] * 600), 250, "Deux", at(date(2026, 10, 2))))
+    assert [r.title for r in h.rides] == ["Un"]
+    with pytest.raises(OSError):
+        h.remove(h.rides[0])
+    assert [r.title for r in h.rides] == ["Un"]

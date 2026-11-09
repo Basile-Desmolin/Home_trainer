@@ -169,9 +169,10 @@ class ServiceBox(QGroupBox):
 
 
 class AccountsDialog(QDialog):
-    """Comptes Strava et Nolio ; `send_requested` demande l'envoi des sorties en attente."""
+    """Comptes Strava et Nolio ; `send_requested` demande l'envoi des sorties en attente
+    (True : y compris les fichiers refusés une première fois)."""
 
-    send_requested = Signal()
+    send_requested = Signal(bool)
 
     def __init__(self, book: AccountBook, outbox: Outbox, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -207,15 +208,15 @@ class AccountsDialog(QDialog):
         self.boxes[key].connected(error)
         self._refresh_pending()
         if not error:
-            self.send_requested.emit()  # les sorties en attente partent aussitôt
+            self.send_requested.emit(False)  # les sorties en attente partent aussitôt
 
     def _refresh_pending(self) -> None:
-        n = len({name for name, _ in self.outbox.pending(auto_services(self.book))})
+        n = len({name for name, _ in self.outbox.pending(auto_services(self.book), retry_rejected=True)})
         self.send_button.setText(f"Envoyer les sorties en attente ({n})")
         self.send_button.setEnabled(n > 0)
 
     def _send(self) -> None:
-        self.send_requested.emit()
+        self.send_requested.emit(True)  # demande explicite : les fichiers refusés sont retentés
         self.send_button.setEnabled(False)
 
     def _open_folder(self) -> None:

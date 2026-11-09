@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import logging
 import sys
 import threading
 import time
@@ -46,6 +47,7 @@ from ..formats.fit_activity import activity_file_name
 from ..gears import VirtualGears
 from ..heart_zones import to_power
 from ..history import FILE_NAME as HISTORY_FILE, RideHistory
+from ..logs import setup_logging
 from ..keep_awake import KeepAwake
 from ..profiles import Profile, ProfileBook, default_rides_root
 from ..ride_stats import RideSummary, summarize
@@ -68,12 +70,16 @@ from .mini import MiniInfo, MiniWindow
 from .profiles import choose_profile
 from .history import HistoryDialog
 from .ride_export import DISCARD, RideExport, ask_ride_export
+from .rescue import (DISCARD as RESCUE_DISCARD, RESCUE_EVERY_S, SAVE as RESCUE_SAVE, RescueFile, RescuedRide,
+                     ask_rescued, ask_unsaved, duration_text, find_rescued, remove_file, rescue_dir)
 from .power import PowerSource, Reading, SimulatedTrainer, open_power_source, road_speed_kmh
 from .route_ride import RoutePanel, km_text, route_grade_color
 from .theme import GOOD, OFF, WAIT, dot, icon, install, keycaps, number_font, pill, zone_index, zone_label
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
                       FreeRideSession, RouteSession, SecondSampler, State, WorkoutSession, ride_points,
                       ride_title)
+
+log = logging.getLogger(__name__)
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
@@ -116,8 +122,17 @@ class MainWindow(QMainWindow):
                  outbox: Outbox | None = None, profiles: ProfileBook | None = None,
                  profile: Profile | None = None,
                  power_meter: BackgroundSensor[PowerMeterReading] | None = None,
-                 click: BackgroundSensor | None = None) -> None:
+                 click: BackgroundSensor | None = None, rescue_dir: Path | str | None = None) -> None:
         super().__init__()
+        # Sortie de secours (voir `ui/rescue.py`) ; sans dossier (tests), rien n'est gardé pendant la sortie.
+        self.rescue_dir = Path(rescue_dir) if rescue_dir is not None else None
+        self._rescues: list[RescueFile] = []  # secours des sorties en cours
+        self._kept: set[Path] = set()  # sorties gardées en secours pendant cette session : au prochain lancement
+        self._rescued_at = time.monotonic()
+        self._proposing = False
+        self._closed = False  # fenêtre fermée : plus rien à proposer (proposition différée par QTimer)
+        self.ask_rescued = ask_rescued  # sortie retrouvée au lancement (remplaçable dans les tests)
+        self.ask_unsaved = ask_unsaved  # ni .fit ni secours : Réessayer / Jeter
         # Avec un profil, ses comptes et son dossier des sorties remplacent `accounts` et `outbox`.
         self.profiles = profiles if profiles is not None else ProfileBook()
         self.profile: Profile | None = None
@@ -128,6 +143,7 @@ class MainWindow(QMainWindow):
         self._sync.done.connect(self._sent)
         self._send_thread: threading.Thread | None = None
         self._send_again = False
+        self._send_retry = False  # l'envoi en file d'attente retente aussi les fichiers refusés
         # Fenêtre de fin de sortie (remplaçable dans les tests) et derniers choix faits dedans.
         self.ask_ride_export = ask_ride_export
         self.confirm_stop = confirm_stop  # « Recommencer » / « Terminer » en pleine sortie
@@ -180,6 +196,7 @@ class MainWindow(QMainWindow):
             self.set_profile(profile)  # envoie aussi les sorties restées en attente
         else:
             self.send_rides()  # sorties restées en attente la dernière fois
+            QTimer.singleShot(0, self.propose_rescued)
 
     # --- construction ----------------------------------------------------
 
@@ -845,6 +862,7 @@ class MainWindow(QMainWindow):
         return saved or sensor.name
 
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        self._closed = True
         self.keep_awake.set(False)
         self.mini.close()
         self.end_ride(self.session, send=False)
@@ -1003,6 +1021,7 @@ class MainWindow(QMainWindow):
             return False
         if choice == DISCARD:
             session.exported = True
+            self._drop_rescue(session)  # jetée volontairement : le secours part aussi
             self.statusBar().showMessage("Sortie non enregistrée", 8000)
             return True
         self._export_fmt = choice.fmt
@@ -1015,32 +1034,42 @@ class MainWindow(QMainWindow):
 
         Sans `export`, en .fit dans le dossier des sorties ; avec, au format, au nom et dans le
         dossier choisis (et, si ce n'est pas un .fit, une copie .fit dans le dossier des sorties
-        pour Strava / Nolio). False si l'écriture a échoué."""
+        pour Strava / Nolio). False si l'écriture a échoué.
+
+        Sans `export` (sortie remplacée, changement de profil, fermeture), un échec ne perd rien : la
+        sortie est gardée en secours et proposée au prochain lancement ; si même le secours est
+        impossible, la fenêtre « Réessayer / Jeter » ne laisse pas d'autre issue."""
         if self.outbox is None or session.exported or len(session.samples) < MIN_RIDE_SAMPLES:
             return True
         session.exported = True
         title, description = ride_title(session)
         points = ride_points(session.samples)
-        try:
-            if export is None:
-                path = self.outbox.add(points, title, description)
-            elif export.fmt == "fit":
-                path = self.outbox.add(points, title, description, dest=export.path)
-            else:
-                export.path.parent.mkdir(parents=True, exist_ok=True)
-                path = write_ride(points, export.path)
-                self.outbox.add(points, title, description)
-        except (OSError, ValueError) as e:
-            session.exported = False  # on pourra réessayer avec « Terminer »
-            where = export.path if export is not None else self.outbox.dir
-            QMessageBox.warning(self, "Sortie non enregistrée", f"{where} : {e}")
-            return False
+        while True:
+            try:
+                if export is None:
+                    path = self.outbox.add(points, title, description)
+                elif export.fmt == "fit":
+                    path = self.outbox.add(points, title, description, dest=export.path)
+                else:
+                    export.path.parent.mkdir(parents=True, exist_ok=True)
+                    path = write_ride(points, export.path)
+                    self.outbox.add(points, title, description)
+                break
+            except (OSError, ValueError) as e:
+                where = export.path if export is not None else self.outbox.dir
+                if export is not None:
+                    session.exported = False  # on reste sur la sortie : « Terminer » pour réessayer
+                    QMessageBox.warning(self, "Sortie non enregistrée", f"{where} : {e}")
+                    return False
+                if self._keep_in_rescue(session, title, f"{where} : {e}"):
+                    return False
+        self._drop_rescue(session)
         shown = path.name if path.parent == self.outbox.dir.absolute() else str(path)
         history = self.ride_history()
         if history is not None:
             summary = self.ride_summary(session)
             summary.file = str(Path(path).absolute())
-            history.add(summary)
+            self._add_to_history(history, summary)
         if not auto_services(self.accounts):
             self.statusBar().showMessage(f"Sortie enregistrée : {shown} (pour l'envoyer vers Strava ou "
                                          f"Nolio, connectez un compte : Profil → Comptes Strava / Nolio…)", 15000)
@@ -1049,6 +1078,102 @@ class MainWindow(QMainWindow):
         if send:
             self.send_rides()
         return True
+
+    # --- sortie de secours (ui/rescue.py) ------------------------------------
+
+    def _rescue_for(self, session, create: bool = True) -> RescueFile | None:
+        """Secours de cette sortie, reconnue à sa liste de mesures (gardée quand la FTP recrée la séance).
+        None sans dossier de secours ou sans dossier des sorties (rien n'est alors enregistré)."""
+        if self.rescue_dir is None or self.outbox is None:
+            return None
+        rescue = next((r for r in self._rescues if r.samples is session.samples), None)
+        if rescue is None and create:
+            mode = ("parcours" if isinstance(session, RouteSession)
+                    else "libre" if isinstance(session, FreeRideSession) else "seance")
+            rescue = RescueFile(self.rescue_dir, self.profile.id if self.profile else None, mode, session.samples)
+            self._rescues.append(rescue)
+        return rescue
+
+    def _save_rescue(self, session) -> None:
+        """Ajoute au secours les mesures roulées depuis la dernière fois (toutes les 10 s)."""
+        if session.exported or not session.samples:
+            return
+        rescue = self._rescue_for(session)
+        if rescue is None:
+            return
+        try:
+            rescue.write(*ride_title(session))
+        except OSError as e:
+            log.warning("secours non écrit : %s", e)
+            self.statusBar().showMessage(f"Sortie de secours impossible à écrire : {e}", 10000)
+
+    def _drop_rescue(self, session) -> None:
+        """Sortie enregistrée ou jetée : son secours est supprimé."""
+        rescue = self._rescue_for(session, create=False)
+        if rescue is not None:
+            rescue.remove()
+            self._rescues.remove(rescue)
+
+    def _keep_in_rescue(self, session, title: str, error: str) -> bool:
+        """Le .fit n'a pas pu être écrit alors que la sortie va être remplacée : elle est gardée en secours
+        (True). Si le secours échoue aussi, « Réessayer » rend False (nouvel essai du .fit) et « Jeter »
+        rend True."""
+        rescue = self._rescue_for(session)
+        if rescue is None:  # sans dossier de secours (tests) : comme avant, la sortie est perdue
+            QMessageBox.warning(self, "Sortie non enregistrée", error)
+            return True
+        try:
+            rescue.write(*ride_title(session))
+        except OSError as e:
+            log.error("sortie ni enregistrée ni gardée en secours : %s ; %s", error, e)
+            if self.ask_unsaved(self, title, len(session.samples), f"{error}\nSecours : {e}"):
+                return False
+            self._drop_rescue(session)
+            self.statusBar().showMessage("Sortie jetée", 8000)
+            return True
+        self._rescues.remove(rescue)  # le fichier reste sur le disque, proposé au prochain lancement
+        self._kept.add(rescue.path)
+        log.error("sortie non enregistrée, gardée en secours dans %s : %s", rescue.path, error)
+        QMessageBox.warning(self, "Sortie non enregistrée",
+                            f"La sortie « {title} » ({duration_text(len(session.samples))}) n'a pas pu être "
+                            f"enregistrée :\n{error}\n\nElle est gardée et vous sera proposée au prochain lancement.")
+        return True
+
+    def propose_rescued(self) -> None:
+        """Sorties de secours du profil (plantage, coupure, .fit impossible) : Enregistrer, Plus tard ou Jeter."""
+        if self.rescue_dir is None or self.outbox is None or self._proposing or self._closed:
+            return
+        self._proposing = True
+        try:
+            skip = {r.path for r in self._rescues} | self._kept  # en cours, ou gardée à l'instant
+            for ride in find_rescued(self.rescue_dir, self.profile.id if self.profile else None):
+                if ride.path in skip:
+                    continue
+                choice = self.ask_rescued(self, ride)
+                if choice == RESCUE_SAVE:
+                    self._save_rescued(ride)
+                elif choice == RESCUE_DISCARD:
+                    remove_file(ride.path)
+                    self.statusBar().showMessage(f"Sortie jetée : {ride.title}", 8000)
+        finally:
+            self._proposing = False
+
+    def _save_rescued(self, ride: RescuedRide) -> None:
+        """Sortie retrouvée : .fit dans le dossier des sorties, historique, envoi ; le secours part ensuite."""
+        try:
+            path = self.outbox.add(ride_points(ride.samples), ride.title, ride.description)
+        except (OSError, ValueError) as e:
+            QMessageBox.warning(self, "Sortie non enregistrée", f"{self.outbox.dir} : {e}\n\n"
+                                "Elle reste gardée et vous sera proposée au prochain lancement.")
+            return
+        remove_file(ride.path)
+        history = self.ride_history()
+        if history is not None:
+            summary = summarize(ride.samples, self.ftp, ride.title, ride.start or time.time())
+            summary.file = str(Path(path).absolute())
+            self._add_to_history(history, summary)
+        self.statusBar().showMessage(f"Sortie retrouvée enregistrée : {path.name}", 15000)
+        self.send_rides()
 
     def ride_summary(self, session: WorkoutSession | FreeRideSession | RouteSession) -> RideSummary:
         """Bilan de la sortie : chiffres, temps par zone, meilleures puissances."""
@@ -1062,11 +1187,26 @@ class MainWindow(QMainWindow):
             return None
         return RideHistory.load(self.outbox.dir / HISTORY_FILE)
 
+    def _add_to_history(self, history: RideHistory, summary: RideSummary) -> None:
+        """Ajoute la sortie à l'historique ; prévient si l'historique était illisible ou n'a pas pu
+        être écrit (le .fit, lui, est déjà sur le disque)."""
+        try:
+            history.add(summary)
+        except OSError as e:
+            QMessageBox.warning(self, "Historique non mis à jour",
+                                f"La sortie est enregistrée, mais l'historique n'a pas pu être écrit : {e}")
+            return
+        if history.problem:
+            kept = f"\n\nLe fichier illisible est gardé : {history.set_aside}" if history.set_aside else ""
+            QMessageBox.warning(self, "Historique", history.problem + kept)
+
     def _open_history(self) -> None:
         history = self.ride_history()
         if history is None:
             self.statusBar().showMessage("Pas d'historique : les sorties ne sont pas enregistrées", 8000)
             return
+        if history.problem:
+            QMessageBox.warning(self, "Historique", history.problem)
         HistoryDialog(history, self.profile.name if self.profile else "", self).exec()
 
     def _ask_at_end(self, session: WorkoutSession | RouteSession) -> None:
@@ -1084,17 +1224,19 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, ask)  # hors du tic de l'horloge : la fenêtre est modale
 
-    def send_rides(self, wait_s: float = 0) -> None:
-        """Envoie en tâche de fond ce qui attend ; `wait_s` > 0 attend la fin (fermeture de l'appli)."""
+    def send_rides(self, wait_s: float = 0, retry_rejected: bool = False) -> None:
+        """Envoie en tâche de fond ce qui attend ; `wait_s` > 0 attend la fin (fermeture de l'appli).
+        `retry_rejected` (envoi demandé dans Comptes) retente aussi les fichiers refusés une fois."""
         if self.outbox is None or not auto_services(self.accounts):
             return
         if self._send_thread is not None and self._send_thread.is_alive():
             self._send_again = True
+            self._send_retry = self._send_retry or retry_rejected
         else:
             outbox, accounts, signals = self.outbox, self.accounts, self._sync
 
             def work() -> None:
-                reports = send_pending(outbox, accounts)
+                reports = send_pending(outbox, accounts, retry_rejected=retry_rejected)
                 try:
                     signals.done.emit(reports)
                 except RuntimeError:  # fenêtre déjà fermée
@@ -1108,18 +1250,22 @@ class MainWindow(QMainWindow):
                 self._send_thread.join(0.2)
             if self._send_again and not self._send_thread.is_alive():
                 self._send_again = False
-                send_pending(self.outbox, self.accounts)
+                retry, self._send_retry = self._send_retry, False
+                send_pending(self.outbox, self.accounts, retry_rejected=retry)
 
     def _sent(self, reports: list) -> None:
         if reports:
             text = " · ".join(str(r) for r in reports[-4:])
-            failed = [r for r in reports if not r.ok]
+            failed = [r for r in reports if not r.ok and not r.rejected]
             if failed:
                 text += " (nouvel essai au prochain lancement, ou Profil → Comptes Strava / Nolio…)"
+            elif any(r.rejected for r in reports):
+                text += " (fichier refusé : nouvel essai seulement depuis Profil → Comptes Strava / Nolio…)"
             self.statusBar().showMessage(text, 20000)
         if self._send_again:
             self._send_again = False
-            self.send_rides()
+            retry, self._send_retry = self._send_retry, False
+            self.send_rides(retry_rejected=retry)
 
     # --- profils -----------------------------------------------------------
 
@@ -1146,6 +1292,7 @@ class MainWindow(QMainWindow):
         self.profile_action.setText(f"Profil : {profile.name}")
         self.statusBar().showMessage(f"Profil : {profile.name}", 5000)
         self.send_rides()
+        QTimer.singleShot(0, self.propose_rescued)  # sorties de secours de ce profil, fenêtre affichée
 
     def _choose_profile(self) -> None:
         profile = choose_profile(self.profiles, self.profile, self)
@@ -1155,7 +1302,7 @@ class MainWindow(QMainWindow):
     def _choose_accounts(self) -> None:
         outbox = self.outbox if self.outbox is not None else Outbox()
         dialog = AccountsDialog(self.accounts, outbox, self)
-        dialog.send_requested.connect(self.send_rides)
+        dialog.send_requested.connect(lambda retry: self.send_rides(retry_rejected=retry))
         dialog.exec()
 
     # --- boucle ----------------------------------------------------------
@@ -1169,6 +1316,8 @@ class MainWindow(QMainWindow):
                 self.shift_gear(direction)
         active = self.active
         if active is not self._sampled:
+            if self._sampled is not None:  # la sortie quittée : ses dernières secondes vont au secours
+                self._save_rescue(self._sampled)
             self.sampler.reset()
             self._sampled = active
         started_s = active.elapsed_s
@@ -1183,6 +1332,10 @@ class MainWindow(QMainWindow):
             self._record_seconds(active, started_s, reading)
         else:
             self.sampler.pause()
+        now = time.monotonic()
+        if now - self._rescued_at >= RESCUE_EVERY_S:
+            self._rescued_at = now
+            self._save_rescue(active)
         if reading is not None and running:
             if active is self.route:
                 active.ride(dt, reading.power_w)
@@ -1914,6 +2067,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="numéro ANT+ du capteur de puissance (sinon le premier trouvé)")
     args = parser.parse_args(argv)
 
+    setup_logging()  # journaux/home-trainer.log : erreurs visibles même sans console
     _set_windows_app_id()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Home trainer")
@@ -1963,7 +2117,8 @@ def main(argv: list[str] | None = None) -> int:
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
     window = MainWindow(workout, profile.ftp, source=source, heart_rate=heart_rate, book=book,
                         profiles=profiles, profile=profile, power_meter=power_meter,
-                        click=None if click_kind is None else open_zwift_click(address=click_address))
+                        click=None if click_kind is None else open_zwift_click(address=click_address),
+                        rescue_dir=rescue_dir())
     window.resize(1400, 780)
     if args.ftp:
         window.ftp_box.setValue(int(args.ftp))

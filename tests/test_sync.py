@@ -214,6 +214,70 @@ def test_outbox_sends_pending_and_retries_failures(book, outbox):
     assert AccountBook.load(book.path)["nolio"].connected  # comptes enregistrés
 
 
+def test_rejected_file_does_not_block_the_next_ones(book, outbox):
+    """Audit, « File d'envoi bloquée » : un fichier refusé bloquait toutes les sorties suivantes."""
+    connected(book, "strava")
+    old = outbox.add(ride(start=T0), "Ancienne")
+    new = outbox.add(ride(start=T0 + 86400), "Nouvelle")
+    http = FakeHttp((201, {"id": 1, "error": "Le fichier est corrompu."}), (201, {"id": 2, "activity_id": 8}))
+    reports = send_pending(outbox, book, http)
+    assert [(r.file, r.ok, r.rejected) for r in reports] == [(old.name, False, True), (new.name, True, False)]
+    # Plus renvoyé automatiquement ; renvoyé sur demande (bouton des comptes).
+    assert outbox.pending(["strava"]) == []
+    assert outbox.pending(["strava"], retry_rejected=True) == [(old.name, "strava")]
+    assert send_pending(outbox, book, FakeHttp()) == []
+    reports = send_pending(outbox, book, FakeHttp((201, {"id": 3, "activity_id": 9})), retry_rejected=True)
+    assert [(r.file, r.ok) for r in reports] == [(old.name, True)]
+
+
+def test_http_4xx_on_upload_is_a_file_refusal_but_not_401_or_429(book, outbox):
+    connected(book, "nolio")
+    a = outbox.add(ride(start=T0), "A")
+    b = outbox.add(ride(start=T0 + 86400), "B")
+    reports = send_pending(outbox, book, FakeHttp((400, {"detail": "format invalide"}), (202, {})))
+    assert [(r.file, r.ok, r.rejected) for r in reports] == [(a.name, False, True), (b.name, True, False)]
+    for status in (401, 429):
+        c = outbox.add(ride(start=T0 + 2 * 86400 + status), "C")
+        d = outbox.add(ride(start=T0 + 3 * 86400 + status), "D")
+        reports = send_pending(outbox, book, FakeHttp((status, {"detail": "non"})))
+        # Le compte est en cause : on n'insiste pas pour ce passage, et le fichier reste à envoyer.
+        assert [(r.file, r.ok, r.rejected) for r in reports] == [(c.name, False, False)]
+        assert (d.name, "nolio") in outbox.pending(["nolio"])
+        send_pending(outbox, book, FakeHttp((202, {}), (202, {})))
+
+
+def test_network_failure_still_stops_the_service_for_this_pass(book, outbox):
+    connected(book, "strava")
+    outbox.add(ride(start=T0), "A")
+    outbox.add(ride(start=T0 + 86400), "B")
+
+    def offline(*_):
+        raise SyncError("pas de connexion à www.strava.com")
+
+    reports = send_pending(outbox, book, offline)
+    assert len(reports) == 1 and not reports[0].rejected
+    assert len(outbox.pending(["strava"])) == 2
+
+
+def test_renewed_token_is_saved_even_if_sending_stops(book, outbox):
+    """Audit, « Jetons enregistrés trop tard » : le jeton renouvelé n'était gardé qu'à la fin."""
+    a = connected(book, "strava")
+    a.expires_at = 0
+    outbox.add(ride(start=T0), "A")
+    # Jeton renouvelé, puis plantage pendant l'envoi du même fichier.
+    responses = [(200, {"access_token": "new", "refresh_token": "ref2", "expires_at": time.time() + 21600})]
+
+    def http(method, url, headers, body):
+        if not responses:
+            raise RuntimeError("plantage au milieu de l'envoi")
+        status, data = responses.pop(0)
+        return Response(status, json.dumps(data).encode())
+
+    with pytest.raises(RuntimeError):
+        send_pending(outbox, book, http)
+    assert AccountBook.load(book.path)["strava"].refresh_token == "ref2"
+
+
 def test_outbox_skips_accounts_not_connected_or_manual(book, outbox):
     connected(book, "strava").auto = False
     outbox.add(ride(), "Mode libre")

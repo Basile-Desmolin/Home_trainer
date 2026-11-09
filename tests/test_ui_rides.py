@@ -271,6 +271,26 @@ def test_finish_shows_the_summary_and_fills_the_history(window):
     assert len(window.ride_history().rides) == 2
 
 
+def test_history_problems_are_shown(window, monkeypatch):
+    """Historique illisible ou impossible à écrire : la sortie est enregistrée, et on le dit."""
+    import home_trainer.history as history
+    warnings = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda parent, title, text: warnings.append(text))
+    window.outbox.dir.mkdir(parents=True)
+    (window.outbox.dir / history.FILE_NAME).write_text("abîmé", encoding="utf-8")
+    pedal(window.session, 30)
+    window.finish_button.click()
+    assert "Historique illisible" in warnings[0] and "illisible-" in warnings[0]
+    assert len(window.ride_history().rides) == 1
+
+    warnings.clear()
+    monkeypatch.setattr(history.RideHistory, "save", lambda self: (_ for _ in ()).throw(OSError("verrouillé")))
+    pedal(window.session, 30, start=1_759_490_000)
+    window.finish_button.click()
+    assert "historique n'a pas pu être écrit : verrouillé" in warnings[0]
+    assert len(list(window.outbox.dir.glob("*.fit"))) == 2  # le .fit, lui, est là
+
+
 def test_discarded_ride_stays_out_of_the_history(window):
     window.ask_ride_export = lambda parent, default, summary="": DISCARD
     pedal(window.session, 30)

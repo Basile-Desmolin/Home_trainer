@@ -26,6 +26,11 @@ class SyncError(Exception):
     """Échec d'un envoi ou d'une connexion, avec un message à montrer tel quel."""
 
 
+class FileRejected(SyncError):
+    """Le service refuse ce fichier-là (fichier invalide, illisible) : le compte, lui, fonctionne.
+    Les sorties suivantes peuvent partir ; ce fichier n'est plus renvoyé que sur demande."""
+
+
 @dataclass(frozen=True)
 class Response:
     status: int
