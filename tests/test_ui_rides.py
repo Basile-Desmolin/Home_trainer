@@ -388,7 +388,7 @@ def test_virtual_gears_change_the_resistance_off_erg(window):
     window.session.start()
     window._push_target()
     assert window.source._target.gear == pytest.approx(1.085 ** 2)
-    assert "braquet 14 / 24" in window.m_cadence.sub.text()
+    assert "braquet 14 / 24" in window.cards["cadence"].sub.text()
     window.toggle_erg()
 
 

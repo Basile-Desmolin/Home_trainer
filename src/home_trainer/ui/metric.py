@@ -1,11 +1,16 @@
-"""Une grande valeur avec son libellé, partagée par la séance, le mode libre et le parcours."""
+"""Une grande valeur avec son libellé, et la grille des cartes du catalogue d'indicateurs,
+partagées par la séance, le mode libre et le parcours."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 
+from .gauges import ZoneBar
+from .indicators import CATALOG, RideView
 from .theme import TEXT, number_font, tinted_card
 
 # Unité détachée de la valeur et affichée en petit : « 238 W » → « 238 » + « W ».
@@ -70,3 +75,50 @@ class Metric(QFrame):
         self.value.setText(value)
         self.unit.setText(unit)
         self.sub.setText(sub)
+
+
+@dataclass(frozen=True)
+class Slot:
+    """Place d'un indicateur du catalogue dans la grille d'un écran."""
+
+    key: str
+    row: int
+    col: int
+    size: int = 34  # taille des chiffres
+    rows: int = 1
+    cols: int = 1
+
+
+class MetricGrid(QGridLayout):
+    """Cartes du catalogue d'indicateurs, placées selon `slots` ; l'écran ajoute ses blocs de commande
+    aux places restantes (`addWidget`). `refresh` met toutes les cartes à jour."""
+
+    def __init__(self, slots: list[Slot]) -> None:
+        super().__init__()
+        self.setSpacing(10)
+        self.cards: dict[str, Metric] = {}
+        self._gauges: dict[str, ZoneBar | QProgressBar] = {}
+        for slot in slots:
+            indicator = CATALOG[slot.key]
+            card = Metric(indicator.title, slot.size, indicator.color)
+            if indicator.gauge == "zones":
+                self._gauges[slot.key] = gauge = ZoneBar()
+                card.add(gauge)
+            elif indicator.gauge == "progress":
+                self._gauges[slot.key] = bar = QProgressBar()
+                bar.setTextVisible(False)
+                bar.setFixedHeight(6)
+                bar.setRange(0, 1000)
+                card.add(bar)
+            self.cards[slot.key] = card
+            self.addWidget(card, slot.row, slot.col, slot.rows, slot.cols)
+
+    def refresh(self, view: RideView) -> None:
+        for key, card in self.cards.items():
+            shown = CATALOG[key].show(view)
+            card.set(shown.value, shown.sub, shown.unit)
+            gauge = self._gauges.get(key)
+            if isinstance(gauge, ZoneBar):
+                gauge.set_zone(shown.zone)
+            elif gauge is not None:
+                gauge.setValue(round(1000 * (shown.progress or 0.0)))

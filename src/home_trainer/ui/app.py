@@ -35,8 +35,8 @@ from pathlib import Path
 from PySide6.QtCore import QElapsedTimer, QLocale, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-                               QFormLayout, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
+                               QFormLayout, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+                               QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy, QSpinBox,
                                QStackedWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from ..bricks import BrickSyntaxError, parse_workout
@@ -58,14 +58,15 @@ from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
 from .calibration import CalibrationDialog, can_calibrate
-from .chart import ACCENT, CADENCE, HEART, MUTED, TEXT, WorkoutChart, hms, zone_color
+from .chart import ACCENT, HEART, MUTED, TEXT, WorkoutChart, hms, zone_color
 from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
-from .gauges import BrickRing, ZoneBar
+from .gauges import BrickRing
 from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel, grade_color, grade_text
 from .heart_rate_mode import ask_heart_rate_mode
+from .indicators import RideView
 from .loader import load_workout
-from .metric import Metric
+from .metric import Metric, MetricGrid, Slot
 from .mini import MiniInfo, MiniWindow
 from .profiles import choose_profile
 from .history import HistoryDialog
@@ -84,6 +85,10 @@ log = logging.getLogger(__name__)
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
 TICK_MS = 200
+# Cartes du catalogue d'indicateurs de la séance ; la cible occupe la colonne 1 et l'intensité la ligne 1,
+# colonne 2.
+WORKOUT_SLOTS = [Slot("power", 0, 0, 64, rows=2), Slot("cadence", 0, 2), Slot("heart", 0, 3),
+                 Slot("workout_remaining", 1, 3)]
 CLOSE_SEND_WAIT_S = 20  # à la fermeture, temps laissé à l'envoi de la dernière sortie
 ICON = Path(__file__).with_name("assets") / "icon.png"
 OPEN_FILTER = ("Séances et parcours (*.zwo *.mrc *.erg *.fit *.gpx);;Séances (*.zwo *.mrc *.erg *.fit);;"
@@ -361,11 +366,8 @@ class MainWindow(QMainWindow):
         heading.addWidget(self.subtitle, 1, Qt.AlignBottom)
         layout.addLayout(heading)
 
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        self.m_power = Metric("PUISSANCE", 64)
-        self.power_zones = ZoneBar()
-        self.m_power.add(self.power_zones)
+        self.workout_grid = grid = MetricGrid(WORKOUT_SLOTS)
+        self.cards = grid.cards
         self.m_target = Metric("CIBLE", 64, ACCENT)
         self.step_ring = BrickRing(124)
         self.step_ring.setToolTip("Temps restant sur la brique")
@@ -378,20 +380,8 @@ class MainWindow(QMainWindow):
         tag_row.addStretch(1)
         self.m_target.body.addLayout(tag_row)
         self.m_target.add(self.next_label)
-        self.m_cadence = Metric("CADENCE", 34, CADENCE)
-        self.m_heart = Metric("CARDIO", 34, HEART)
-        self.m_total = Metric("RESTE AU TOTAL", 34)
-        self.total_bar = QProgressBar()
-        self.total_bar.setTextVisible(False)
-        self.total_bar.setFixedHeight(6)
-        self.total_bar.setRange(0, 1000)
-        self.m_total.add(self.total_bar)
-        grid.addWidget(self.m_power, 0, 0, 2, 1)
         grid.addWidget(self.m_target, 0, 1, 2, 1)
-        grid.addWidget(self.m_cadence, 0, 2)
-        grid.addWidget(self.m_heart, 0, 3)
         grid.addWidget(self._build_intensity(), 1, 2)
-        grid.addWidget(self.m_total, 1, 3)
         for c, stretch in enumerate((28, 30, 21, 21)):
             grid.setColumnStretch(c, stretch)
         layout.addLayout(grid)
@@ -1395,13 +1385,6 @@ class MainWindow(QMainWindow):
         running = self.active.state is State.RUNNING
         return self.gears.factor if running and self.gears_apply and isinstance(self.source, Trainer) else 1.0
 
-    def _shown_reading(self):
-        """Dernière mesure, vitesse ramenée au braquet virtuel."""
-        r = self._last_reading
-        if r is None or getattr(r, "speed_kmh", None) is None:
-            return r
-        return dataclasses.replace(r, speed_kmh=self._speed(r))
-
     def _push_target(self) -> None:
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
         active = self.active
@@ -1418,22 +1401,18 @@ class MainWindow(QMainWindow):
         self._refresh_power_chip()
         self._refresh_heart_chip()
         self._refresh_click_chip()
-        gear = self.gears.label if self.gears_apply else None
         page = "route" if self.route_ride else "free" if self.free_ride else "workout"
         if not self.tabs[page].isChecked():
             self.tabs[page].setChecked(True)
+        view = self._ride_view()
         if self.route_ride:
-            self.route_panel.refresh(self.route, self._last_reading, gear)
-            self._refresh_heart_rate(self.route_panel.m_heart, self.route)
+            self.route_panel.refresh(view)
             return
         if self.free_ride:
-            self.free_panel.refresh(self.free, self._shown_reading(), gear)
-            self._refresh_heart_rate(self.free_panel.m_heart, self.free)
+            self.free_panel.refresh(view)
             return
         s = self.session
-        r = self._last_reading
-        self.m_power.set(f"{r.power_w:.0f} W" if r else "—", f"{r.power_w / self.ftp * 100:.0f} % FTP" if r else "")
-        self.power_zones.set_zone(zone_index(r.power_w if r else None, self.ftp))
+        self.workout_grid.refresh(view)
         target = s.target_w
         base = s.base_target_w
         bpm = s.target_bpm
@@ -1453,7 +1432,7 @@ class MainWindow(QMainWindow):
             # Récup (zone 1, grise) : chiffres en blanc, sinon ils auraient l'air éteints.
             self.m_target.set_color(TEXT if color is None or zone_index(target, self.ftp) == 0 else color)
         self.m_target.set_tint(color)
-        self.m_power.set_tint(color)
+        self.cards["power"].set_tint(color)
         if color is None:
             self.zone_tag.hide()
         else:
@@ -1470,14 +1449,6 @@ class MainWindow(QMainWindow):
         brick = f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}"
         self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick,
                            color or MUTED)
-        self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
-        self.total_bar.setValue(round(1000 * s.position_s / s.total_s) if s.total_s else 0)
-        # Sous la cadence, la vitesse : celle du home trainer, sinon celle estimée (comme dans l'enregistrement).
-        sub = "tr/min" if r is None else f"tr/min · {self._speed(r):.1f} km/h".replace(".", ",")
-        if gear:
-            sub += f" · braquet {gear}"
-        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
-        self._refresh_heart_rate(self.m_heart, s)
         self.intensity_label.setText(f"{s.intensity_pct} %")
         self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
         if s.state is State.FINISHED:
@@ -1622,25 +1593,32 @@ class MainWindow(QMainWindow):
             self._heart_color = color
             self.heart_chip.setIcon(dot(color))
 
-    def _refresh_heart_rate(self, metric: Metric,
-                            session: WorkoutSession | FreeRideSession | RouteSession) -> None:
+    def _ride_view(self) -> RideView:
+        """Instantané de la sortie affichée, pour les cartes du catalogue d'indicateurs."""
+        active = self.active
+        r = self._last_reading
+        if isinstance(active, RouteSession):
+            speed = active.speed_kmh  # vitesse simulée sur la route
+        elif r is None or (isinstance(active, FreeRideSession) and r.speed_kmh is None):
+            speed = None  # mode libre : seulement la vitesse donnée par le home trainer
+        else:
+            speed = self._speed(r)  # séance : celle du home trainer, sinon l'estimée (comme l'enregistrement)
+        ftp = self.ftp if isinstance(active, WorkoutSession) else active.ftp or DEFAULT_FTP
+        heart, heart_off = self._heart_view()
+        gear = self.gears.label if self.gears_apply else None
+        return RideView(active, r, ftp, speed, gear, heart, heart_off)
+
+    def _heart_view(self) -> tuple[HeartRateReading | None, str]:
+        """Dernière fréquence reçue, sinon pourquoi il n'y en a pas."""
         sensor = self.heart_rate
         if sensor is None:
-            metric.set("Off", "aucun capteur · pastille Cardio en haut")
-            return
+            return None, "aucun capteur · pastille Cardio en haut"
         self._remember("hr", sensor)
         heart = sensor.latest()
-        average = session.average_heart_rate()
         if heart is not None:
-            sub = f"bpm · moy. {average:.0f}" if average else "bpm"
-            if heart.battery_pct is not None and heart.battery_pct <= 20:
-                sub += f" · batterie {heart.battery_pct} %"
-            if heart.contact is False:
-                sub += " · mauvais contact"
-            metric.set(f"{heart.bpm}", sub)
-        else:
-            state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
-            metric.set("Off", f"{self._display_name('hr', sensor)} : {state}")
+            return heart, ""
+        state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
+        return None, f"{self._display_name('hr', sensor)} : {state}"
 
 
 CLICK_TIP = ("Zwift Click : ses boutons + / − changent le braquet virtuel hors ERG "

@@ -12,14 +12,13 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QVBoxLayout, QWidget)
 
-from .chart import (ACCENT, CADENCE, DEFAULT_FTP, HEART, HEART_SMOOTH_S, MUTED, TEXT, draw_cadence, draw_cursor,
+from .chart import (ACCENT, DEFAULT_FTP, HEART, HEART_SMOOTH_S, MUTED, TEXT, draw_cadence, draw_cursor,
                     draw_power, hms, paint_panel, smooth, trace, zone_color)
-from .gauges import ZoneBar
-from .metric import Metric
-from .power import Reading
+from .indicators import RideView
+from .metric import MetricGrid, Slot
 from .session import FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, State
 from .theme import icon, keycaps, number_font, zone_index
 
@@ -38,6 +37,8 @@ def grade_text(grade_pct: float) -> str:
 def grade_color(grade_pct: float) -> QColor:
     return QColor(next(color for limit, color in GRADES if grade_pct < limit))
 WINDOW_S = 600  # la courbe montre les 10 dernières minutes
+# Cartes du catalogue d'indicateurs ; la consigne occupe le milieu (lignes 0 et 1, colonnes 1 et 2).
+SLOTS = [Slot("power", 0, 0, 52), Slot("heart", 0, 3, 40), Slot("cadence", 1, 0, 30), Slot("elapsed", 1, 3, 30)]
 
 
 class FreeRideChart(QWidget):
@@ -158,19 +159,9 @@ class FreeRidePanel(QWidget):
         title.setObjectName("title")
         layout.addWidget(title)
 
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        self.m_power = Metric("PUISSANCE", 52)
-        self.power_zones = ZoneBar()
-        self.m_power.add(self.power_zones)
-        self.m_heart = Metric("CARDIO", 40, HEART)
-        self.m_time = Metric("TEMPS", 30)
-        self.m_cadence = Metric("CADENCE", 30, CADENCE)
-        grid.addWidget(self.m_power, 0, 0)
+        self.grid = grid = MetricGrid(SLOTS)
+        self.cards = grid.cards
         grid.addWidget(self._build_target(), 0, 1, 2, 2)
-        grid.addWidget(self.m_heart, 0, 3)
-        grid.addWidget(self.m_cadence, 1, 0)
-        grid.addWidget(self.m_time, 1, 3)
         for c in range(4):
             grid.setColumnStretch(c, 1)
         layout.addLayout(grid)
@@ -267,20 +258,17 @@ class FreeRidePanel(QWidget):
         self.hint.setText(keycaps("[Espace] pause   [↑] [↓] ±5 W   [Pg↑] [Pg↓] ±25 W" if erg
                                   else "[Espace] pause   [↑] [↓] ±0,5 %   [Maj+↑] [Maj+↓] braquet"))
 
-    def refresh(self, session: FreeRideSession, reading: Reading | None, gear: str | None = None) -> None:
-        """`gear` : braquet virtuel en cours (« 14 / 24 »), montré en pente."""
+    def refresh(self, view: RideView) -> None:
+        """Cartes du catalogue et consigne ; le braquet virtuel (`view.gear`) est montré en pente."""
+        session = view.session
+        assert isinstance(session, FreeRideSession)
+        gear = view.gear
         ftp = session.ftp or DEFAULT_FTP
-        r = reading
-        average = session.average_power()
-        sub = f"{r.power_w / ftp * 100:.0f} % FTP" if r else ""
-        if average is not None:
-            sub += f"{' · ' if sub else ''}moy. {average:.0f} W"
-        self.m_power.set(f"{r.power_w:.0f} W" if r else "—", sub)
-        self.power_zones.set_zone(zone_index(r.power_w if r else None, ftp))
+        self.grid.refresh(view)
         erg = session.mode is FreeMode.ERG
         # En ERG, la carte prend la couleur de la zone de la consigne ; en pente, celle de la pente.
         color = zone_color(session.target_w, ftp) if erg else grade_color(session.grade_pct)
-        self.m_power.set_tint(color if session.state is State.RUNNING else None)
+        self.cards["power"].set_tint(color if session.state is State.RUNNING else None)
         dim = erg and zone_index(session.target_w, ftp) == 0  # récup (grise) : chiffres en blanc
         self.target_label.setStyleSheet(f"color: {TEXT if dim else color.name()};")
         self._set_mode_labels(session.mode)
@@ -291,12 +279,6 @@ class FreeRidePanel(QWidget):
             self.target_label.setText(grade_text(session.grade_pct))
             self.target_sub.setText(f"cycliste {session.rider_kg:g} kg".replace(".", ",")
                                     + (f" · braquet {gear}" if gear else ""))
-        speed = getattr(r, "speed_kmh", None)
-        sub = "tr/min" if speed is None else f"tr/min · {speed:.1f} km/h".replace(".", ",")
-        if gear and not erg:
-            sub += f" · braquet {gear}"
-        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
-        self.m_time.set(hms(session.elapsed_s), "")
         running = f"ERG à {session.target_w} W" if erg else f"Pente simulée à {grade_text(session.grade_pct)}"
         self.status_label.setText({
             State.READY: "Réglez la cible puis démarrez : le home trainer passe "

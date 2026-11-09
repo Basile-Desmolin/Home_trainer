@@ -14,19 +14,21 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
-from .chart import ACCENT, CADENCE, DEFAULT_FTP, HEART, MUTED, TEXT, hms, paint_panel
+from .chart import ACCENT, MUTED, TEXT, hms, paint_panel
 from .free_ride import grade_color, grade_text
-from .gauges import ZoneBar
-from .metric import Metric
-from .power import Reading
+from .indicators import RideView, km_text
+from .metric import MetricGrid, Slot
 from .session import DIFFICULTY_STEP, RouteSession, State
-from .theme import icon, keycaps, number_font, zone_index
+from .theme import icon, keycaps, number_font
 
 AHEAD_M = 2000.0  # le zoom montre les 2 km à venir
 BEHIND_M = 200.0
+# Cartes du catalogue d'indicateurs ; la pente occupe la colonne 1 (lignes 0 et 1).
+SLOTS = [Slot("power", 0, 0, 44), Slot("heart", 0, 2, 44), Slot("route_remaining", 0, 3, 44),
+         Slot("cadence", 1, 0, 26), Slot("speed", 1, 2, 26), Slot("elapsed", 1, 3, 26)]
 
 
 DESCENT = "#3d8bd9"
@@ -35,10 +37,6 @@ DESCENT = "#3d8bd9"
 def route_grade_color(grade_pct: float) -> QColor:
     """Comme le mode libre (vert → rouge en montée), avec les descentes en bleu."""
     return QColor(DESCENT) if grade_pct <= -1 else grade_color(grade_pct)
-
-
-def km_text(meters: float, decimals: int = 1) -> str:
-    return f"{meters / 1000:.{decimals}f} km".replace(".", ",")
 
 
 @dataclass(frozen=True)
@@ -300,23 +298,9 @@ class RoutePanel(QWidget):
         self.title.setObjectName("title")
         layout.addWidget(self.title)
 
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        self.m_power = Metric("PUISSANCE", 44)
-        self.power_zones = ZoneBar()
-        self.m_power.add(self.power_zones)
-        self.m_heart = Metric("CARDIO", 44, HEART)
-        self.m_remaining = Metric("RESTE", 44)
-        self.m_cadence = Metric("CADENCE", 26, CADENCE)
-        self.m_speed = Metric("VITESSE", 26)
-        self.m_time = Metric("TEMPS", 26)
-        grid.addWidget(self.m_power, 0, 0)
+        self.grid = grid = MetricGrid(SLOTS)
+        self.cards = grid.cards
         grid.addWidget(self._build_grade(), 0, 1, 2, 1)
-        grid.addWidget(self.m_heart, 0, 2)
-        grid.addWidget(self.m_remaining, 0, 3)
-        grid.addWidget(self.m_cadence, 1, 0)
-        grid.addWidget(self.m_speed, 1, 2)
-        grid.addWidget(self.m_time, 1, 3)
         for c in range(4):
             grid.setColumnStretch(c, 1)
         layout.addLayout(grid)
@@ -397,19 +381,13 @@ class RoutePanel(QWidget):
         r = session.route
         self.title.setText(f"{r.name}  ·  {km_text(r.total_m)}  ·  D+ {r.climb_m:.0f} m")
 
-    def refresh(self, session: RouteSession, reading: Reading | None, gear: str | None = None) -> None:
-        """`gear` : braquet virtuel en cours (« 14 / 24 »)."""
-        ftp = session.ftp or DEFAULT_FTP
-        r = reading
-        average = session.average_power()
-        sub = f"{r.power_w / ftp * 100:.0f} % FTP" if r else ""
-        if average is not None:
-            sub += f"{' · ' if sub else ''}moy. {average:.0f} W"
-        self.m_power.set(f"{r.power_w:.0f} W" if r else "—", sub)
-        self.power_zones.set_zone(zone_index(r.power_w if r else None, ftp))
-        self.m_power.set_tint(route_grade_color(session.grade_pct) if session.state is State.RUNNING else None)
-        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—",
-                            "tr/min" + (f" · braquet {gear}" if gear else ""))
+    def refresh(self, view: RideView) -> None:
+        """Cartes du catalogue, pente et difficulté."""
+        session = view.session
+        assert isinstance(session, RouteSession)
+        self.grid.refresh(view)
+        self.cards["power"].set_tint(route_grade_color(session.grade_pct) if session.state is State.RUNNING
+                                     else None)
 
         grade = session.grade_pct
         self.grade_label.setText(grade_text(grade))
@@ -419,13 +397,6 @@ class RoutePanel(QWidget):
                                + ("" if sent == grade else f" · home trainer {grade_text(sent)}"))
         self.difficulty_label.setText(f"difficulté {session.difficulty_pct} %")
         self.difficulty_label.setStyleSheet(f"color: {TEXT if session.difficulty_pct == 100 else ACCENT};")
-
-        self.m_remaining.set(km_text(session.remaining_m),
-                             f"D+ restant {session.climb_remaining_m:.0f} m · fait {km_text(session.distance_m)}")
-        avg = session.average_speed_kmh()
-        self.m_speed.set(f"{session.speed_kmh:.1f}".replace(".", ","),
-                         "km/h" + (f" · moy. {avg:.1f}".replace(".", ",") if avg else ""))
-        self.m_time.set(hms(session.elapsed_s), f"D+ fait {session.climb_done_m:.0f} m")
 
         self.status_label.setText({
             State.READY: "Démarrez et pédalez : la pente de la route arrive dans le home trainer.",

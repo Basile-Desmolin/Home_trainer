@@ -117,10 +117,12 @@ def test_main_window_pauses_for_calibration(app, tmp_path):
 
 def test_heart_rate_off_without_sensor_or_signal(app, tmp_path):
     window = MainWindow(parse_workout("1m@100"), book=DeviceBook(tmp_path / "a.json"))
-    assert window.m_heart.value.text() == "Off"
-    for panel in (window.free_panel, window.route_panel):
-        window._refresh_heart_rate(panel.m_heart, window.session)
-        assert panel.m_heart.value.text() == "Off"
+    assert window.cards["heart"].value.text() == "Off"
+    window.enter_free_ride()
+    window._refresh()
+    assert window.free_panel.cards["heart"].value.text() == "Off"
+    assert window.free_panel.cards["heart"].sub.text() == "aucun capteur · pastille Cardio en haut"
+    window.leave_free_ride()
 
     class Silent(BleHeartRateSensor):  # branché mais sans fréquence reçue
         def start(self):
@@ -130,20 +132,20 @@ def test_heart_rate_off_without_sensor_or_signal(app, tmp_path):
             pass
 
     window.set_heart_rate_sensor(Silent("AA:BB"))
-    assert window.m_heart.value.text() == "Off"
+    assert window.cards["heart"].value.text() == "Off"
     window.heart_rate._publish(HeartRateReading(131))
     window._refresh()
-    assert window.m_heart.value.text() == "131"
+    assert window.cards["heart"].value.text() == "131"
     window.close()
 
 
 def test_session_shows_speed_under_cadence(app):
     window = MainWindow(parse_workout("10m@200"))  # simulateur : pas de vitesse mesurée, elle est estimée
-    assert window.m_cadence.sub.text() == "tr/min"
+    assert window.cards["cadence"].sub.text() == "tr/min"
     window._toggle()
     for _ in range(20):
         window._on_tick()
     reading = window._last_reading
     speed = f"{window._speed(reading):.1f}".replace(".", ",")
-    assert window.m_cadence.sub.text() == f"tr/min · {speed} km/h"
+    assert window.cards["cadence"].sub.text() == f"tr/min · {speed} km/h"
     window.close()
