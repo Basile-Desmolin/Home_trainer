@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "home-trainer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pilotage d'un home trainer (Wahoo, Elite, Tacx… en Bluetooth / ANT+) et séances .fit en briques"
 requires-python = ">=3.10"
 dependencies = [

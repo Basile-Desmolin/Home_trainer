@@ -14,7 +14,7 @@ import os
 import time
 from pathlib import Path
 
-from .fit_activity import ActivityPoint, _distances, _durations, summarize, write_activity
+from .fit_activity import ActivityPoint, _distances, _durations, lap_groups, summarize, write_activity
 
 # Extension → libellé, dans l'ordre de la liste de choix (le premier est celui par défaut).
 RIDE_FORMATS = {
@@ -31,11 +31,7 @@ def _iso(at: float) -> str:
 def encode_tcx(points: list[ActivityPoint]) -> str:
     points = sorted(points, key=lambda p: p.at)
     distances = _distances(points, _durations(points))
-    laps: list[list[int]] = []
-    for i, p in enumerate(points):
-        if not laps or p.lap != points[laps[-1][-1]].lap:
-            laps.append([])
-        laps[-1].append(i)
+    laps = lap_groups(points)
     out = ['<?xml version="1.0" encoding="UTF-8"?>',
            '<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2"'
            ' xmlns:ns3="http://www.garmin.com/xmlschemas/ActivityExtension/v2">',
@@ -60,6 +56,11 @@ def encode_tcx(points: list[ActivityPoint]) -> str:
             p = points[i]
             out.append("          <Trackpoint>")
             out.append(f"            <Time>{_iso(p.at)}</Time>")
+            if p.lat is not None and p.lon is not None:  # parcours GPX (ordre imposé par le schéma TCX)
+                out.append(f"            <Position><LatitudeDegrees>{p.lat:.7f}</LatitudeDegrees>"
+                           f"<LongitudeDegrees>{p.lon:.7f}</LongitudeDegrees></Position>")
+            if p.altitude_m is not None:
+                out.append(f"            <AltitudeMeters>{p.altitude_m:.1f}</AltitudeMeters>")
             out.append(f"            <DistanceMeters>{distances[i]:.1f}</DistanceMeters>")
             if p.heart_rate_bpm:
                 out.append(f"            <HeartRateBpm><Value>{round(p.heart_rate_bpm)}</Value></HeartRateBpm>")
@@ -78,7 +79,7 @@ def encode_tcx(points: list[ActivityPoint]) -> str:
 
 
 CSV_COLUMNS = ["heure", "temps_s", "puissance_w", "cadence_tr_min", "cardio_bpm", "vitesse_km_h",
-               "distance_m", "pente_pct", "tour"]
+               "distance_m", "pente_pct", "altitude_m", "tour"]
 
 
 def write_csv(points: list[ActivityPoint], dest: str | os.PathLike) -> Path:
@@ -91,7 +92,9 @@ def write_csv(points: list[ActivityPoint], dest: str | os.PathLike) -> Path:
         w = csv.writer(f, delimiter=";")
         w.writerow(CSV_COLUMNS)
         elapsed = 0.0
-        for p, dt, distance in zip(points, durations, distances):
+        # Numéro du tour, comme dans le .fit : 1, 2, 3… (briques et tours manuels).
+        lap_numbers = [n + 1 for n, group in enumerate(lap_groups(points)) for _ in group]
+        for p, dt, distance, lap_number in zip(points, durations, distances, lap_numbers):
             elapsed += dt
 
             def num(v: float | None, digits: int = 0) -> str:
@@ -99,18 +102,20 @@ def write_csv(points: list[ActivityPoint], dest: str | os.PathLike) -> Path:
 
             w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(p.at)), num(elapsed),
                         num(p.power_w), num(p.cadence_rpm), num(p.heart_rate_bpm), num(p.speed_kmh, 2),
-                        num(distance, 1), num(p.grade_pct, 1), p.lap + 1])
+                        num(distance, 1), num(p.grade_pct, 1), num(p.altitude_m, 1), lap_number])
     return path
 
 
-def write_ride(points: list[ActivityPoint], dest: str | os.PathLike) -> Path:
-    """Écrit la sortie dans le format de l'extension de `dest` (.fit, .tcx ou .csv)."""
+def write_ride(points: list[ActivityPoint], dest: str | os.PathLike,
+               ftp: float | None = None, hr_max: float | None = None) -> Path:
+    """Écrit la sortie dans le format de l'extension de `dest` (.fit, .tcx ou .csv) ; `ftp` et
+    `hr_max` ne servent qu'au .fit."""
     if not points:
         raise ValueError("sortie vide : aucune mesure")
     path = Path(dest)
     fmt = path.suffix.lower().lstrip(".")
     if fmt == "fit":
-        return write_activity(points, path)
+        return write_activity(points, path, ftp=ftp, hr_max=hr_max)
     if fmt == "tcx":
         path.write_text(encode_tcx(points), encoding="utf-8")
         return path

@@ -69,10 +69,15 @@ class BackgroundSensor(Generic[T]):
         self._thread.start()
 
     def stop(self, timeout: float = 3.0) -> None:
+        stop_all([self], timeout)
+
+    def _request_stop(self) -> None:
         self._stop.set()
         self._interrupt()
+
+    def _wait_stopped(self, deadline: float) -> None:
         if self._thread is not None:
-            self._thread.join(timeout)
+            self._thread.join(max(0.0, deadline - time.monotonic()))
         self._thread = None
         self._set_state(SensorState.STOPPED)
 
@@ -136,3 +141,18 @@ class BackgroundSensor(Generic[T]):
                 log.warning("%s : %s", self.name, e, exc_info=True)
                 self._set_state(SensorState.ERROR, str(e) or type(e).__name__)
             self._stop.wait(self.retry_s)
+
+
+def stop_all(sensors, timeout: float = 3.0) -> None:
+    """Arrête des capteurs ensemble : tous reçoivent l'ordre d'arrêt, puis on les attend au plus
+    `timeout` secondes en tout (arrêtés un par un, la fermeture attendait jusqu'à 3 s par
+    capteur). `None` dans la liste est ignoré."""
+    sensors = [s for s in sensors if s is not None]
+    for sensor in sensors:
+        try:
+            sensor._request_stop()
+        except Exception:  # noqa: BLE001 (un capteur en panne n'empêche pas d'arrêter les autres)
+            log.warning("%s : arrêt", sensor.name, exc_info=True)
+    deadline = time.monotonic() + timeout
+    for sensor in sensors:
+        sensor._wait_stopped(deadline)

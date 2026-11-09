@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from PySide6.QtWidgets import (QButtonGroup, QDialog, QDialogButtonBox, QFormLayout, QLabel, QRadioButton,
                                QSpinBox, QVBoxLayout, QWidget)
 
+from .. import heart_zones as hz
 from ..heart_zones import DEFAULT_HR_MAX, MAX_HR_MAX, MIN_HR_MAX, ftp_percent_for
 
 
@@ -69,9 +70,12 @@ class HeartRateModeDialog(QDialog):
         self.hr_max_box.setEnabled(to_power)
         if to_power:
             hr_max = self.hr_max_box.value()
+            threshold = hz.THRESHOLD_PCT_OF_MAX
             examples = ", ".join(f"{bpm} bpm ≈ {ftp_percent_for(bpm, hr_max):.0f} % FTP"
-                                 for bpm in (round(hr_max * 0.65), round(hr_max * 0.8), round(hr_max * 0.9)))
-            self.hint.setText(f"FC au seuil estimée à 90 % de la FC max. Par exemple : {examples}. "
+                                 for bpm in (round(hr_max * 0.65), round(hr_max * 0.8),
+                                             round(hr_max * threshold / 100)))
+            self.hint.setText(f"FC au seuil estimée à {threshold:.0f} % de la FC max (zone i4 de l'ESIE). "
+                              f"Par exemple : {examples}. "
                               "C'est une estimation : ajustez au besoin avec l'intensité +/−.")
         else:
             self.hint.setText("Le home trainer reste en résistance libre ; la FC cible s'affiche à côté "

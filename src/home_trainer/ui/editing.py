@@ -14,7 +14,7 @@ Une répétition s'édite avec son nombre de fois : « 3 », « 3x », « ×3 »
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..bricks import BrickSyntaxError, parse_duration, parse_power
 from ..workout import PowerTarget, PowerUnit, Step
@@ -90,8 +90,25 @@ def _power(text: str, unit: PowerUnit, what: str) -> PowerTarget | None:
     return PowerTarget(target.low, target.high, unit)
 
 
-def step_from_fields(fields: StepFields) -> Step:
-    """Brique décrite par les champs ; `BrickSyntaxError` avec un message lisible sinon."""
+def step_from_fields(fields: StepFields, original: Step | None = None) -> Step:
+    """Brique décrite par les champs ; `BrickSyntaxError` avec un message lisible sinon.
+
+    `original` : la brique d'où viennent les champs (séance ouverte). Ce que l'éditeur ne montre
+    pas en vient : intact si les champs n'ont pas changé ; sinon son intensité (échauffement,
+    retour au calme) et ses notes restent, ses cibles de FC aussi tant que la puissance ne change pas."""
+    step = _step_from_fields(fields)
+    if original is None:
+        return step
+    shown = fields_from_step(original)
+    if fields == shown:
+        return original
+    same_power = (fields.power, fields.power_end, fields.unit) == (shown.power, shown.power_end, shown.unit)
+    return replace(step, intensity=original.intensity, notes=original.notes,
+                   heart_rate=original.heart_rate if same_power else None,
+                   heart_rate_end=original.heart_rate_end if same_power and step.duration_s is not None else None)
+
+
+def _step_from_fields(fields: StepFields) -> Step:
     duration = parse_duration_field(fields.duration)
     power = _power(fields.power, fields.unit, "puissance")
     power_end = _power(fields.power_end, fields.unit, "fin de rampe")

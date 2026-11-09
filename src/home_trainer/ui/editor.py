@@ -26,6 +26,8 @@ COL_DURATION, COL_POWER, COL_END, COL_UNIT, COL_NAME = range(5)
 HEADERS = ["Durée", "Puissance", "Fin de rampe", "Unité", "Nom"]
 ERROR = "#e5484d"
 REPEAT_ROLE = Qt.UserRole + 1
+# Brique d'origine d'une ligne (séance ouverte) : notes, intensité, cibles de FC, que le tableau ne montre pas.
+ORIGINAL_ROLE = Qt.UserRole + 2
 SAVE_FILTERS = {
     "Zwift (*.zwo)": ".zwo",
     "MRC, en % FTP (*.mrc)": ".mrc",
@@ -163,6 +165,8 @@ class WorkoutEditor(QDialog):
 
         if workout is None:
             workout = Workout(name="Nouvelle séance", steps=parse_bricks("10m@50%>70% 20m@88% 10m@60%>45%"))
+        # Ce que le tableau ne montre pas reste dans la séance (description et FTP du fichier).
+        self._description, self._file_ftp = workout.description, workout.ftp
         if workout.uses_ftp_percent and not workout.uses_watts:
             self.unit_box.setCurrentIndex(self.unit_box.findData(PowerUnit.FTP_PERCENT))
         self.name_edit.setText(workout.name)
@@ -191,6 +195,7 @@ class WorkoutEditor(QDialog):
             node.setExpanded(True)
         else:
             self._set_fields(node, fields_from_step(item))
+            node.setData(COL_DURATION, ORIGINAL_ROLE, item)
         return node
 
     def _set_fields(self, node: QTreeWidgetItem, f: StepFields) -> None:
@@ -228,7 +233,7 @@ class WorkoutEditor(QDialog):
             node.setText(COL_NAME, f"répétition · {hms(total)} au total")
             return Repeat(count, children)
         try:
-            step = step_from_fields(self._fields(node))
+            step = step_from_fields(self._fields(node), node.data(COL_DURATION, ORIGINAL_ROLE))
         except BrickSyntaxError as e:
             self._mark(node, str(e))
             errors.append(str(e))
@@ -253,7 +258,8 @@ class WorkoutEditor(QDialog):
         items = [i for i in (self._read_node(self.tree.topLevelItem(n), errors)
                              for n in range(self.tree.topLevelItemCount())) if i is not None]
         self._updating = False
-        workout = Workout(name=self.name_edit.text().strip() or "Séance", steps=items)
+        workout = Workout(name=self.name_edit.text().strip() or "Séance", steps=items,
+                          description=self._description, ftp=self._file_ftp)
         self._workout = None if errors or not items else workout
         if not self.text_edit.hasFocus():
             self.text_edit.setText(format_bricks(items))

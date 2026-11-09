@@ -21,10 +21,11 @@ from dataclasses import dataclass, replace
 from enum import Enum
 
 from ..formats.fit_activity import ActivityPoint
+from ..ride_stats import LiveStats
 from ..route import Route
 from ..sensors.trainer import DEFAULT_BIKE_KG, DEFAULT_WEIGHT_KG, Slope
 from ..workout import Segment, Workout
-from .power import road_speed_kmh
+from .power import next_speed_kmh
 
 DEFAULT_RIDER_KG = DEFAULT_WEIGHT_KG - DEFAULT_BIKE_KG
 MIN_INTENSITY = 1
@@ -52,9 +53,62 @@ class Sample:
     at: float | None = None  # heure de la mesure (secondes depuis 1970), pour le .fit de la sortie
     lap: int = 0  # brique de la séance : un tour par brique dans le .fit
     position_s: float | None = None  # place sur l'axe de la séance (diffère de `t` après une brique passée)
+    balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
+    manual_lap: int = 0  # tours manuels (touche Tab) avant cette mesure : un tour de plus dans le .fit
+    # Parcours GPX seulement : place sur la trace, altitude lissée, D+ et D− depuis le départ.
+    lat: float | None = None
+    lon: float | None = None
+    altitude_m: float | None = None
+    ascent_m: float | None = None
+    descent_m: float | None = None
 
 
-class WorkoutSession:
+@dataclass(frozen=True)
+class _BrickChange:
+    """Changement de brique : temps écoulé à ce moment, et la brique quittée (numéro, consigne et
+    place sur l'axe de la séance à sa fin)."""
+
+    elapsed_s: float
+    index: int
+    target_w: float | None
+    position_s: float
+
+
+class _LiveStatsMixin:
+    """Moyennes et max de la sortie en cours (voir `LiveStats`), et tours manuels, communs aux trois modes."""
+
+    samples: list[Sample]
+    _live: LiveStats | None = None
+    manual_lap = 0  # tours manuels ouverts (touche Tab)
+    bike_kg = DEFAULT_BIKE_KG  # poids du vélo (profil) : consignes de pente et vitesse calculée
+
+    def new_lap(self) -> bool:
+        """Ouvre un nouveau tour (touche Tab). Sans mesure dans le tour en cours, rien ne change :
+        pas de tour vide (deux appuis de suite, ou avant le départ)."""
+        if not self.samples or self.samples[-1].manual_lap != self.manual_lap:
+            return False
+        self.manual_lap += 1
+        return True
+
+    @property
+    def lap_key(self) -> tuple[int, int]:
+        """Tour en cours : brique de la séance (0 hors séance) et tours manuels."""
+        return getattr(self, "index", 0), self.manual_lap
+
+    @property
+    def stats(self) -> LiveStats:
+        if self._live is None:
+            self._live = LiveStats()
+        return self._live.sync(self.samples)
+
+    def average_power(self) -> float | None:
+        return self.stats.average_power
+
+    def average_heart_rate(self) -> float | None:
+        return self.stats.average_heart_rate
+
+
+class WorkoutSession(_LiveStatsMixin):
     def __init__(self, workout: Workout, ftp: float | None = None, rider_kg: float = DEFAULT_RIDER_KG) -> None:
         self.workout = workout
         self.ftp = ftp
@@ -69,6 +123,8 @@ class WorkoutSession:
         self.samples: list[Sample] = []
         self.exported = False  # sortie déjà enregistrée en .fit (et envoyée)
         self.export_asked = False  # fenêtre d'enregistrement déjà ouverte à la fin
+        self._changes: list[_BrickChange] = []  # changements de brique, du premier au dernier
+        self._runs_cache: tuple | None = None  # tronçons du graphique déjà placés (voir `chart_runs`)
 
     # --- commandes -------------------------------------------------------
 
@@ -95,10 +151,40 @@ class WorkoutSession:
         """Passe à la brique suivante (« tour »), indispensable pour une brique ouverte."""
         if self.state is State.FINISHED:
             return
+        # La brique quittée, pour les mesures de ses dernières secondes enregistrées après ce changement.
+        self._changes.append(_BrickChange(self.elapsed_s, self.index, self.target_w, self.position_s))
         self.index += 1
         self.step_elapsed_s = 0.0
         if self.index >= len(self.segments):
             self._finish()
+
+    def previous_step(self) -> None:
+        """Revient à la brique précédente (saut accidentel) : reprise là où elle a été
+        quittée si elle a été passée avant son terme, sinon à son début. Le temps écoulé continue ;
+        le .fit ouvre un nouveau tour (le numéro de brique change). Sur la première brique : elle
+        recommence."""
+        if self.state is State.FINISHED:
+            return
+        if self.index == 0:
+            self.restart_step()
+            return
+        back = self.index - 1
+        seg = self.segments[back]
+        left = next((c for c in reversed(self._changes) if c.index == back), None)
+        done = 0.0 if left is None else left.position_s - seg.start_s
+        self._changes.append(_BrickChange(self.elapsed_s, self.index, self.target_w, self.position_s))
+        self.index = back
+        # Brique ouverte (pas de place sur l'axe) ou finie : on la reprend au début.
+        self.step_elapsed_s = done if seg.duration_s and done < seg.duration_s - 1 else 0.0
+
+    def restart_step(self) -> None:
+        """Recommence la brique en cours à son début. Le temps écoulé continue ; le .fit
+        ouvre un nouveau tour, comme la touche Tab."""
+        if self.state is State.FINISHED:
+            return
+        self._changes.append(_BrickChange(self.elapsed_s, self.index, self.target_w, self.position_s))
+        self.step_elapsed_s = 0.0
+        self.new_lap()
 
     def tick(self, dt: float) -> None:
         """Fait avancer la séance de `dt` secondes (sans effet hors « en cours »)."""
@@ -111,15 +197,27 @@ class WorkoutSession:
                 self.elapsed_s += dt
                 return
             self.elapsed_s += remaining
+            self.step_elapsed_s += remaining  # fin de la brique : consigne et position de sa dernière seconde
             dt -= remaining
             self.next_step()
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None) -> None:
-        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w, cadence_rpm, heart_rate_bpm,
-                                   None, speed_kmh, time.time() if at is None else at, self.index,
-                                   self.position_s))
+               at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
+        """Enregistre la seconde de chrono qui finit à `t` (par défaut : maintenant).
+
+        Elle va à la brique en cours au milieu de cette seconde : la mesure de la seconde 600 d'une
+        brique de 10 min, enregistrée au tic qui passe à la brique suivante, reste dans la brique de
+        10 min (tour du .fit de 600 s, et non 599 s ; bilan « 10:00 »)."""
+        t = self.elapsed_s if t is None else t
+        index, target, position = self.index, self.target_w, self.position_s
+        for change in reversed(self._changes):
+            if change.elapsed_s <= t - 0.5:
+                break
+            index, target, position = change.index, change.target_w, change.position_s
+        self.samples.append(Sample(t, power_w, target, cadence_rpm, heart_rate_bpm, None, speed_kmh,
+                                   time.time() if at is None else at, index, position, balance_left_pct,
+                                   self.manual_lap))
 
     # --- lecture ---------------------------------------------------------
 
@@ -136,16 +234,28 @@ class WorkoutSession:
     def chart_runs(self) -> list[list[Sample]]:
         """Mesures placées sur l'axe de la séance, pour le graphique, en tronçons roulés d'une
         traite : passer une brique avant son terme fait sauter l'axe sans faire avancer le temps
-        écoulé, et ouvre un nouveau tronçon (rien n'a été roulé sur la partie sautée)."""
-        runs: list[list[Sample]] = []
-        previous: Sample | None = None
-        for x in self.samples:
-            jumped = (previous is not None and x.position_s is not None and previous.position_s is not None
-                      and x.position_s - previous.position_s > x.t - previous.t + 1.0)
+        écoulé, et ouvre un nouveau tronçon (rien n'a été roulé sur la partie sautée). Revenir en
+        arrière (brique précédente ou recommencée) ouvre aussi un tronçon.
+
+        Tenu au fil des mesures (seules les nouvelles sont placées) ; recalculé en entier
+        si la liste a été remplacée ou raccourcie. Le résultat est partagé : ne pas le modifier."""
+        samples = self.samples
+        n, runs = 0, []
+        cache = self._runs_cache
+        if cache is not None:
+            seen, done, last, kept = cache
+            if seen is samples and len(samples) >= done and (not done or samples[done - 1] is last):
+                n, runs = done, kept
+        previous: Sample | None = samples[n - 1] if n else None
+        for x in samples[n:]:
+            moved = (None if previous is None or x.position_s is None or previous.position_s is None
+                     else x.position_s - previous.position_s)
+            jumped = moved is not None and (moved > x.t - previous.t + 1.0 or moved < -1.0)
             if not runs or jumped:
                 runs.append([])
             runs[-1].append(x if x.position_s is None else replace(x, t=x.position_s))
             previous = x
+        self._runs_cache = (samples, len(samples), samples[-1] if samples else None, runs)
         return runs
 
     @property
@@ -156,10 +266,6 @@ class WorkoutSession:
         if seg.duration_s is None:
             return None
         return max(seg.duration_s - self.step_elapsed_s, 0.0)
-
-    def average_heart_rate(self) -> float | None:
-        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
-        return sum(values) / len(values) if values else None
 
     @property
     def total_s(self) -> float:
@@ -197,7 +303,7 @@ class WorkoutSession:
     @property
     def command(self) -> float | Slope | None:
         """Consigne pour le home trainer : la cible en ERG, sinon une route plate (résistance libre)."""
-        return self.target_w if self.erg else Slope(0.0, self.rider_kg)
+        return self.target_w if self.erg else Slope(0.0, self.rider_kg, self.bike_kg)
 
     def _finish(self) -> None:
         self.index = len(self.segments)
@@ -224,7 +330,7 @@ def _snap(watts: float) -> int:
     return int(max(MIN_FREE_TARGET_W, min(MAX_FREE_TARGET_W, w)))
 
 
-class FreeRideSession:
+class FreeRideSession(_LiveStatsMixin):
     """Mode libre : pas de séance, on règle la consigne à la main, en direct.
 
     En ERG, une puissance (`target_w`, par pas de 5 W) ; en pente, une pente
@@ -248,6 +354,17 @@ class FreeRideSession:
         self.samples: list[Sample] = []
         self.exported = False
         self.export_asked = False
+        self.lap = 0  # numéro de tour des mesures (après une séance : un de plus que sa dernière brique)
+        self.after: WorkoutSession | None = None  # séance dont ce mode libre est la suite (même fichier)
+
+    def continue_from(self, workout: WorkoutSession) -> None:
+        """Suite d'une séance finie, dans le même fichier : ses mesures sont reprises (même
+        liste, donc même secours), le temps continue, et le mode libre forme un tour à part."""
+        self.samples = workout.samples
+        self.elapsed_s = workout.elapsed_s
+        self.lap = len(workout.segments)
+        self.manual_lap = workout.manual_lap
+        self.after = workout
 
     def start(self) -> None:
         if self.state in (State.READY, State.PAUSED):
@@ -278,7 +395,7 @@ class FreeRideSession:
     @property
     def command(self) -> float | Slope:
         """Consigne pour le home trainer : des watts en ERG, une `Slope` en pente."""
-        return self.target_w if self.mode is FreeMode.ERG else Slope(self.grade_pct, self.rider_kg)
+        return self.target_w if self.mode is FreeMode.ERG else Slope(self.grade_pct, self.rider_kg, self.bike_kg)
 
     def tick(self, dt: float) -> None:
         if self.state is State.RUNNING:
@@ -286,31 +403,25 @@ class FreeRideSession:
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None) -> None:
+               at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
         erg = self.mode is FreeMode.ERG
-        self.samples.append(Sample(self.elapsed_s, power_w, self.target_w if erg else None, cadence_rpm,
+        self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w if erg else None, cadence_rpm,
                                    heart_rate_bpm, None if erg else self.grade_pct, speed_kmh,
-                                   time.time() if at is None else at))
+                                   time.time() if at is None else at, self.lap,
+                                   balance_left_pct=balance_left_pct, manual_lap=self.manual_lap))
 
     @property
     def target_pct(self) -> float | None:
         return self.target_w / self.ftp * 100 if self.ftp else None
 
-    def average_power(self) -> float | None:
-        return sum(x.power_w for x in self.samples) / len(self.samples) if self.samples else None
-
-    def average_heart_rate(self) -> float | None:
-        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
-        return sum(values) / len(values) if values else None
 
 
 MIN_DIFFICULTY = 0
 MAX_DIFFICULTY = 100
 DIFFICULTY_STEP = 10
-SPEED_RESPONSE_S = 4.0  # inertie du vélo : la vitesse rejoint celle permise par la puissance
 
 
-class RouteSession:
+class RouteSession(_LiveStatsMixin):
     """Parcours GPX : le home trainer simule la pente de la route là où l'on se trouve.
 
     La distance avance selon la vitesse qu'aurait le vélo sur la route
@@ -357,8 +468,8 @@ class RouteSession:
         """Avance de `dt` secondes en pédalant à `power_w` (sans effet hors « en cours »)."""
         if self.state is not State.RUNNING or dt <= 0:
             return
-        goal = road_speed_kmh(power_w, Slope(self.grade_pct, self.rider_kg))
-        self.speed_kmh += (goal - self.speed_kmh) * (1 - math.exp(-dt / SPEED_RESPONSE_S))
+        self.speed_kmh = next_speed_kmh(self.speed_kmh, dt, power_w,
+                                        Slope(self.grade_pct, self.rider_kg, self.bike_kg))
         self.distance_m = min(self.distance_m + self.speed_kmh / 3.6 * dt, self.route.total_m)
         if self.distance_m >= self.route.total_m:
             self.state = State.FINISHED
@@ -366,10 +477,16 @@ class RouteSession:
 
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
-               at: float | None = None) -> None:
-        self.samples.append(Sample(self.elapsed_s, power_w, None, cadence_rpm, heart_rate_bpm,
+               at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
+        d = self.distance_m
+        lat, lon = self.route.position_at(d)
+        self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, None, cadence_rpm, heart_rate_bpm,
                                    self.trainer_grade_pct, self.speed_kmh if speed_kmh is None else speed_kmh,
-                                   time.time() if at is None else at))
+                                   time.time() if at is None else at, balance_left_pct=balance_left_pct,
+                                   manual_lap=self.manual_lap, lat=lat, lon=lon,
+                                   altitude_m=self.route.smoothed_elevation_at(d),
+                                   ascent_m=self.route.climb_between(0.0, d),
+                                   descent_m=self.route.descent_between(0.0, d)))
 
     # --- lecture ---------------------------------------------------------
 
@@ -386,7 +503,7 @@ class RouteSession:
 
     @property
     def command(self) -> Slope:
-        return Slope(self.trainer_grade_pct, self.rider_kg)
+        return Slope(self.trainer_grade_pct, self.rider_kg, self.bike_kg)
 
     @property
     def remaining_m(self) -> float:
@@ -404,12 +521,6 @@ class RouteSession:
     def elevation_m(self) -> float:
         return self.route.elevation_at(self.distance_m)
 
-    def average_power(self) -> float | None:
-        return sum(x.power_w for x in self.samples) / len(self.samples) if self.samples else None
-
-    def average_heart_rate(self) -> float | None:
-        values = [x.heart_rate_bpm for x in self.samples if x.heart_rate_bpm]
-        return sum(values) / len(values) if values else None
 
     def average_speed_kmh(self) -> float | None:
         return self.distance_m / self.elapsed_s * 3.6 if self.elapsed_s > 0 else None
@@ -417,13 +528,110 @@ class RouteSession:
 
 # --- sortie enregistrée ------------------------------------------------------
 
+@dataclass(frozen=True)
+class Second:
+    """Une seconde entière du chrono, prête à enregistrer."""
+
+    t: int  # fin de la seconde, en secondes de chrono (1 pour la première)
+    at: float  # heure de la fin de la seconde (secondes depuis 1970)
+    power_w: float  # moyennes de la seconde, chaque lecture pondérée par sa durée
+    cadence_rpm: float | None
+    speed_kmh: float | None
+    balance_left_pct: float | None = None  # pondéré par puissance × durée : part du travail de la jambe gauche
+
+
+class SecondSampler:
+    """Découpe le chrono d'une sortie en secondes entières : une mesure par seconde, ni doublée ni
+    manquante, quelle que soit la gigue des tics, et la moyenne de la seconde plutôt qu'une lecture
+    instantanée (moins de bruit).
+
+    L'heure d'une seconde est l'heure de départ (recalée à chaque reprise après une pause) plus son
+    rang au chrono : elle ne dépend pas de l'instant du tic qui l'enregistre. Une seconde sans aucune
+    lecture n'est pas rendue (capteur muet).
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._anchor: float | None = None  # heure à laquelle le chrono valait 0 (depuis la reprise)
+        self._clear()
+
+    def _clear(self) -> None:
+        self._sums = [0.0, 0.0, 0.0]  # puissance, cadence, vitesse × durée
+        self._weights = [0.0, 0.0, 0.0]
+        self._balance = [0.0, 0.0]  # équilibre × puissance × durée, puissance × durée
+
+    def pause(self) -> None:
+        """Chrono arrêté : l'heure de départ sera recalée à la reprise (la seconde entamée continue)."""
+        self._anchor = None
+
+    def feed(self, start_s: float, end_s: float, power_w: float | None, cadence_rpm: float | None = None,
+             speed_kmh: float | None = None, balance_left_pct: float | None = None) -> list[Second]:
+        """Le chrono est passé de `start_s` à `end_s` avec ces valeurs (None : pas de lecture) ;
+        rend les secondes complétées."""
+        if self._anchor is None:
+            self._anchor = time.time() - end_s
+        values = (power_w, cadence_rpm, speed_kmh)
+        out: list[Second] = []
+        at = start_s
+        while at < end_s:
+            boundary = math.floor(at) + 1
+            stop = min(end_s, boundary)
+            for i, v in enumerate(values):
+                if v is not None:
+                    self._sums[i] += v * (stop - at)
+                    self._weights[i] += stop - at
+            if balance_left_pct is not None and power_w is not None and power_w > 0:
+                self._balance[0] += balance_left_pct * power_w * (stop - at)
+                self._balance[1] += power_w * (stop - at)
+            at = stop
+            if at >= boundary:
+                if self._weights[0] > 0:
+                    _, c, s = (total / w if w > 0 else None for total, w in zip(self._sums, self._weights))
+                    p = self._sums[0] / self._weights[0]
+                    b = self._balance[0] / self._balance[1] if self._balance[1] > 0 else None
+                    out.append(Second(boundary, self._anchor + boundary, p, c, s, b))
+                self._clear()
+        return out
+
+
 MIN_RIDE_SAMPLES = 1  # sans aucune seconde pédalée, rien à enregistrer
+
+
+@dataclass(frozen=True)
+class BrickSummary:
+    """Bilan d'une brique de séance finie : durée roulée, puissance moyenne, cible moyenne."""
+
+    index: int
+    seconds: int
+    power_w: float
+    target_w: float | None
+
+    def text(self) -> str:
+        from .chart import hms
+
+        line = f"Brique {self.index + 1} finie : {hms(self.seconds)} · {self.power_w:.0f} W"
+        if self.target_w:
+            line += f" pour {self.target_w:.0f} W visés ({self.power_w / self.target_w * 100:.0f} %)"
+        return line
+
+
+def brick_summary(samples: list[Sample], index: int) -> BrickSummary | None:
+    """Bilan de la brique `index` d'après ses mesures (une par seconde), None sans mesure."""
+    mine = [x for x in samples if x.lap == index]
+    if not mine:
+        return None
+    targets = [x.target_w for x in mine if x.target_w is not None]
+    return BrickSummary(index, len(mine), sum(x.power_w for x in mine) / len(mine),
+                        sum(targets) / len(targets) if targets else None)
 
 
 def ride_points(samples: list[Sample]) -> list[ActivityPoint]:
     """Mesures de la séance ou du mode libre, prêtes pour le .fit d'activité."""
     return [ActivityPoint(x.at, x.power_w, x.cadence_rpm, x.heart_rate_bpm, x.speed_kmh, x.grade_pct, x.lap,
-                          x.t) for x in samples if x.at is not None]
+                          x.t, x.balance_left_pct, x.manual_lap, x.lat, x.lon, x.altitude_m, x.ascent_m,
+                          x.descent_m) for x in samples if x.at is not None]
 
 
 def ride_title(session: WorkoutSession | FreeRideSession | RouteSession) -> tuple[str, str]:
@@ -444,7 +652,11 @@ def ride_title(session: WorkoutSession | FreeRideSession | RouteSession) -> tupl
         if session.ftp:
             text += f", FTP {session.ftp:.0f} W"
         return title, text + "."
-    slope = any(x.grade_pct is not None for x in session.samples)
-    erg = any(x.grade_pct is None for x in session.samples)
+    free = [x for x in session.samples if x.lap == session.lap]
+    slope = any(x.grade_pct is not None for x in free)
+    erg = any(x.grade_pct is None for x in free)
     kind = "ERG et pente simulée" if slope and erg else "pente simulée" if slope else "ERG"
+    if session.after is not None:  # suite d'une séance, même fichier : titre de la séance
+        title, text = ride_title(session.after)
+        return title, f"{text[:-1]}, puis mode libre ({kind})."
     return "Mode libre", f"Mode libre sur home trainer ({kind})."

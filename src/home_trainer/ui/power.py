@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import random
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -26,6 +27,36 @@ class Reading:
     power_w: float
     cadence_rpm: float | None = None
     speed_kmh: float | None = None
+    balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
+
+
+SMOOTHING_CHOICES_S = (0, 3, 5, 10, 30)  # puissance affichée : instantanée (0) ou moyenne sur n secondes
+
+
+class PowerAverage:
+    """Moyenne glissante de la puissance affichée, sur les mesures lues à chaque tic (5 par seconde),
+    pas sur l'enregistrement à une mesure par seconde. Elle ne sert qu'à l'affichage : la sortie
+    enregistrée (et le .fit) garde la puissance brute. Un tic sans mesure (simulateur en pause,
+    capteur muet) vide la moyenne : elle repart des mesures suivantes."""
+
+    def __init__(self, keep_s: float = max(SMOOTHING_CHOICES_S)) -> None:
+        self.keep_s = keep_s
+        self._now = 0.0
+        self._items: deque[tuple[float, float]] = deque()  # (instant, watts)
+
+    def feed(self, dt: float, power_w: float | None) -> None:
+        self._now += dt
+        if power_w is None:
+            self._items.clear()
+            return
+        self._items.append((self._now, power_w))
+        while self._items[0][0] <= self._now - self.keep_s:
+            self._items.popleft()
+
+    def average(self, window_s: float) -> float | None:
+        """Moyenne des mesures des `window_s` dernières secondes (toutes celles reçues, au début)."""
+        kept = [w for t, w in self._items if t > self._now - window_s]
+        return sum(kept) / len(kept) if kept else None
 
 
 class PowerSource(Protocol):
@@ -131,3 +162,32 @@ def road_speed_kmh(power_w: float, slope: Slope, crr: float = DEFAULT_CRR, cw: f
         mid = (lo + hi) / 2
         lo, hi = (mid, hi) if need(mid) < power_w else (lo, mid)
     return lo * 3.6
+
+
+PUSH_FROM_MS = 1.5  # au démarrage, la poussée est celle de cette vitesse (sinon P / v serait infinie à l'arrêt)
+SPEED_STEP_S = 0.05  # pas du calcul : stable même après un gel de l'interface de plusieurs secondes
+MAX_SPEED_MS = 40.0
+
+
+def next_speed_kmh(speed_kmh: float, dt: float, power_w: float, slope: Slope,
+                   crr: float = DEFAULT_CRR, cw: float = DEFAULT_CW) -> float:
+    """Vitesse sur la route `dt` secondes plus tard, en pédalant à `power_w`.
+
+    Mouvement du vélo (cycliste et vélo, masse `slope.total_kg`) : la poussée P / v, moins le roulement,
+    la pente et la traînée de l'air. En roue libre (0 W), le vélo ralentit lentement sur le plat, s'arrête
+    vite en montée et accélère en descente jusqu'à la vitesse où la traînée compense la pente. À puissance
+    constante, la vitesse rejoint `road_speed_kmh` (même équilibre).
+    """
+    if dt <= 0:
+        return speed_kmh
+    mass = slope.total_kg
+    theta = math.atan(slope.grade_pct / 100)
+    weight = mass * G * (math.sin(theta) + crr * math.cos(theta))
+    power_w = max(power_w, 0.0)
+    v = max(speed_kmh, 0.0) / 3.6
+    steps = max(1, math.ceil(dt / SPEED_STEP_S))
+    h = dt / steps
+    for _ in range(steps):
+        force = power_w / max(v, PUSH_FROM_MS) - weight - 0.5 * cw * v * v
+        v = min(max(v + force / mass * h, 0.0), MAX_SPEED_MS)
+    return v * 3.6

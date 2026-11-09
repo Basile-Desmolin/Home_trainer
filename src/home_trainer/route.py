@@ -46,7 +46,7 @@ class Route:
         self.name = name
         self.points = points
         self._d = [p.distance_m for p in points]
-        self._climb = self._cumulative_climb()
+        self._climb, self._descent = self._cumulative_climb()
 
     @classmethod
     def from_coordinates(cls, name: str, coords: list[tuple[float, float, float | None]]) -> Route:
@@ -64,7 +64,8 @@ class Route:
             kept.append((lat, lon, ele))
         # Altitudes : celles du fichier, interpolées selon la distance là où elles manquent.
         known_d = [(d, ele) for d, (_, _, ele) in zip(distances, kept) if ele is not None]
-        return cls(name, [RoutePoint(lat, lon, _interpolate(known_d, d), d)
+        known_x = [d for d, _ in known_d]  # une seule fois : la refaire par point coûtait N² au chargement
+        return cls(name, [RoutePoint(lat, lon, _interpolate(known_d, d, known_x), d)
                           for d, (lat, lon, _) in zip(distances, kept)])
 
     # --- lecture ---------------------------------------------------------
@@ -104,23 +105,32 @@ class Route:
 
     def climb_between(self, start_m: float, end_m: float) -> float:
         """Dénivelé positif entre deux distances (altitudes lissées pour ne pas compter le bruit GPS)."""
-        return max(self._climb_at(end_m) - self._climb_at(start_m), 0.0)
+        return max(self._cumulated(self._climb, end_m) - self._cumulated(self._climb, start_m), 0.0)
 
-    def _climb_at(self, d: float) -> float:
-        """Dénivelé positif cumulé depuis le départ (grille de CLIMB_STEP_M, interpolée)."""
-        x = max(0.0, min(self.total_m, d)) / CLIMB_STEP_M
-        i = min(int(x), len(self._climb) - 2)
-        return self._climb[i] + (self._climb[i + 1] - self._climb[i]) * (x - i)
+    def descent_between(self, start_m: float, end_m: float) -> float:
+        """Dénivelé négatif (en mètres, positif) entre deux distances, altitudes lissées comme le D+."""
+        return max(self._cumulated(self._descent, end_m) - self._cumulated(self._descent, start_m), 0.0)
 
-    def _cumulative_climb(self) -> list[float]:
-        n = math.ceil(self.total_m / CLIMB_STEP_M)
+    def smoothed_elevation_at(self, distance_m: float) -> float:
+        """Altitude lissée (moyenne à ±25 m) : celle d'où sont tirés le D+ et le D−, sans le bruit GPS."""
         half = GRADE_WINDOW_M / 4
-        smoothed = [sum(self.elevation_at(i * CLIMB_STEP_M + k * half) for k in (-1, 0, 1)) / 3
-                    for i in range(n + 1)]
-        climb = [0.0]
+        return sum(self.elevation_at(distance_m + k * half) for k in (-1, 0, 1)) / 3
+
+    def _cumulated(self, series: list[float], d: float) -> float:
+        """Cumul depuis le départ (grille de CLIMB_STEP_M, interpolée) au mètre `d`."""
+        x = max(0.0, min(self.total_m, d)) / CLIMB_STEP_M
+        i = min(int(x), len(series) - 2)
+        return series[i] + (series[i + 1] - series[i]) * (x - i)
+
+    def _cumulative_climb(self) -> tuple[list[float], list[float]]:
+        """D+ et D− cumulés depuis le départ, tous les CLIMB_STEP_M, sur les altitudes lissées."""
+        n = math.ceil(self.total_m / CLIMB_STEP_M)
+        smoothed = [self.smoothed_elevation_at(i * CLIMB_STEP_M) for i in range(n + 1)]
+        climb, descent = [0.0], [0.0]
         for a, b in zip(smoothed, smoothed[1:]):
             climb.append(climb[-1] + max(b - a, 0.0))
-        return climb
+            descent.append(descent[-1] + max(a - b, 0.0))
+        return climb, descent
 
     @property
     def min_ele_m(self) -> float:
@@ -131,12 +141,14 @@ class Route:
         return max(p.ele_m for p in self.points)
 
 
-def _interpolate(known: list[tuple[float, float]], d: float) -> float:
+def _interpolate(known: list[tuple[float, float]], d: float,
+                 known_x: list[float] | None = None) -> float:
+    """Altitude au mètre `d` entre les points `known` (distance, altitude) ; `known_x` : leurs distances."""
     if d <= known[0][0]:
         return known[0][1]
     if d >= known[-1][0]:
         return known[-1][1]
-    i = bisect.bisect_right([k[0] for k in known], d)
+    i = bisect.bisect_right(known_x if known_x is not None else [k[0] for k in known], d)
     (d0, e0), (d1, e1) = known[i - 1], known[i]
     return e0 if d1 == d0 else e0 + (e1 - e0) * (d - d0) / (d1 - d0)
 

@@ -19,6 +19,44 @@ def test_create_save_and_load(tmp_path):
     assert loaded.rides_dir(alice) == tmp_path / "profils" / "elodie" / "sorties"
 
 
+def test_invalid_settings_fall_back_to_defaults(tmp_path):
+    """Profil corrompu : une FTP vide dans profils.json faisait planter le démarrage."""
+    path = tmp_path / "profils.json"
+    path.write_text(json.dumps({"profiles": [
+        {"id": "a", "name": "A", "ftp": "", "weight_kg": "68,5", "bike_kg": None, "hr_max": "x",
+         "layouts": [], "power_smoothing_s": "trois", "brick_beep": "oui", "chart_curves": "hr",
+         "speed_source": "?", "inconnu": 1},
+        {"id": "b", "name": "B", "ftp": 275, "hr_max": 188},
+    ], "last": 3}), encoding="utf-8")
+    book = ProfileBook.load(path)
+    a, b = book.profiles
+    assert (a.ftp, a.weight_kg, a.bike_kg, a.hr_max) == (250, 68.5, 9.0, None)
+    assert (a.layouts, a.power_smoothing_s, a.brick_beep, a.chart_curves, a.speed_source) == ({}, 0, True, None,
+                                                                                               "app")
+    assert (b.ftp, b.hr_max) == (275, 188) and book.last is None and book.problem is None
+
+
+def test_unreadable_file_is_kept_aside_and_read_from_its_backup(tmp_path):
+    """Un profils.json illisible n'est plus écrasé à la première écriture (tous les profils perdus)."""
+    path = tmp_path / "profils.json"
+    book = ProfileBook(path)
+    book.create("Basile", 260)
+    book.save()
+    book.create("Élodie", 230)
+    book.save()  # la version à un profil part dans profils.bak.json
+    path.write_text('{"profiles": [{"id": "basile", "na', encoding="utf-8")  # écriture coupée
+    damaged = path.read_text(encoding="utf-8")
+    book = ProfileBook.load(path)
+    assert "copie de secours" in book.problem and [p.name for p in book.profiles] == ["Basile"]
+    book.save()
+    assert book.set_aside is not None and book.set_aside.read_text(encoding="utf-8") == damaged
+    assert [p.name for p in ProfileBook.load(path).profiles] == ["Basile"]
+    path.write_text("pas du json", encoding="utf-8")
+    (tmp_path / "profils.bak.json").unlink()
+    book = ProfileBook.load(path)
+    assert "sans copie" in book.problem and book.profiles == []
+
+
 def test_startup_asks_unless_remembered(tmp_path):
     book = ProfileBook(tmp_path / "profils.json")
     book.last = book.create("Basile").id

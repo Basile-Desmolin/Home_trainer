@@ -7,6 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 QtGui = pytest.importorskip("PySide6.QtGui")
+QtCore = pytest.importorskip("PySide6.QtCore")
 
 from home_trainer.bricks import parse_workout  # noqa: E402
 from home_trainer.sync import AccountBook, Outbox  # noqa: E402
@@ -27,7 +28,7 @@ def window(app, tmp_path):
                    outbox=Outbox(tmp_path / "sorties"))
     w.asked = []
 
-    def answer(parent, default, summary=""):  # « Enregistrer » sans rien changer
+    def answer(parent, default, summary="", **kw):  # « Enregistrer » sans rien changer
         w.asked.append(default)
         return default
 
@@ -60,6 +61,83 @@ def test_finished_workout_is_saved_once(window):
     assert entry["title"] == window.session.workout.name
 
 
+def test_continue_in_free_ride_after_a_workout_goes_in_the_same_file(window):
+    """En fin de séance, « Continuer en mode libre » : la suite démarre en ERG à la
+    puissance de la dernière brique ; « Terminer » enregistre un seul .fit (séance 2:00, puis mode
+    libre 0:30 dans un tour à part), au nom de la séance."""
+    from home_trainer.ui.ride_export import CONTINUE
+    from home_trainer.ui.session import FreeMode
+    fit_sdk = pytest.importorskip("garmin_fit_sdk")
+    asked = []
+    window.ask_ride_export = lambda parent, default, summary="", **kw: asked.append(kw) or CONTINUE
+    pedal(window.session, 120)
+    window._on_tick()
+    QtWidgets.QApplication.processEvents()  # la fenêtre d'enregistrement s'ouvre hors du tic
+    assert asked == [{"can_continue": True}]
+    assert window.free_ride and window.free.state is State.RUNNING and window.free.mode is FreeMode.ERG
+    assert window.free.target_w == 150 and window.free.samples is window.session.samples
+    assert window.free.elapsed_s == 120 and not list(window.outbox.dir.glob("*.fit"))
+    window.free.pause()
+    pedal(window.free, 30, start=1_759_480_120)
+    window.ask_ride_export = lambda parent, default, summary="", **kw: asked.append(kw) or default
+    window.free_panel.finish_button.click()
+    assert asked[-1] == {}  # plus de « continuer » une fois en mode libre
+    [entry] = window.outbox.entries().values()
+    assert entry["title"] == window.session.workout.name
+    assert entry["description"].endswith(", puis mode libre (ERG).")
+    [path] = window.outbox.dir.glob("*.fit")
+    msgs, errors = fit_sdk.Decoder(fit_sdk.Stream.from_byte_array(bytearray(path.read_bytes()))).read()
+    assert errors == [] and [lap["total_timer_time"] for lap in msgs["lap_mesgs"]] == [120, 30]
+    window._on_tick()  # la séance finie n'est pas enregistrée une seconde fois
+    QtWidgets.QApplication.processEvents()
+    assert len(list(window.outbox.dir.glob("*.fit"))) == 1
+
+
+def test_window_scale_follows_the_window_size():
+    """Facteur 1 jusqu'à 1 280 × 800, puis selon le côté le moins agrandi, 1,8 au plus."""
+    from home_trainer.ui.theme import window_scale
+    assert window_scale(1280, 800) == 1.0 and window_scale(1000, 700) == 1.0
+    assert window_scale(1920, 1080) == 1.35  # 1,5 en largeur, 1,35 en hauteur
+    assert window_scale(2560, 1440) == 1.8 and window_scale(3840, 2160) == 1.8
+
+
+def test_numbers_grow_with_the_window_and_full_screen(window):
+    window.resize(1280, 800)
+    window._apply_scale()
+    power = window.cards["power"]
+    size = power.value.font().pointSize()
+    ring = window.step_ring.width()
+    window.resize(1920, 1080)
+    window._apply_scale()
+    assert window.scale == 1.35
+    assert power.value.font().pointSize() == round(size * 1.35)
+    assert window.step_ring.width() == round(124 * 1.35)
+    assert "font-size: 19px" in power.sub.styleSheet()  # 14 px × 1,35
+    assert window.free_panel.grid.cards["power"].scale == 1.35
+    window.workout_grid.choose(3, "elapsed")  # carte recréée : à la même échelle
+    assert window.cards["elapsed"].scale == 1.35
+    window.resize(1280, 800)
+    window._apply_scale()
+    assert power.value.font().pointSize() == size and window.step_ring.width() == ring
+    assert power.sub.styleSheet() == ""
+    window.toggle_full_screen()
+    assert window.isFullScreen()
+    QtWidgets.QApplication.sendEvent(window, QtGui.QKeyEvent(QtGui.QKeyEvent.KeyPress, QtCore.Qt.Key_Escape,
+                                                             QtCore.Qt.NoModifier))
+    assert not window.isFullScreen()
+
+
+def test_p_switches_free_ride_between_erg_and_slope(window):
+    from home_trainer.ui.session import FreeMode
+    window.toggle_free_mode()  # en séance : rien
+    assert window.free.mode is FreeMode.ERG
+    window.enter_free_ride()
+    window.toggle_free_mode()
+    assert window.free.mode is FreeMode.SLOPE
+    window.toggle_free_mode()
+    assert window.free.mode is FreeMode.ERG
+
+
 def test_finish_button_saves_free_ride_and_resets(window):
     window.enter_free_ride()
     pedal(window.free, 90)
@@ -82,10 +160,11 @@ def test_ride_without_pedaling_is_not_saved(window):
     assert not window.outbox.dir.exists() or not list(window.outbox.dir.glob("*.fit"))
 
 
-def test_speed_is_estimated_without_trainer_speed(window):
+def test_speed_is_computed_by_the_application(window):
     from home_trainer.ui.power import Reading
-    assert 30 < window._speed(Reading(200, 90)) < 40
-    assert window._speed(Reading(200, 90, 25.0)) == 25.0
+    window.road_kmh = 31.5  # vitesse calculée, avec ou sans vitesse du home trainer
+    assert window._speed(Reading(200, 90)) == 31.5
+    assert window._speed(Reading(200, 90, 25.0)) == 31.5
 
 
 def test_accounts_dialog_keeps_credentials(window):
@@ -119,7 +198,7 @@ def test_one_second_ride_is_saved(window):
 def test_finish_asks_format_name_and_folder(window, tmp_path):
     pedal(window.session, 30)
     elsewhere = tmp_path / "ailleurs"
-    window.ask_ride_export = lambda parent, default, summary="": RideExport(elsewhere, "Ma sortie", "fit")
+    window.ask_ride_export = lambda parent, default, summary="", **kw: RideExport(elsewhere, "Ma sortie", "fit")
     window.finish_button.click()
     assert (elsewhere / "Ma sortie.fit").exists()
     assert not list(window.outbox.dir.glob("*.fit"))
@@ -130,7 +209,7 @@ def test_finish_asks_format_name_and_folder(window, tmp_path):
 
 def test_other_format_keeps_a_fit_copy_for_upload(window, tmp_path):
     pedal(window.session, 30)
-    window.ask_ride_export = lambda parent, default, summary="": RideExport(tmp_path, "sortie", "tcx")
+    window.ask_ride_export = lambda parent, default, summary="", **kw: RideExport(tmp_path, "sortie", "tcx")
     window.finish_button.click()
     assert (tmp_path / "sortie.tcx").read_text(encoding="utf-8").startswith("<?xml")
     assert len(list(window.outbox.dir.glob("*.fit"))) == 1
@@ -139,7 +218,7 @@ def test_other_format_keeps_a_fit_copy_for_upload(window, tmp_path):
 
 def test_cancel_goes_back_to_the_ride(window):
     pedal(window.session, 30)
-    window.ask_ride_export = lambda parent, default, summary="": None
+    window.ask_ride_export = lambda parent, default, summary="", **kw: None
     window.finish_button.click()
     assert len(window.session.samples) == 30 and window.session.state is State.PAUSED
     assert not window.outbox.dir.exists() or not list(window.outbox.dir.glob("*.fit"))
@@ -147,7 +226,7 @@ def test_cancel_goes_back_to_the_ride(window):
 
 def test_discard_drops_the_ride(window):
     pedal(window.session, 30)
-    window.ask_ride_export = lambda parent, default, summary="": DISCARD
+    window.ask_ride_export = lambda parent, default, summary="", **kw: DISCARD
     window.finish_button.click()
     assert window.session.samples == []
     assert not window.outbox.dir.exists() or not list(window.outbox.dir.glob("*.fit"))
@@ -184,7 +263,7 @@ def test_pc_stays_awake_during_a_ride(window):
     window.session.pause()
     window._on_tick()
     assert window.keep_awake.active  # en pause au milieu de la sortie : toujours pas de veille
-    window.ask_ride_export = lambda parent, default, summary="": DISCARD
+    window.ask_ride_export = lambda parent, default, summary="", **kw: DISCARD
     window.finish_button.click()
     window._on_tick()
     assert not window.keep_awake.active
@@ -217,7 +296,7 @@ def test_failed_save_keeps_the_ride(window, tmp_path, monkeypatch):
     pedal(window.session, 30)
     blocker = tmp_path / "fichier"
     blocker.write_text("")  # un fichier là où devrait être le dossier
-    window.ask_ride_export = lambda parent, default, summary="": RideExport(blocker, "sortie", "tcx")
+    window.ask_ride_export = lambda parent, default, summary="", **kw: RideExport(blocker, "sortie", "tcx")
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
     window.finish_button.click()
     assert len(window.session.samples) == 30 and not window.session.exported
@@ -251,7 +330,7 @@ def test_nolio_redirect_field_and_cancel(window, monkeypatch):
 def test_finish_shows_the_summary_and_fills_the_history(window):
     from home_trainer.ride_stats import RideSummary
     seen = []
-    window.ask_ride_export = lambda parent, default, summary="": seen.append(summary) or default
+    window.ask_ride_export = lambda parent, default, summary="", **kw: seen.append(summary) or default
     pedal(window.session, 30)
     window.finish_button.click()
     [summary] = seen
@@ -271,8 +350,41 @@ def test_finish_shows_the_summary_and_fills_the_history(window):
     assert len(window.ride_history().rides) == 2
 
 
+def test_history_problems_are_shown(window, monkeypatch):
+    """Historique illisible ou impossible à écrire : la sortie est enregistrée, et on le dit."""
+    import home_trainer.history as history
+    warnings = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda parent, title, text: warnings.append(text))
+    window.outbox.dir.mkdir(parents=True)
+    (window.outbox.dir / history.FILE_NAME).write_text("abîmé", encoding="utf-8")
+    pedal(window.session, 30)
+    window.finish_button.click()
+    assert "Historique illisible" in warnings[0] and "illisible-" in warnings[0]
+    assert len(window.ride_history().rides) == 1
+
+    warnings.clear()
+    monkeypatch.setattr(history.RideHistory, "save", lambda self: (_ for _ in ()).throw(OSError("verrouillé")))
+    pedal(window.session, 30, start=1_759_490_000)
+    window.finish_button.click()
+    assert "historique n'a pas pu être écrit : verrouillé" in warnings[0]
+    assert len(list(window.outbox.dir.glob("*.fit"))) == 2  # le .fit, lui, est là
+
+
+def test_summary_shows_heart_rate_zones_with_the_profile_max(app):
+    """Bilan avec la FC max du profil : % de FC max sous la FC moyenne, temps par zone de FC."""
+    from home_trainer.ride_stats import RideSummary
+    from home_trainer.ui.ride_summary import SummaryPanel
+    ride = RideSummary(1_759_480_000, "FC", 190, 250, 200, 200, 200, 38, avg_hr_bpm=27_350 / 180,
+                       max_hr_bpm=185, hr_max=190, hr_zone_s=[60, 60, 30, 20, 10])
+    panel = SummaryPanel(ride)
+    assert panel.tiles["FC MOY."].sub.text() == "80 % FC max · max 97 %"
+    assert panel.tiles["FC MAX"].value.text() == "185"
+    assert panel.heart_zones is not None and panel.heart_zones.zone_s == [60, 60, 30, 20, 10]
+    assert panel.tiles["CALORIES"].value.text() == "38"
+
+
 def test_discarded_ride_stays_out_of_the_history(window):
-    window.ask_ride_export = lambda parent, default, summary="": DISCARD
+    window.ask_ride_export = lambda parent, default, summary="", **kw: DISCARD
     pedal(window.session, 30)
     window.finish_button.click()
     assert window.ride_history().rides == []
@@ -286,6 +398,11 @@ def test_summary_and_history_windows(window):
     dialog = RideExportDialog(RideExport(window.outbox.dir, "x"), history.rides[0])
     assert dialog.panel is not None and dialog.panel.tiles["PUISSANCE MOY."].value.text() == "150"
     assert dialog.panel.tiles["PUISSANCE MOY."].unit.text() == "W"
+    tiles = dialog.panel.tiles
+    # 30 s à 150 W : 4,5 kJ ≈ 4,5 kcal, affichées arrondies.
+    assert history.rides[0].calories_kcal == pytest.approx(4.5)
+    assert tiles["CALORIES"].value.text() in ("4", "5") and tiles["CALORIES"].unit.text() == "kcal"
+    assert dialog.panel.heart_zones is None  # sans FC max dans le profil
     hist = HistoryDialog(history, "Moi")
     assert hist.tree.topLevelItemCount() == 1
     assert hist.week_tile.value.text() != "—"
@@ -309,11 +426,50 @@ def test_smooth_keeps_gaps_and_steadies_heart_rate():
 def test_trace_draws_one_point_per_pixel():
     from home_trainer.ui.chart import trace
     points = [(t / 4, 120.0 + t % 2) for t in range(400)]  # 4 mesures par pixel
-    path = trace(points, lambda t: t, lambda v: v)
-    assert path.elementCount() == 100
-    assert all(abs(path.elementAt(i).y - 120.5) < 1e-9 for i in range(path.elementCount()))
+    lines = trace(points, lambda t: t, lambda v: v)
+    assert len(lines) == 1 and len(lines[0]) == 100
+    assert all(abs(q.y() - 120.5) < 1e-9 for q in lines[0])
+    assert [q.x() for q in lines[0][:2]] == [0.375, 1.375]  # moyenne des 4 mesures du pixel
+    # Un trou du capteur coupe la courbe : deux morceaux, rien ne relie 10 à 30.
     gap = trace([(0, 1.0), (1, 1.0), (2, None), (3, 1.0), (4, 1.0)], lambda t: t * 10, lambda v: v)
-    assert [gap.elementAt(i).isMoveTo() for i in range(gap.elementCount())] == [True, False, True, False]
+    assert [[q.x() for q in line] for line in gap] == [[0, 10], [30, 40]]
+    assert trace([(0, None)], lambda t: t, lambda v: v) == []
+
+
+def test_stroke_draws_the_same_curve_as_a_single_path(app):
+    """Les segments séparés (bouts arrondis) donnent le même dessin qu'un chemin d'un tenant."""
+    import math
+
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
+
+    from home_trainer.ui.chart import stroke
+    line = [QPointF(5 + i * 3, 50 + 30 * math.sin(i / 3)) for i in range(60)]
+    images = []
+    for draw in ("path", "segments"):
+        img = QImage(200, 100, QImage.Format_ARGB32)
+        img.fill(Qt.black)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor("#ffffff"), 2)
+        if draw == "path":
+            pen.setJoinStyle(Qt.RoundJoin)
+            pen.setCapStyle(Qt.RoundCap)
+            path = QPainterPath(line[0])
+            for q in line[1:]:
+                path.lineTo(q)
+            p.setPen(pen)
+            p.drawPath(path)
+        else:
+            stroke(p, pen, [line])
+        p.end()
+        images.append(img)
+    path, segments = ([QColor(img.pixel(x, y)).red() for x in range(200) for y in range(100)] for img in images)
+    lit = sum(a > 128 for a in path)
+    # Même empreinte : aucun pixel allumé d'un côté et éteint de l'autre.
+    assert lit > 300 and not any((a > 128 and b < 32) or (b > 128 and a < 32) for a, b in zip(path, segments))
+    # Aux jonctions, les bords anticrénelés se superposent : à peine plus d'encre (mesuré : +2,5 %).
+    assert abs(sum(segments) - sum(path)) <= 0.05 * sum(path)
 
 
 def test_stopping_mid_ride_asks_first_and_cancel_keeps_riding(window):
@@ -337,6 +493,24 @@ def test_restart_resets_every_mode_once_confirmed(window):
     window.free.pause()
     window.free_panel.reset_button.click()
     assert window.free.state is State.READY and window.confirmed[-1] == "Recommencer"
+
+
+def test_space_after_the_end_asks_before_starting_again(window):
+    """Séance finie, Espace ne relance plus une séance sans confirmation ; carte cible et
+    anneau disent que la séance est finie."""
+    pedal(window.session, 120)
+    window.save_ride = lambda session: True
+    window._refresh()
+    assert window.m_target.value.text() == "fin" and window.step_ring.fraction == 0.0
+    assert window.step_ring.text == "fin"
+    window.confirm_stop = lambda parent, action, question: window.confirmed.append(action) or False
+    window._space()
+    assert window.session.state is State.FINISHED and window.confirmed == ["Recommencer"]
+    window.confirm_stop = lambda parent, action, question: window.confirmed.append(action) or True
+    window._space()
+    assert window.session.state is State.RUNNING and window.session.elapsed_s == 0
+    window._space()  # en pleine séance : pause, sans question
+    assert window.session.state is State.PAUSED and window.confirmed == ["Recommencer", "Recommencer"]
 
 
 def test_nothing_asked_before_the_ride_starts(window):
@@ -368,7 +542,7 @@ def test_virtual_gears_change_the_resistance_off_erg(window):
     window.session.start()
     window._push_target()
     assert window.source._target.gear == pytest.approx(1.085 ** 2)
-    assert "braquet 14 / 24" in window.m_cadence.sub.text()
+    assert "braquet 14 / 24" in window.cards["cadence"].sub.text()
     window.toggle_erg()
 
 

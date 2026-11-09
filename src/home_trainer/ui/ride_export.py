@@ -17,6 +17,7 @@ from ..ride_stats import RideSummary
 from .ride_summary import SummaryPanel
 
 DISCARD = "discard"  # réponse « Ne pas enregistrer »
+CONTINUE = "continue"  # réponse « Continuer en mode libre » (fin de séance, même fichier)
 FORBIDDEN = '<>:"/\\|?*'  # caractères refusés dans un nom de fichier sous Windows
 
 
@@ -43,10 +44,10 @@ def clean_name(text: str) -> str:
 
 class RideExportDialog(QDialog):
     def __init__(self, default: RideExport, summary: str | RideSummary = "",
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, can_continue: bool = False) -> None:
         super().__init__(parent)
         self.setWindowTitle("Enregistrer la sortie")
-        self.setMinimumWidth(620)
+        self.setMinimumWidth(700)  # bilan sur 4 colonnes
         self.choice: RideExport | str | None = None
         layout = QVBoxLayout(self)
         self.panel: SummaryPanel | None = None
@@ -85,6 +86,12 @@ class RideExportDialog(QDialog):
         self.save_button = buttons.addButton("Enregistrer", QDialogButtonBox.AcceptRole)
         self.discard_button = buttons.addButton("Ne pas enregistrer", QDialogButtonBox.DestructiveRole)
         buttons.addButton("Annuler", QDialogButtonBox.RejectRole)
+        self.continue_button = None
+        if can_continue:  # fin de séance : la suite en mode libre ira dans le même fichier
+            self.continue_button = buttons.addButton("Continuer en mode libre", QDialogButtonBox.ActionRole)
+            self.continue_button.setToolTip("Rouler encore en mode libre ; tout sera enregistré dans un "
+                                            "seul fichier, au bouton « Terminer »")
+            self.continue_button.clicked.connect(self._continue)
         self.save_button.setDefault(True)
         self.save_button.clicked.connect(self._save)
         self.discard_button.clicked.connect(self._discard)
@@ -131,10 +138,16 @@ class RideExportDialog(QDialog):
             self.choice = DISCARD
             self.accept()
 
+    def _continue(self) -> None:
+        self.choice = CONTINUE
+        self.accept()
 
-def ask_ride_export(parent: QWidget | None, default: RideExport, summary: str | RideSummary = "") -> RideExport | str | None:
-    """Fenêtre modale : un `RideExport`, `DISCARD`, ou None si l'utilisateur revient à la sortie."""
-    dialog = RideExportDialog(default, summary, parent)
+
+def ask_ride_export(parent: QWidget | None, default: RideExport, summary: str | RideSummary = "",
+                    can_continue: bool = False) -> RideExport | str | None:
+    """Fenêtre modale : un `RideExport`, `DISCARD`, `CONTINUE` (si `can_continue`), ou None si
+    l'utilisateur revient à la sortie."""
+    dialog = RideExportDialog(default, summary, parent, can_continue)
     dialog.exec()
     return dialog.choice
 

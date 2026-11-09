@@ -20,7 +20,10 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from .accounts import Account
-from .web import CALLBACK_PORT, Http, Response, SyncError, multipart, urllib_http
+from .web import CALLBACK_PORT, Http, FileRejected, Response, SyncError, multipart, urllib_http
+
+# Refus qui ne disent rien du fichier : accès (401, 403), délai (408), trop de demandes (429).
+ACCOUNT_STATUSES = (401, 403, 408, 429)
 
 
 @dataclass(frozen=True)
@@ -85,13 +88,18 @@ class Service:
         if isinstance(athlete, dict):
             a.athlete = " ".join(str(athlete.get(k) or "") for k in ("firstname", "lastname")).strip()
 
-    def _fail(self, what: str, r: Response) -> SyncError:
+    def _fail(self, what: str, r: Response, file_level: bool = False) -> SyncError:
+        """Erreur HTTP ; avec `file_level` (envoi d'un fichier), un refus 4xx qui vise le fichier
+        (pas l'accès ni la charge du service) devient `FileRejected`."""
         data = r.json()
         detail = (data.get("message") or data.get("error_description") or data.get("error")
                   or data.get("detail") or r.text(200))
         if r.status in (401, 403):
             detail = f"accès refusé ({detail}) : reconnectez le compte (Comptes…)"
-        return SyncError(f"{self.label} : {what} impossible (HTTP {r.status}) : {detail}")
+        message = f"{self.label} : {what} impossible (HTTP {r.status}) : {detail}"
+        if file_level and 400 <= r.status < 500 and r.status not in ACCOUNT_STATUSES:
+            return FileRejected(message)
+        return SyncError(message)
 
     def upload(self, path: Path, title: str, description: str, external_id: str) -> UploadResult:
         raise NotImplementedError
@@ -133,7 +141,7 @@ class Strava(Service):
         auth = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         r = self.http("POST", f"{self.api}/uploads", {**auth, "Content-Type": content_type}, body)
         if not r.ok:
-            raise self._fail("envoi", r)
+            raise self._fail("envoi", r, file_level=True)
         status = r.json()
         # Strava analyse le fichier en différé : on attend que l'activité soit créée.
         for _ in range(self.poll_tries):
@@ -156,7 +164,7 @@ class Strava(Service):
             if duplicate or "duplicate" in str(error).lower():
                 url = f"https://www.strava.com/activities/{duplicate.group(1)}" if duplicate else None
                 return UploadResult(url, "déjà présente sur Strava")
-            raise SyncError(f"Strava a refusé le fichier : {re.sub(r'<[^>]+>', '', str(error))}")
+            raise FileRejected(f"Strava a refusé le fichier : {re.sub(r'<[^>]+>', '', str(error))}")
         return None
 
 
@@ -195,9 +203,10 @@ class Nolio(Service):
         if r.ok:  # 202 : Nolio met le fichier dans sa file de traitement
             return UploadResult("https://www.nolio.io/", "envoyée")
         text = r.text().lower()
-        if r.status == 400 and any(word in text for word in ("already", "déjà", "imported")):
+        # Doublon seulement : un refus qui parle d'import (« could not be imported ») reste un refus.
+        if r.status == 400 and any(word in text for word in ("already", "déjà", "duplicate", "doublon")):
             return UploadResult("https://www.nolio.io/", "déjà présente sur Nolio")
-        raise self._fail("envoi", r)
+        raise self._fail("envoi", r, file_level=True)
 
 
 SERVICE_CLASSES: dict[str, type[Service]] = {"strava": Strava, "nolio": Nolio}

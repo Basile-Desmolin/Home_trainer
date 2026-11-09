@@ -26,16 +26,18 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import logging
+import math
 import sys
 import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QElapsedTimer, QLocale, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QElapsedTimer, QEvent, QLocale, QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-                               QFormLayout, QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
+                               QFormLayout, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
+                               QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy, QSpinBox,
                                QStackedWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
 from ..bricks import BrickSyntaxError, parse_workout
@@ -46,37 +48,59 @@ from ..formats.fit_activity import activity_file_name
 from ..gears import VirtualGears
 from ..heart_zones import to_power
 from ..history import FILE_NAME as HISTORY_FILE, RideHistory
+from ..logs import setup_logging
 from ..keep_awake import KeepAwake
-from ..profiles import Profile, ProfileBook, default_rides_root
+from ..profiles import (BEEP_BEFORE_CHOICES, CADENCE_ALERT_CHOICES, DEFAULT_CADENCE_ALERT_RPM, MAX_BIKE_KG,
+                        MIN_BIKE_KG, SPEED_APP, SPEED_TRAINER, Profile, ProfileBook, default_rides_root)
 from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
-                       Trainer, open_heart_rate_sensor, open_power_meter, open_zwift_click)
+                       Trainer, open_heart_rate_sensor, open_power_meter, open_zwift_click, stop_all)
+from ..sensors.trainer import DEFAULT_BIKE_KG
 from ..sync import AccountBook, Outbox, auto_services, send_pending
 from ..workout import PowerUnit, Segment, Workout
 from .accounts import AccountsDialog
 from .calibration import CalibrationDialog, can_calibrate
-from .chart import ACCENT, CADENCE, HEART, MUTED, TEXT, WorkoutChart, hms, zone_color
+from .chart import ACCENT, CURVES, DEFAULT_CURVES, HEART, MUTED, TEXT, WorkoutChart, hms, zone_color
 from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
-from .gauges import BrickRing, ZoneBar
-from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel, grade_color, grade_text
+from .gauges import BrickRing
+from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
 from .heart_rate_mode import ask_heart_rate_mode
+from .indicators import Mode, RideView
 from .loader import load_workout
-from .metric import Metric
-from .mini import MiniInfo, MiniWindow
+from .metric import Metric, MetricGrid, Slot
+from .mini import MiniWindow, foreground_window, layout_key as mini_layout_key
 from .profiles import choose_profile
 from .history import HistoryDialog
-from .ride_export import DISCARD, RideExport, ask_ride_export
-from .power import PowerSource, Reading, SimulatedTrainer, open_power_source, road_speed_kmh
-from .route_ride import RoutePanel, km_text, route_grade_color
-from .theme import GOOD, OFF, WAIT, dot, icon, install, keycaps, number_font, pill, zone_index, zone_label
+from .ride_export import CONTINUE, DISCARD, RideExport, ask_ride_export
+from .rescue import (DISCARD as RESCUE_DISCARD, RESCUE_EVERY_S, SAVE as RESCUE_SAVE, RescueFile, RescuedRide,
+                     ask_rescued, ask_unsaved, duration_text, find_rescued, remove_file, rescue_dir)
+from .power import (SMOOTHING_CHOICES_S, PowerAverage, PowerSource, Reading, SimulatedTrainer, open_power_source,
+                    next_speed_kmh)
+from .route_ride import RoutePanel
+from .theme import (GOOD, OFF, WAIT, dot, hint_label, icon, install, keycaps, number_font, pill, set_icon, set_style,
+                    SUB_PX, window_scale, zone_index, zone_label)
+from .sounds import SOUND_NAMES, BeepPlayer
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
-                      FreeRideSession, RouteSession, State, WorkoutSession, ride_points, ride_title)
+                      FreeRideSession, RouteSession, SecondSampler, State, WorkoutSession, brick_summary,
+                      ride_points, ride_title)
+
+log = logging.getLogger(__name__)
+
+BEEP_BEFORE_S = 3  # bip et compte à rebours aux 3 dernières secondes d'une brique (réglable : profil)
+BEEP_ALWAYS_S = 3  # au-delà de 3 s : un bip au début du compte à rebours, puis aux 3 dernières secondes
+CADENCE_ALERT_AFTER_S = 5  # alerte de cadence basse après 5 s sous le seuil (pas pour un coup de pédale)
+BRICK_NOTE_S = 8.0  # bilan de la brique finie affiché 8 s
+BRICK_NOTE_MIN_S = 5  # pas de bilan pour une brique passée aussitôt (moins de 5 s roulées)
 
 DEFAULT_BRICKS = "10m@50%>75% 3x(8m@90% 3m@55%) 5m@120% 10m@60%>45%"
 DEFAULT_FTP = 250
 TICK_MS = 200
+# Cartes du catalogue d'indicateurs de la séance ; la cible occupe la colonne 1 et l'intensité la ligne 1,
+# colonne 2.
+WORKOUT_SLOTS = [Slot("power", 0, 0, 64, rows=2), Slot("cadence", 0, 2), Slot("heart", 0, 3),
+                 Slot("workout_remaining", 1, 3)]
 CLOSE_SEND_WAIT_S = 20  # à la fermeture, temps laissé à l'envoi de la dernière sortie
 ICON = Path(__file__).with_name("assets") / "icon.png"
 OPEN_FILTER = ("Séances et parcours (*.zwo *.mrc *.erg *.fit *.gpx);;Séances (*.zwo *.mrc *.erg *.fit);;"
@@ -107,6 +131,22 @@ def describe_segment(seg: Segment | None, ftp: float, intensity_pct: int = 100) 
     return f"{duration} à {target}{name}"
 
 
+class _LeaveFieldOnEnter(QObject):
+    """Filtre d'une case (FTP, poids) : Entrée ou Échap la valide puis appelle `leave` (le clavier
+    revient à la fenêtre ; sans cela la case garde Espace, +, −, E, N et les raccourcis se taisent)."""
+
+    def __init__(self, leave, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._leave = leave
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (API Qt)
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape):
+            obj.interpretText()
+            self._leave()  # la case perd le focus : editingFinished part (FTP appliquée)
+            return True
+        return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self, workout: Workout, ftp: float = DEFAULT_FTP,
                  source: PowerSource | None = None,
@@ -115,8 +155,24 @@ class MainWindow(QMainWindow):
                  outbox: Outbox | None = None, profiles: ProfileBook | None = None,
                  profile: Profile | None = None,
                  power_meter: BackgroundSensor[PowerMeterReading] | None = None,
-                 click: BackgroundSensor | None = None) -> None:
+                 click: BackgroundSensor | None = None, rescue_dir: Path | str | None = None) -> None:
         super().__init__()
+        # Sortie de secours (voir `ui/rescue.py`) ; sans dossier (tests), rien n'est gardé pendant la sortie.
+        self.rescue_dir = Path(rescue_dir) if rescue_dir is not None else None
+        self._rescues: list[RescueFile] = []  # secours des sorties en cours
+        self._kept: set[Path] = set()  # sorties gardées en secours pendant cette session : au prochain lancement
+        self._rescued_at = time.monotonic()
+        self._proposing = False
+        self._closed = False  # fenêtre fermée : plus rien à proposer (proposition différée par QTimer)
+        # Tailles des chiffres suivant la fenêtre : facteur recalculé peu après un redimensionnement.
+        self.scale = 1.0
+        self._scale_timer = QTimer(self)
+        self._scale_timer.setSingleShot(True)
+        self._scale_timer.setInterval(80)
+        self._scale_timer.timeout.connect(self._apply_scale)
+        self.ask_rescued = ask_rescued  # sortie retrouvée au lancement (remplaçable dans les tests)
+        self.ask_unsaved = ask_unsaved  # ni .fit ni secours : Réessayer / Jeter
+        self._keep_in_profile = True  # FTP et poids changés : gardés dans le profil (sauf `--ftp`, `--weight`)
         # Avec un profil, ses comptes et son dossier des sorties remplacent `accounts` et `outbox`.
         self.profiles = profiles if profiles is not None else ProfileBook()
         self.profile: Profile | None = None
@@ -127,6 +183,7 @@ class MainWindow(QMainWindow):
         self._sync.done.connect(self._sent)
         self._send_thread: threading.Thread | None = None
         self._send_again = False
+        self._send_retry = False  # l'envoi en file d'attente retente aussi les fichiers refusés
         # Fenêtre de fin de sortie (remplaçable dans les tests) et derniers choix faits dedans.
         self.ask_ride_export = ask_ride_export
         self.confirm_stop = confirm_stop  # « Recommencer » / « Terminer » en pleine sortie
@@ -146,8 +203,27 @@ class MainWindow(QMainWindow):
         self.session = WorkoutSession(workout, ftp)
         self.free = FreeRideSession(ftp)
         self.route: RouteSession | None = None
-        self._since_sample = 0.0
+        # Une mesure par seconde de chrono, propre à la sortie en cours (remis à zéro quand elle change).
+        self.sampler = SecondSampler()
+        self._sampled = None
         self._last_reading = None
+        # Puissance affichée : instantanée (0) ou moyenne sur 3, 5, 10, 30 s (choix du profil).
+        self.power_average = PowerAverage()
+        self.smoothing_s = 0
+        # Changement de brique : bip et compte à rebours (son et durée choisis dans le profil), bilan de la
+        # brique finie.
+        self.brick_beep = True
+        self.beep_sound = "double"
+        self.beep_before_s = BEEP_BEFORE_S
+        self.beep_last_distinct = True
+        self.beeper = BeepPlayer()
+        # Alerte de cadence basse : seuil du profil (0 : pas d'alerte), et depuis quand (temps de la sortie)
+        # la cadence est sous ce seuil.
+        self.cadence_alert_rpm = DEFAULT_CADENCE_ALERT_RPM
+        self._cadence_low_since: float | None = None
+        self._brick_index: int | None = None  # brique suivie (bilan quand elle change)
+        self._brick_note: tuple[str, float] | None = None  # bilan affiché, jusqu'à quand (time.monotonic)
+        self._last_beep: tuple[int, int] | None = None  # (brique, seconde) du dernier bip
         self.heart_rate: BackgroundSensor[HeartRateReading] | None = None
         # Capteur de puissance externe : ses watts font foi, et l'ERG du home trainer est corrigé dessus.
         self.power_meter: BackgroundSensor[PowerMeterReading] | None = None
@@ -155,6 +231,12 @@ class MainWindow(QMainWindow):
         # Braquets virtuels hors ERG (pignon unique type Zwift Cog), changés au clavier ou au Zwift Click.
         self.gears = VirtualGears()
         self.click: BackgroundSensor | None = None
+        # Vitesse calculée par l'application (séance, mode libre) : celle du vélo sur la route à cette
+        # puissance, avec son élan (roue libre comprise). Le parcours a la sienne (`RouteSession.speed_kmh`).
+        self.road_kmh = 0.0
+        self.bike_kg = DEFAULT_BIKE_KG  # poids du vélo (profil)
+        # Vitesse calculée (« app ») ou celle du home trainer quand il l'envoie (« trainer ») ; choix du profil.
+        self.speed_source = SPEED_APP
 
         self._build_toolbar()
         self._build_body()
@@ -162,6 +244,7 @@ class MainWindow(QMainWindow):
         # Vignette au premier plan quand le logiciel passe en arrière-plan pendant une sortie.
         self.mini = MiniWindow()
         self.mini.clicked.connect(self.bring_back)
+        self.mini.changed.connect(self._mini_chosen)  # valeurs choisies par clic droit : gardées dans le profil
 
         self.clock = QElapsedTimer()
         self.timer = QTimer(self)
@@ -177,6 +260,7 @@ class MainWindow(QMainWindow):
             self.set_profile(profile)  # envoie aussi les sorties restées en attente
         else:
             self.send_rides()  # sorties restées en attente la dernière fois
+            QTimer.singleShot(0, self.propose_rescued)
 
     # --- construction ----------------------------------------------------
 
@@ -279,8 +363,12 @@ class MainWindow(QMainWindow):
         self.weight_box.setLocale(QLocale(QLocale.French))  # « 68,5 kg »
         self.weight_box.setValue(self.free.rider_kg)
         self.weight_box.valueChanged.connect(self._weight_changed)
-        bar.addWidget(self._chip_box("Poids", self.weight_box, "Poids du cycliste, pour la pente simulée "
-                                     "(mode libre et parcours GPX ; vélo : 9 kg en plus)"))
+        bar.addWidget(self._chip_box("Poids", self.weight_box, "Poids du cycliste, pour la pente simulée et la "
+                                     "vitesse calculée (le poids du vélo s'ajoute : Profil → Changer de cycliste…)"))
+        # Entrée ou Échap valide la case et rend le clavier aux raccourcis (Espace, +, −, E, N…).
+        self._field_keys = _LeaveFieldOnEnter(lambda: self.pages.setFocus(), self)
+        for box in (self.ftp_box, self.weight_box):
+            box.installEventFilter(self._field_keys)
         self.profile_action = QAction("Profil…", self)
         self.profile_action.setToolTip("Changer de cycliste : FTP, poids, comptes Strava / Nolio et sorties")
         self.profile_action.triggered.connect(self._choose_profile)
@@ -325,7 +413,11 @@ class MainWindow(QMainWindow):
 
     def _build_body(self) -> None:
         self.pages = QStackedWidget()
+        # Un clic ailleurs que dans une case reprend le clavier : les raccourcis remarchent. Au lancement,
+        # le clavier est là aussi, pas dans la case FTP.
+        self.pages.setFocusPolicy(Qt.ClickFocus)
         self.setCentralWidget(self.pages)
+        self.pages.setFocus()
         root = QWidget()
         self.pages.addWidget(root)
         layout = QVBoxLayout(root)
@@ -341,12 +433,12 @@ class MainWindow(QMainWindow):
         heading.addWidget(self.subtitle, 1, Qt.AlignBottom)
         layout.addLayout(heading)
 
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        self.m_power = Metric("PUISSANCE", 64)
-        self.power_zones = ZoneBar()
-        self.m_power.add(self.power_zones)
+        self.workout_grid = grid = MetricGrid(WORKOUT_SLOTS, Mode.WORKOUT)
+        self.cards = grid.cards
         self.m_target = Metric("CIBLE", 64, ACCENT)
+        self.m_target.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.m_target.customContextMenuRequested.connect(self._target_menu)
+        self.m_target.setToolTip("Clic droit : bip avant chaque brique")
         self.step_ring = BrickRing(124)
         self.step_ring.setToolTip("Temps restant sur la brique")
         self.m_target.row.addWidget(self.step_ring, 0, Qt.AlignTop)
@@ -358,20 +450,8 @@ class MainWindow(QMainWindow):
         tag_row.addStretch(1)
         self.m_target.body.addLayout(tag_row)
         self.m_target.add(self.next_label)
-        self.m_cadence = Metric("CADENCE", 34, CADENCE)
-        self.m_heart = Metric("CARDIO", 34, HEART)
-        self.m_total = Metric("RESTE AU TOTAL", 34)
-        self.total_bar = QProgressBar()
-        self.total_bar.setTextVisible(False)
-        self.total_bar.setFixedHeight(6)
-        self.total_bar.setRange(0, 1000)
-        self.m_total.add(self.total_bar)
-        grid.addWidget(self.m_power, 0, 0, 2, 1)
         grid.addWidget(self.m_target, 0, 1, 2, 1)
-        grid.addWidget(self.m_cadence, 0, 2)
-        grid.addWidget(self.m_heart, 0, 3)
         grid.addWidget(self._build_intensity(), 1, 2)
-        grid.addWidget(self.m_total, 1, 3)
         for c, stretch in enumerate((28, 30, 21, 21)):
             grid.setColumnStretch(c, stretch)
         layout.addLayout(grid)
@@ -381,6 +461,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.current_label)
 
         self.chart = WorkoutChart()
+        self.chart.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.chart.customContextMenuRequested.connect(lambda pos: self._chart_menu(self.chart, pos))
+        self.chart.setToolTip("Clic droit : courbes affichées")
         layout.addWidget(self.chart, 1)
 
         buttons = QHBoxLayout()
@@ -398,6 +481,10 @@ class MainWindow(QMainWindow):
         self.next_button = QPushButton("Brique suivante")
         self.next_button.setIcon(icon("next"))
         self.next_button.clicked.connect(self._next_step)
+        self.next_button.setToolTip("Raccourci : → ou N\nClic droit : brique précédente (←), recommencer la brique (R)")
+        self.next_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.next_button.customContextMenuRequested.connect(
+            lambda pos: self._step_menu().popup(self.next_button.mapToGlobal(pos)))
         self.reset_button = QPushButton("Recommencer")
         self.reset_button.setIcon(icon("restart"))
         self.reset_button.clicked.connect(self.restart_ride)
@@ -412,14 +499,17 @@ class MainWindow(QMainWindow):
             b.setFocusPolicy(Qt.NoFocus)
             b.setCursor(Qt.PointingHandCursor)
             buttons.addWidget(b)
-        buttons.addStretch(1)
-        hint = QLabel(keycaps("[Espace] pause   [↑] [↓] ±1 %   [→] brique suivante   [E] ERG   "
-                              "[Maj+↑] [Maj+↓] braquet"))
-        buttons.addWidget(hint)
+        # « → brique suivante » : sur le bouton du même nom (infobulle), pour que la ligne tienne en 1 280 px.
+        hint = hint_label(keycaps("[Espace] pause   [↑] [↓] ±1 %   [E] ERG   [Maj+↑] [Maj+↓] braquet   [Tab] tour"))
+        buttons.addWidget(hint, 1)
         layout.addLayout(buttons)
 
         self.free_panel = FreeRidePanel()
         self.free_panel.chart.set_session(self.free)
+        free_chart = self.free_panel.chart
+        free_chart.setContextMenuPolicy(Qt.CustomContextMenu)
+        free_chart.customContextMenuRequested.connect(lambda pos: self._chart_menu(free_chart, pos))
+        free_chart.setToolTip("Clic droit : courbes affichées")
         self.free_panel.play_button.clicked.connect(self._toggle)
         self.free_panel.reset_button.clicked.connect(self.restart_ride)
         self.free_panel.back_button.clicked.connect(self.leave_free_ride)
@@ -432,6 +522,9 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.free_panel)
 
         self.route_panel = RoutePanel()
+        for mode, grid in self._grids().items():  # indicateurs choisis par clic droit : gardés dans le profil
+            grid.changed.connect(lambda keys, m=mode: self._layout_chosen(m, keys))
+            grid.menu_hook = self._card_menu
         self.route_panel.play_button.clicked.connect(self._toggle)
         self.route_panel.reset_button.clicked.connect(self.restart_ride)
         self.route_panel.back_button.clicked.connect(self.leave_free_ride)
@@ -474,18 +567,26 @@ class MainWindow(QMainWindow):
 
     def _build_shortcuts(self) -> None:
         # ↑ ↓ : ±1 % sur une séance, ±5 W en mode libre ; Page↑ Page↓ : ±5 % ou ±25 W.
-        for keys, slot in (((Qt.Key_Space,), self._toggle),
+        for keys, slot in (((Qt.Key_Space,), self._space),
                            ((Qt.Key_Up, Qt.Key_Plus, Qt.Key_Equal), lambda: self._step(+1)),
                            ((Qt.Key_Down, Qt.Key_Minus), lambda: self._step(-1)),
                            ((Qt.Key_PageUp,), lambda: self._step(+5)),
                            ((Qt.Key_PageDown,), lambda: self._step(-5)),
-                           ((Qt.Key_Right, Qt.Key_N), self._next_step)):
+                           ((Qt.Key_Right, Qt.Key_N), self._next_step),
+                           ((Qt.Key_Left,), self.previous_step),
+                           ((Qt.Key_R,), self.restart_step)):
             for key in keys:
                 QShortcut(QKeySequence(key), self, activated=slot)
         QShortcut(QKeySequence(Qt.Key_E), self, activated=self.toggle_erg)
+        QShortcut(QKeySequence(Qt.Key_P), self, activated=self.toggle_free_mode)  # mode libre : ERG ↔ pente
+        QShortcut(QKeySequence(Qt.Key_F11), self, activated=self.toggle_full_screen)
+        self._was_maximized = False
         # Maj+↑ / Maj+↓ : braquet virtuel plus dur / plus souple, comme les boutons + / − du Zwift Click.
         QShortcut(QKeySequence("Shift+Up"), self, activated=lambda: self.shift_gear(+1))
         QShortcut(QKeySequence("Shift+Down"), self, activated=lambda: self.shift_gear(-1))
+        # Tab : nouveau tour (tour manuel dans le .fit). Le raccourci passe avant le passage d'un bouton à
+        # l'autre, que la fenêtre n'utilise pas (boutons sans focus clavier).
+        QShortcut(QKeySequence(Qt.Key_Tab), self, activated=self.new_lap)
         QShortcut(QKeySequence("Ctrl+L"), self, activated=self._toggle_free_ride)
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.finish_ride)
 
@@ -512,11 +613,11 @@ class MainWindow(QMainWindow):
             self.end_ride(self.session)
         intensity = self.session.intensity_pct
         self.session = WorkoutSession(workout, self.ftp, self.free.rider_kg)
+        self.session.bike_kg = self.bike_kg
         self.session.intensity_pct = intensity
         # Sans cible en puissance (séance en FC roulée aux vitesses), pas d'ERG possible.
         self.session.erg = self._erg_wanted and workout.has_power_targets
         self.erg_button.setEnabled(workout.has_power_targets)
-        self._since_sample = 0.0
         self.chart.set_session(self.session)
         self.title.setText(workout.name)
         count = len(self.session.segments)
@@ -558,8 +659,20 @@ class MainWindow(QMainWindow):
             self._push_target()
             self._refresh()
 
+    def set_session_ftp_weight(self, ftp: float | None = None, weight_kg: float | None = None) -> None:
+        """FTP et poids pour cette session seulement (`--ftp`, `--weight`) : le profil ne change pas."""
+        self._keep_in_profile = False
+        try:
+            if ftp:
+                self.ftp_box.setValue(int(ftp))
+                self._ftp_changed()
+            if weight_kg:
+                self.weight_box.setValue(weight_kg)
+        finally:
+            self._keep_in_profile = True
+
     def _weight_changed(self, kg: float) -> None:
-        if self.profile is not None and self.profile.weight_kg != kg:
+        if self._keep_in_profile and self.profile is not None and self.profile.weight_kg != kg:
             self.profile.weight_kg = kg
             self.profiles.save()
         self.free.rider_kg = kg
@@ -568,6 +681,18 @@ class MainWindow(QMainWindow):
             self.route.rider_kg = kg
         self._push_target()
         self._refresh()
+
+    def set_bike_kg(self, kg: float) -> None:
+        """Poids du vélo (fiche Profil) : s'ajoute à celui du cycliste pour la pente et la vitesse calculée."""
+        self.bike_kg = float(kg)
+        self._apply_bike_kg()
+        self._push_target()
+        self._refresh()
+
+    def _apply_bike_kg(self) -> None:
+        for session in (self.session, self.free, self.route):
+            if session is not None:
+                session.bike_kg = self.bike_kg
 
     @property
     def gears_apply(self) -> bool:
@@ -635,8 +760,8 @@ class MainWindow(QMainWindow):
         if self.route is not None:  # le parcours précédent, même inachevé, est enregistré
             self.end_ride(self.route)
         self.route = RouteSession(route, self.ftp, self.weight_box.value())
+        self.route.bike_kg = self.bike_kg
         self.route_panel.set_session(self.route)
-        self._since_sample = 0.0
         self.pages.setCurrentWidget(self.route_panel)
         self.setWindowTitle(f"{route.name} — Home trainer")
         self._push_target()
@@ -648,6 +773,33 @@ class MainWindow(QMainWindow):
             self.ride_route(old.route)
             self.route.difficulty_pct = old.difficulty_pct
 
+    def continue_free(self, workout: WorkoutSession) -> None:
+        """Après une séance finie : le mode libre prend la suite, dans le même fichier (même mesures,
+        même secours), à la puissance de la dernière brique, en ERG, et démarre aussitôt."""
+        if workout.state is not State.FINISHED or workout.exported:
+            return
+        self.end_ride(self.free)  # le mode libre d'avant, s'il a été roulé, part dans son propre fichier
+        last = next((x.target_w for x in reversed(workout.samples) if x.target_w), None)
+        old = self.free
+        self.free = FreeRideSession(self.ftp, last or old.target_w, old.rider_kg, FreeMode.ERG, old.grade_pct)
+        self.free.bike_kg = self.bike_kg
+        self.free.continue_from(workout)
+        workout.exported = True  # enregistrée avec sa suite, au bouton « Terminer » du mode libre
+        self.free_panel.chart.set_session(self.free)
+        self.pages.setCurrentWidget(self.free_panel)
+        self.setWindowTitle(f"{workout.workout.name} + mode libre — Home trainer")
+        self.free.start()
+        self.clock.restart()
+        self._push_target()
+        self._refresh()
+        self.statusBar().showMessage("Mode libre : la suite de la séance, enregistrée dans le même fichier "
+                                     "au bouton « Terminer »", 10000)
+
+    def toggle_free_mode(self) -> None:
+        """Mode libre : ERG ↔ pente (touche P)."""
+        if self.free_ride:
+            self.set_free_mode(FreeMode.SLOPE if self.free.mode is FreeMode.ERG else FreeMode.ERG)
+
     def _toggle_free_ride(self) -> None:
         self.leave_free_ride() if self.free_ride else self.enter_free_ride()
 
@@ -655,8 +807,8 @@ class MainWindow(QMainWindow):
         old = self.free
         self.end_ride(old)
         self.free = FreeRideSession(self.ftp, old.target_w, old.rider_kg, old.mode, old.grade_pct)
+        self.free.bike_kg = self.bike_kg
         self.free_panel.chart.set_session(self.free)
-        self._since_sample = 0.0
         self._push_target()
         self._refresh()
 
@@ -681,12 +833,50 @@ class MainWindow(QMainWindow):
         self.clock.restart()
         self._refresh()
 
+    def _space(self) -> None:
+        """Touche Espace : pause et reprise. Séance finie ou parcours arrivé : la relance se confirme
+        (un Espace de trop ne repart plus aussitôt sur une nouvelle sortie)."""
+        if (not self.free_ride and self.active.state is State.FINISHED and not self.confirm_stop(
+                self, "Recommencer", "La sortie est finie. En recommencer une depuis le début ?")):
+            return
+        self._toggle()
+
     def _next_step(self) -> None:
         if self.free_ride or self.route_ride:
             return
         self.session.next_step()
         self._push_target()
         self._refresh()
+
+    def previous_step(self) -> None:
+        """Brique précédente (←) : rattrape un saut de brique accidentel."""
+        if self.free_ride or self.route_ride:
+            return
+        self.session.previous_step()
+        self._last_beep = None  # le compte à rebours de la brique reprise sonne à nouveau
+        self._push_target()
+        self._refresh()
+
+    def restart_step(self) -> None:
+        """Recommencer la brique en cours (R)."""
+        if self.free_ride or self.route_ride:
+            return
+        self.session.restart_step()
+        self._last_beep = None
+        self._push_target()
+        self._refresh()
+
+    def _step_menu(self) -> QMenu:
+        """Clic droit sur « Brique suivante » : brique précédente, recommencer la brique."""
+        menu = QMenu(self)
+        finished = self.session.state is State.FINISHED
+        back = menu.addAction(icon("back"), "Brique précédente  (←)")
+        back.triggered.connect(self.previous_step)
+        again = menu.addAction(icon("restart"), "Recommencer la brique  (R)")
+        again.triggered.connect(self.restart_step)
+        for action in (back, again):
+            action.setEnabled(not finished)
+        return menu
 
     def _reset(self) -> None:
         self.load(self.session.workout)
@@ -711,7 +901,7 @@ class MainWindow(QMainWindow):
         if self.ftp_box.value() == self.ftp:
             return
         self.ftp = self.ftp_box.value()
-        if self.profile is not None:
+        if self._keep_in_profile and self.profile is not None:
             self.profile.ftp = int(self.ftp)
             self.profiles.save()
         self.free.ftp = self.ftp
@@ -726,6 +916,7 @@ class MainWindow(QMainWindow):
         # Garder l'avancement : seule la conversion % FTP → W change.
         self.session.index, self.session.step_elapsed_s, self.session.elapsed_s = index, step_elapsed, elapsed
         self.session.state, self.session.samples = state, samples
+        self.session._changes = s._changes  # briques déjà quittées (dernière seconde d'une brique)
         self._refresh()
 
     def set_power_source(self, source: PowerSource) -> None:
@@ -845,21 +1036,20 @@ class MainWindow(QMainWindow):
         return saved or sensor.name
 
     def closeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        self._closed = True
         self.keep_awake.set(False)
         self.mini.close()
         self.end_ride(self.session, send=False)
         self.end_ride(self.free, send=False)
         if self.route is not None:
             self.end_ride(self.route, send=False)
+        # La fenêtre disparaît tout de suite. Les capteurs s'arrêtent ensemble (3 s au plus en
+        # tout, au lieu de 3 s chacun, home trainer libéré d'abord), puis l'envoi de la dernière sortie
+        # finit en arrière-plan (`CLOSE_SEND_WAIT_S` au plus ; sinon il repart au prochain lancement).
+        self.hide()
+        stop_all([self.heart_rate, self.power_meter, self.click,
+                  self.source if isinstance(self.source, Trainer) else None])
         self.send_rides(wait_s=CLOSE_SEND_WAIT_S)
-        if self.heart_rate is not None:
-            self.heart_rate.stop()
-        if self.power_meter is not None:
-            self.power_meter.stop()
-        if self.click is not None:
-            self.click.stop()
-        if isinstance(self.source, Trainer):
-            self.source.stop()
         super().closeEvent(event)
 
     def _open_file(self) -> None:
@@ -936,7 +1126,7 @@ class MainWindow(QMainWindow):
         editor = WorkoutEditor(workout, self.ftp, self, directory=self.directory)
         accepted = editor.exec() == QDialog.Accepted
         self.directory = editor.directory
-        if editor.ftp != self.ftp:
+        if accepted and editor.ftp != self.ftp:  # « Fermer » : la FTP essayée dans l'éditeur est abandonnée
             self.ftp_box.setValue(int(editor.ftp))
             self._ftp_changed()
         result = editor.workout()
@@ -998,11 +1188,18 @@ class MainWindow(QMainWindow):
         history = self.ride_history()
         if history is not None:
             history.mark_records(summary)
-        choice = self.ask_ride_export(self, default, summary)
+        # Séance finie : « Continuer en mode libre » est proposé (la suite ira dans le même fichier).
+        can_continue = isinstance(session, WorkoutSession) and session.state is State.FINISHED
+        choice = (self.ask_ride_export(self, default, summary, can_continue=True) if can_continue
+                  else self.ask_ride_export(self, default, summary))
         if choice is None:
             return False
+        if choice == CONTINUE:
+            self.continue_free(session)
+            return False  # rien d'enregistré : la sortie continue
         if choice == DISCARD:
             session.exported = True
+            self._drop_rescue(session)  # jetée volontairement : le secours part aussi
             self.statusBar().showMessage("Sortie non enregistrée", 8000)
             return True
         self._export_fmt = choice.fmt
@@ -1015,32 +1212,43 @@ class MainWindow(QMainWindow):
 
         Sans `export`, en .fit dans le dossier des sorties ; avec, au format, au nom et dans le
         dossier choisis (et, si ce n'est pas un .fit, une copie .fit dans le dossier des sorties
-        pour Strava / Nolio). False si l'écriture a échoué."""
+        pour Strava / Nolio). False si l'écriture a échoué.
+
+        Sans `export` (sortie remplacée, changement de profil, fermeture), un échec ne perd rien : la
+        sortie est gardée en secours et proposée au prochain lancement ; si même le secours est
+        impossible, la fenêtre « Réessayer / Jeter » ne laisse pas d'autre issue."""
         if self.outbox is None or session.exported or len(session.samples) < MIN_RIDE_SAMPLES:
             return True
         session.exported = True
         title, description = ride_title(session)
         points = ride_points(session.samples)
-        try:
-            if export is None:
-                path = self.outbox.add(points, title, description)
-            elif export.fmt == "fit":
-                path = self.outbox.add(points, title, description, dest=export.path)
-            else:
-                export.path.parent.mkdir(parents=True, exist_ok=True)
-                path = write_ride(points, export.path)
-                self.outbox.add(points, title, description)
-        except (OSError, ValueError) as e:
-            session.exported = False  # on pourra réessayer avec « Terminer »
-            where = export.path if export is not None else self.outbox.dir
-            QMessageBox.warning(self, "Sortie non enregistrée", f"{where} : {e}")
-            return False
+        athlete = {"ftp": self.ftp, "hr_max": self._hr_max()}  # FTP, TSS, IF et FC max dans le .fit
+        while True:
+            try:
+                if export is None:
+                    path = self.outbox.add(points, title, description, **athlete)
+                elif export.fmt == "fit":
+                    path = self.outbox.add(points, title, description, dest=export.path, **athlete)
+                else:
+                    export.path.parent.mkdir(parents=True, exist_ok=True)
+                    path = write_ride(points, export.path)
+                    self.outbox.add(points, title, description, **athlete)
+                break
+            except (OSError, ValueError) as e:
+                where = export.path if export is not None else self.outbox.dir
+                if export is not None:
+                    session.exported = False  # on reste sur la sortie : « Terminer » pour réessayer
+                    QMessageBox.warning(self, "Sortie non enregistrée", f"{where} : {e}")
+                    return False
+                if self._keep_in_rescue(session, title, f"{where} : {e}"):
+                    return False
+        self._drop_rescue(session)
         shown = path.name if path.parent == self.outbox.dir.absolute() else str(path)
         history = self.ride_history()
         if history is not None:
             summary = self.ride_summary(session)
             summary.file = str(Path(path).absolute())
-            history.add(summary)
+            self._add_to_history(history, summary)
         if not auto_services(self.accounts):
             self.statusBar().showMessage(f"Sortie enregistrée : {shown} (pour l'envoyer vers Strava ou "
                                          f"Nolio, connectez un compte : Profil → Comptes Strava / Nolio…)", 15000)
@@ -1050,11 +1258,112 @@ class MainWindow(QMainWindow):
             self.send_rides()
         return True
 
+    # --- sortie de secours (ui/rescue.py) ------------------------------------
+
+    def _rescue_for(self, session, create: bool = True) -> RescueFile | None:
+        """Secours de cette sortie, reconnue à sa liste de mesures (gardée quand la FTP recrée la séance).
+        None sans dossier de secours ou sans dossier des sorties (rien n'est alors enregistré)."""
+        if self.rescue_dir is None or self.outbox is None:
+            return None
+        rescue = next((r for r in self._rescues if r.samples is session.samples), None)
+        if rescue is None and create:
+            mode = ("parcours" if isinstance(session, RouteSession)
+                    else "libre" if isinstance(session, FreeRideSession) else "seance")
+            rescue = RescueFile(self.rescue_dir, self.profile.id if self.profile else None, mode, session.samples)
+            self._rescues.append(rescue)
+        return rescue
+
+    def _save_rescue(self, session) -> None:
+        """Ajoute au secours les mesures roulées depuis la dernière fois (toutes les 10 s)."""
+        if session.exported or not session.samples:
+            return
+        rescue = self._rescue_for(session)
+        if rescue is None:
+            return
+        try:
+            rescue.write(*ride_title(session))
+        except OSError as e:
+            log.warning("secours non écrit : %s", e)
+            self.statusBar().showMessage(f"Sortie de secours impossible à écrire : {e}", 10000)
+
+    def _drop_rescue(self, session) -> None:
+        """Sortie enregistrée ou jetée : son secours est supprimé."""
+        rescue = self._rescue_for(session, create=False)
+        if rescue is not None:
+            rescue.remove()
+            self._rescues.remove(rescue)
+
+    def _keep_in_rescue(self, session, title: str, error: str) -> bool:
+        """Le .fit n'a pas pu être écrit alors que la sortie va être remplacée : elle est gardée en secours
+        (True). Si le secours échoue aussi, « Réessayer » rend False (nouvel essai du .fit) et « Jeter »
+        rend True."""
+        rescue = self._rescue_for(session)
+        if rescue is None:  # sans dossier de secours (tests) : comme avant, la sortie est perdue
+            QMessageBox.warning(self, "Sortie non enregistrée", error)
+            return True
+        try:
+            rescue.write(*ride_title(session))
+        except OSError as e:
+            log.error("sortie ni enregistrée ni gardée en secours : %s ; %s", error, e)
+            if self.ask_unsaved(self, title, len(session.samples), f"{error}\nSecours : {e}"):
+                return False
+            self._drop_rescue(session)
+            self.statusBar().showMessage("Sortie jetée", 8000)
+            return True
+        self._rescues.remove(rescue)  # le fichier reste sur le disque, proposé au prochain lancement
+        self._kept.add(rescue.path)
+        log.error("sortie non enregistrée, gardée en secours dans %s : %s", rescue.path, error)
+        QMessageBox.warning(self, "Sortie non enregistrée",
+                            f"La sortie « {title} » ({duration_text(len(session.samples))}) n'a pas pu être "
+                            f"enregistrée :\n{error}\n\nElle est gardée et vous sera proposée au prochain lancement.")
+        return True
+
+    def propose_rescued(self) -> None:
+        """Sorties de secours du profil (plantage, coupure, .fit impossible) : Enregistrer, Plus tard ou Jeter."""
+        if self.rescue_dir is None or self.outbox is None or self._proposing or self._closed:
+            return
+        self._proposing = True
+        try:
+            skip = {r.path for r in self._rescues} | self._kept  # en cours, ou gardée à l'instant
+            for ride in find_rescued(self.rescue_dir, self.profile.id if self.profile else None):
+                if ride.path in skip:
+                    continue
+                choice = self.ask_rescued(self, ride)
+                if choice == RESCUE_SAVE:
+                    self._save_rescued(ride)
+                elif choice == RESCUE_DISCARD:
+                    remove_file(ride.path)
+                    self.statusBar().showMessage(f"Sortie jetée : {ride.title}", 8000)
+        finally:
+            self._proposing = False
+
+    def _save_rescued(self, ride: RescuedRide) -> None:
+        """Sortie retrouvée : .fit dans le dossier des sorties, historique, envoi ; le secours part ensuite."""
+        try:
+            path = self.outbox.add(ride_points(ride.samples), ride.title, ride.description,
+                                   ftp=self.ftp, hr_max=self._hr_max())
+        except (OSError, ValueError) as e:
+            QMessageBox.warning(self, "Sortie non enregistrée", f"{self.outbox.dir} : {e}\n\n"
+                                "Elle reste gardée et vous sera proposée au prochain lancement.")
+            return
+        remove_file(ride.path)
+        history = self.ride_history()
+        if history is not None:
+            summary = summarize(ride.samples, self.ftp, ride.title, ride.start or time.time(), self._hr_max())
+            summary.file = str(Path(path).absolute())
+            self._add_to_history(history, summary)
+        self.statusBar().showMessage(f"Sortie retrouvée enregistrée : {path.name}", 15000)
+        self.send_rides()
+
     def ride_summary(self, session: WorkoutSession | FreeRideSession | RouteSession) -> RideSummary:
-        """Bilan de la sortie : chiffres, temps par zone, meilleures puissances."""
+        """Bilan de la sortie : chiffres, temps par zone (puissance, et FC avec la FC max du profil),
+        meilleures puissances."""
         title, _ = ride_title(session)
         start = next((x.at for x in session.samples if x.at is not None), time.time())
-        return summarize(session.samples, self.ftp, title, start)
+        return summarize(session.samples, self.ftp, title, start, self._hr_max())
+
+    def _hr_max(self) -> int | None:
+        return self.profile.hr_max if self.profile is not None else None
 
     def ride_history(self) -> RideHistory | None:
         """Historique du profil, dans son dossier des sorties (None sans dossier des sorties)."""
@@ -1062,11 +1371,26 @@ class MainWindow(QMainWindow):
             return None
         return RideHistory.load(self.outbox.dir / HISTORY_FILE)
 
+    def _add_to_history(self, history: RideHistory, summary: RideSummary) -> None:
+        """Ajoute la sortie à l'historique ; prévient si l'historique était illisible ou n'a pas pu
+        être écrit (le .fit, lui, est déjà sur le disque)."""
+        try:
+            history.add(summary)
+        except OSError as e:
+            QMessageBox.warning(self, "Historique non mis à jour",
+                                f"La sortie est enregistrée, mais l'historique n'a pas pu être écrit : {e}")
+            return
+        if history.problem:
+            kept = f"\n\nLe fichier illisible est gardé : {history.set_aside}" if history.set_aside else ""
+            QMessageBox.warning(self, "Historique", history.problem + kept)
+
     def _open_history(self) -> None:
         history = self.ride_history()
         if history is None:
             self.statusBar().showMessage("Pas d'historique : les sorties ne sont pas enregistrées", 8000)
             return
+        if history.problem:
+            QMessageBox.warning(self, "Historique", history.problem)
         HistoryDialog(history, self.profile.name if self.profile else "", self).exec()
 
     def _ask_at_end(self, session: WorkoutSession | RouteSession) -> None:
@@ -1084,17 +1408,19 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, ask)  # hors du tic de l'horloge : la fenêtre est modale
 
-    def send_rides(self, wait_s: float = 0) -> None:
-        """Envoie en tâche de fond ce qui attend ; `wait_s` > 0 attend la fin (fermeture de l'appli)."""
+    def send_rides(self, wait_s: float = 0, retry_rejected: bool = False) -> None:
+        """Envoie en tâche de fond ce qui attend ; `wait_s` > 0 attend la fin (fermeture de l'appli).
+        `retry_rejected` (envoi demandé dans Comptes) retente aussi les fichiers refusés une fois."""
         if self.outbox is None or not auto_services(self.accounts):
             return
         if self._send_thread is not None and self._send_thread.is_alive():
             self._send_again = True
+            self._send_retry = self._send_retry or retry_rejected
         else:
             outbox, accounts, signals = self.outbox, self.accounts, self._sync
 
             def work() -> None:
-                reports = send_pending(outbox, accounts)
+                reports = send_pending(outbox, accounts, retry_rejected=retry_rejected)
                 try:
                     signals.done.emit(reports)
                 except RuntimeError:  # fenêtre déjà fermée
@@ -1108,18 +1434,22 @@ class MainWindow(QMainWindow):
                 self._send_thread.join(0.2)
             if self._send_again and not self._send_thread.is_alive():
                 self._send_again = False
-                send_pending(self.outbox, self.accounts)
+                retry, self._send_retry = self._send_retry, False
+                send_pending(self.outbox, self.accounts, retry_rejected=retry)
 
     def _sent(self, reports: list) -> None:
         if reports:
             text = " · ".join(str(r) for r in reports[-4:])
-            failed = [r for r in reports if not r.ok]
+            failed = [r for r in reports if not r.ok and not r.rejected]
             if failed:
                 text += " (nouvel essai au prochain lancement, ou Profil → Comptes Strava / Nolio…)"
+            elif any(r.rejected for r in reports):
+                text += " (fichier refusé : nouvel essai seulement depuis Profil → Comptes Strava / Nolio…)"
             self.statusBar().showMessage(text, 20000)
         if self._send_again:
             self._send_again = False
-            self.send_rides()
+            retry, self._send_retry = self._send_retry, False
+            self.send_rides(retry_rejected=retry)
 
     # --- profils -----------------------------------------------------------
 
@@ -1143,9 +1473,99 @@ class MainWindow(QMainWindow):
         self.ftp_box.setValue(int(profile.ftp))
         self._ftp_changed()
         self.weight_box.setValue(profile.weight_kg)
+        bike = profile.bike_kg
+        self.set_bike_kg(bike if isinstance(bike, (int, float)) and MIN_BIKE_KG <= bike <= MAX_BIKE_KG
+                         else DEFAULT_BIKE_KG)
+        layouts = profile.layouts if isinstance(profile.layouts, dict) else {}
+        for mode, grid in self._grids().items():
+            grid.set_keys(layouts.get(mode.value))
+        self.mini.set_choices({mode: layouts.get(mini_layout_key(mode)) for mode in Mode})
+        self.set_smoothing(profile.power_smoothing_s)
+        self.set_speed_source(profile.speed_source)
+        self.brick_beep = profile.brick_beep is not False
+        self.beep_sound, self.beep_before_s = profile.beep_sound, profile.beep_before_s
+        self.beep_last_distinct = profile.beep_last_distinct
+        self.beeper.preload(self.beep_sound)  # premier bip à l'heure
+        self.cadence_alert_rpm = profile.cadence_alert_rpm
+        chosen = profile.chart_curves
+        self.set_curves(DEFAULT_CURVES if not isinstance(chosen, list) else chosen)
         self.profile_action.setText(f"Profil : {profile.name}")
         self.statusBar().showMessage(f"Profil : {profile.name}", 5000)
         self.send_rides()
+        QTimer.singleShot(0, self.propose_rescued)  # sorties de secours de ce profil, fenêtre affichée
+
+    def _grids(self) -> dict[Mode, MetricGrid]:
+        return {Mode.WORKOUT: self.workout_grid, Mode.FREE: self.free_panel.grid, Mode.ROUTE: self.route_panel.grid}
+
+    def new_lap(self) -> None:
+        """Touche Tab : ouvre un nouveau tour dans la sortie en cours (tour manuel du .fit)."""
+        active = self.active
+        if active.state is State.RUNNING and active.new_lap():
+            self.statusBar().showMessage(f"Nouveau tour : tour {active.stats.tour_number + 1}", 3000)
+        else:
+            self.statusBar().showMessage("Nouveau tour : seulement pendant la sortie, après au moins une seconde",
+                                         3000)
+        self._refresh()
+
+    def _card_menu(self, key: str, menu: QMenu) -> None:
+        """Menu du clic droit sur une carte : lissage de la puissance (cartes puissance et W/kg), origine de la
+        vitesse (carte vitesse, et carte cadence qui la montre quand la carte vitesse n'est pas à l'écran)."""
+        if key in ("speed", "cadence"):
+            self._speed_menu(menu)
+        if key == "cadence":
+            self._cadence_menu(menu)
+        if key not in ("power", "watts_per_kg"):
+            return
+        sub = menu.addMenu("Puissance affichée")
+        for seconds in SMOOTHING_CHOICES_S:
+            action = sub.addAction("Instantanée" if seconds == 0 else f"Moyenne sur {seconds} s")
+            action.setCheckable(True)
+            action.setChecked(seconds == self.smoothing_s)
+            action.triggered.connect(lambda _=False, s=seconds: self.set_smoothing(s))
+
+    def _speed_menu(self, menu: QMenu) -> None:
+        sub = menu.addMenu("Vitesse")
+        sent = getattr(self._last_reading, "speed_kmh", None) is not None
+        choices = ((SPEED_APP, "Calculée par l'application (puissance, poids, pente)"),
+                   (SPEED_TRAINER, "Celle du home trainer" + ("" if sent else " (non envoyée : vitesse calculée)")))
+        for source, text in choices:
+            action = sub.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(source == self.speed_source)
+            action.triggered.connect(lambda _=False, s=source: self.set_speed_source(s))
+        if self.route_ride:
+            sub.addSeparator()
+            note = sub.addAction("Parcours : toujours la vitesse calculée (la distance en dépend)")
+            note.setEnabled(False)
+
+    def set_smoothing(self, seconds: int) -> None:
+        """Puissance affichée : instantanée (0) ou moyenne sur `seconds` ; gardé dans le profil."""
+        self.smoothing_s = seconds if seconds in SMOOTHING_CHOICES_S else 0
+        if self.profile is not None and self.profile.power_smoothing_s != self.smoothing_s:
+            self.profile.power_smoothing_s = self.smoothing_s
+            self.profiles.save()
+        self._refresh()
+
+    def _layout_chosen(self, mode: Mode, keys: list[str] | None) -> None:
+        """Indicateurs d'un écran choisis par clic droit (None : disposition d'origine)."""
+        self._save_layout(mode.value, keys)
+        self._refresh()
+
+    def _mini_chosen(self, mode: Mode, keys: list[str] | None) -> None:
+        """Valeurs de la vignette choisies par clic droit, pour un mode (None : valeurs d'origine)."""
+        self._save_layout(mini_layout_key(mode), keys)
+        self._refresh_mini()
+
+    def _save_layout(self, name: str, keys: list[str] | None) -> None:
+        if self.profile is None:
+            return
+        if not isinstance(self.profile.layouts, dict):
+            self.profile.layouts = {}
+        if keys is None:
+            self.profile.layouts.pop(name, None)
+        else:
+            self.profile.layouts[name] = keys
+        self.profiles.save()
 
     def _choose_profile(self) -> None:
         profile = choose_profile(self.profiles, self.profile, self)
@@ -1155,17 +1575,26 @@ class MainWindow(QMainWindow):
     def _choose_accounts(self) -> None:
         outbox = self.outbox if self.outbox is not None else Outbox()
         dialog = AccountsDialog(self.accounts, outbox, self)
-        dialog.send_requested.connect(self.send_rides)
+        dialog.send_requested.connect(lambda retry: self.send_rides(retry_rejected=retry))
         dialog.exec()
 
     # --- boucle ----------------------------------------------------------
 
     def _on_tick(self) -> None:
-        dt = self.clock.restart() / 1000
+        # En nanosecondes : `restart()` rend des millisecondes tronquées (~0,5 ms perdue par tic).
+        dt = self.clock.nsecsElapsed() / 1e9
+        self.clock.restart()
         if self.click is not None:
             for direction in self.click.take_shifts():
                 self.shift_gear(direction)
         active = self.active
+        if active is not self._sampled:
+            if self._sampled is not None:  # la sortie quittée : ses dernières secondes vont au secours
+                self._save_rescue(self._sampled)
+            self.sampler.reset()
+            self._sampled = active
+            self.road_kmh = 0.0
+        started_s = active.elapsed_s
         active.tick(dt)
         self._push_target()
         running = active.state is State.RUNNING
@@ -1173,24 +1602,249 @@ class MainWindow(QMainWindow):
         reading = self.source.read(dt) if running or isinstance(self.source, Trainer) else None
         reading = self._with_power_meter(reading, dt)
         self._last_reading = reading
-        if reading is not None and running:
-            self._since_sample += dt
-            if self._since_sample >= 1.0:
-                self._since_sample -= 1.0
-                heart = self.heart_rate.latest() if self.heart_rate is not None else None
-                active.record(reading.power_w, reading.cadence_rpm, heart.bpm if heart else None,
-                              self._speed(reading))
-            if active is self.route:
-                active.ride(dt, reading.power_w)
+        self.power_average.feed(dt, reading.power_w if reading is not None else None)
+        if active.elapsed_s > started_s:  # chrono avancé (y compris au tic qui termine la séance)
+            # Sans mesure (signal perdu), la puissance compte pour 0 : le vélo continue en roue libre.
+            power = reading.power_w if reading is not None else 0.0
+            self.road_kmh = next_speed_kmh(self.road_kmh, dt, power, self._road_slope())
+            self._record_seconds(active, started_s, reading)
+        else:
+            if not running:  # à l'arrêt (prêt, pause, fin)
+                self.road_kmh = 0.0
+            self.sampler.pause()
+        now = time.monotonic()
+        if now - self._rescued_at >= RESCUE_EVERY_S:
+            self._rescued_at = now
+            self._save_rescue(active)
+        if running:
+            if active is self.route:  # sans mesure (signal perdu) : roue libre, la vitesse n'est pas figée
+                active.ride(dt, reading.power_w if reading is not None else 0.0)
                 if active.state is State.FINISHED:
                     self._push_target()  # arrivée : résistance libre
+        self._watch_cadence(active, reading)
+        if active is self.session:
+            self._watch_brick()
         for session in (self.session, self.route):  # fin de séance ou arrivée : fenêtre d'enregistrement
             if session is not None and session.state is State.FINISHED:
                 self._ask_at_end(session)
         # Pas de veille tant qu'une sortie est en cours, même en pause.
         self.keep_awake.set(running or (active.state is State.PAUSED and bool(active.samples)))
-        self._refresh()
+        # Fenêtre réduite : rien n'est à l'écran, l'affichage attend. L'enregistrement, le
+        # secours et la vignette continuent ; la fenêtre rouverte est remise à jour aussitôt (`changeEvent`).
+        if not self.isMinimized():
+            self._refresh()
         self._refresh_mini()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        super().resizeEvent(event)
+        self._scale_timer.start()  # une fois le redimensionnement fini, pas à chaque pixel
+
+    def _apply_scale(self) -> None:
+        """Chiffres à l'échelle de la fenêtre : cartes des trois écrans, anneau, intensité, consignes."""
+        scale = window_scale(self.width(), self.height())
+        if scale == self.scale:
+            return
+        self.scale = scale
+        for grid in self._grids().values():
+            grid.scale = scale  # les cartes recréées par un choix au clic droit gardent l'échelle
+        for card in self.findChildren(Metric):
+            card.set_scale(scale)
+        self.step_ring.set_scale(scale)
+        for label, size in ((self.intensity_label, 40), (self.free_panel.target_label, 84),
+                            (self.route_panel.grade_label, 72)):
+            label.setFont(number_font(round(size * scale)))
+        self._refresh()
+
+    def toggle_full_screen(self) -> None:
+        """F11 : plein écran, et retour à la fenêtre d'avant (F11 ou Échap)."""
+        if self.isFullScreen():
+            self.showMaximized() if self._was_maximized else self.showNormal()
+        else:
+            self._was_maximized = self.isMaximized()
+            self.showFullScreen()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        # Échap ne sort du plein écran que si personne d'autre ne l'a pris (case de saisie, menu).
+        if event.key() == Qt.Key_Escape and self.isFullScreen():
+            self.toggle_full_screen()
+            return
+        super().keyPressEvent(event)
+
+    def changeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange and not self.isMinimized():
+            # Différé d'un tour : la fenêtre peut changer d'état pendant sa construction.
+            QTimer.singleShot(0, lambda: None if self._closed or self.isMinimized() else self._refresh())
+
+    def _watch_cadence(self, active, reading) -> None:
+        """Alerte de cadence basse : en roulant, cadence mesurée sous le seuil. Une cadence de 0 (roue
+        libre, arrêt de pédalage) ou absente ne compte pas et remet l'alerte à zéro."""
+        cadence = getattr(reading, "cadence_rpm", None)
+        low = (self.cadence_alert_rpm > 0 and active.state is State.RUNNING and cadence is not None
+               and 0 < cadence < self.cadence_alert_rpm)
+        if not low:
+            self._cadence_low_since = None
+        elif self._cadence_low_since is None or self._cadence_low_since > active.elapsed_s:
+            self._cadence_low_since = active.elapsed_s
+
+    def cadence_low(self) -> int | None:
+        """Seuil de l'alerte si la cadence est sous ce seuil depuis `CADENCE_ALERT_AFTER_S`, sinon None."""
+        since = self._cadence_low_since
+        if since is None or self.active.elapsed_s - since < CADENCE_ALERT_AFTER_S:
+            return None
+        return self.cadence_alert_rpm
+
+    def set_cadence_alert(self, rpm: int) -> None:
+        """Seuil de l'alerte de cadence basse (0 : pas d'alerte) ; gardé dans le profil."""
+        self.cadence_alert_rpm = rpm if rpm in CADENCE_ALERT_CHOICES else DEFAULT_CADENCE_ALERT_RPM
+        self._cadence_low_since = None
+        if self.profile is not None and self.profile.cadence_alert_rpm != self.cadence_alert_rpm:
+            self.profile.cadence_alert_rpm = self.cadence_alert_rpm
+            self.profiles.save()
+        self._refresh()
+
+    def _cadence_menu(self, menu: QMenu) -> None:
+        sub = menu.addMenu("Alerte de cadence basse")
+        for rpm in CADENCE_ALERT_CHOICES:
+            action = sub.addAction("Pas d'alerte" if rpm == 0 else f"Sous {rpm} tr/min")
+            action.setCheckable(True)
+            action.setChecked(rpm == self.cadence_alert_rpm)
+            action.triggered.connect(lambda _=False, r=rpm: self.set_cadence_alert(r))
+
+    def _watch_brick(self) -> None:
+        """Séance : bip avant la fin d'une brique (`beep_before_s` ; au-delà de 3 s, un bip au début du
+        compte à rebours puis aux 3 dernières secondes), bilan de la brique quand elle change."""
+        s = self.session
+        if self._brick_index is None or s.index < self._brick_index:  # première brique, séance recommencée
+            self._brick_index = s.index
+        if s.index != self._brick_index:
+            summary = brick_summary(s.samples, self._brick_index)
+            self._brick_index = s.index
+            if summary is not None and summary.seconds >= BRICK_NOTE_MIN_S:
+                self._brick_note = (summary.text(), time.monotonic() + BRICK_NOTE_S)
+        second = self._countdown_s()
+        if second is not None:
+            key = (s.index, second)
+            if key != self._last_beep:
+                self._last_beep = key
+                if self.brick_beep and (second <= BEEP_ALWAYS_S or second == self.beep_before_s):
+                    self._beep(last=second == 1)
+
+    def _beep(self, last: bool = False) -> None:
+        self.beeper.play(self.beep_sound, last, self.beep_last_distinct)
+
+    def _countdown_s(self) -> int | None:
+        """Secondes avant la brique suivante (… 3, 2, 1) pendant la séance, sinon None."""
+        s = self.session
+        remaining = s.step_remaining_s
+        if s.state is State.RUNNING and remaining is not None and 0 < remaining <= self.beep_before_s:
+            return math.ceil(remaining)
+        return None
+
+    def set_brick_beep(self, on: bool) -> None:
+        self.brick_beep = on
+        self._save_beep()
+
+    def set_beep(self, sound: str | None = None, before_s: int | None = None,
+                 last_distinct: bool | None = None) -> None:
+        """Son, durée du compte à rebours, son distinct à la dernière seconde : gardés dans le profil."""
+        if sound in SOUND_NAMES:
+            self.beep_sound = sound
+            self.beeper.preload(sound)
+        if before_s in BEEP_BEFORE_CHOICES:
+            self.beep_before_s = before_s
+        if last_distinct is not None:
+            self.beep_last_distinct = last_distinct
+        self._save_beep()
+
+    def _save_beep(self) -> None:
+        p = self.profile
+        if p is None:
+            return
+        chosen = (self.brick_beep, self.beep_sound, self.beep_before_s, self.beep_last_distinct)
+        if (p.brick_beep, p.beep_sound, p.beep_before_s, p.beep_last_distinct) != chosen:
+            p.brick_beep, p.beep_sound, p.beep_before_s, p.beep_last_distinct = chosen
+            self.profiles.save()
+
+    def curves(self) -> set[str]:
+        return set(self.chart.curves)
+
+    def set_curves(self, curves) -> None:
+        """Courbes affichées en plus de la puissance (séance et mode libre) ; gardé dans le profil."""
+        curves = {key for key in curves if key in CURVES}
+        for chart in (self.chart, self.free_panel.chart):
+            chart.curves = set(curves)
+            chart.update()
+        if self.profile is not None:
+            saved = None if curves == DEFAULT_CURVES else sorted(curves)
+            if self.profile.chart_curves != saved:
+                self.profile.chart_curves = saved
+                self.profiles.save()
+
+    def _curves_menu(self) -> QMenu:
+        menu = QMenu(self)
+        for key, (name, _color, _unit, _smooth) in CURVES.items():
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(key in self.chart.curves)
+            action.toggled.connect(lambda on, k=key: self.set_curves(self.curves() | {k} if on
+                                                                     else self.curves() - {k}))
+        return menu
+
+    def _chart_menu(self, chart: QWidget, pos) -> None:
+        self._curves_menu().popup(chart.mapToGlobal(pos))
+
+    def _beep_menu(self) -> QMenu:
+        """Bip avant chaque brique : marche, son, durée du compte à rebours, son de la dernière seconde."""
+        menu = QMenu(self)
+        action = menu.addAction(f"Bip {self.beep_before_s} s avant chaque brique")
+        action.setCheckable(True)
+        action.setChecked(self.brick_beep)
+        action.toggled.connect(self.set_brick_beep)
+        sounds = menu.addMenu("Son du bip")
+        group = QActionGroup(sounds)
+        for key, name in SOUND_NAMES.items():
+            choice = sounds.addAction(name)
+            choice.setCheckable(True)
+            choice.setChecked(key == self.beep_sound)
+            group.addAction(choice)
+            choice.triggered.connect(lambda _=False, k=key: (self.set_beep(sound=k), self._beep()))
+        durations = menu.addMenu("Compte à rebours")
+        group = QActionGroup(durations)
+        for seconds in BEEP_BEFORE_CHOICES:
+            choice = durations.addAction(f"{seconds} s avant la brique suivante")
+            choice.setCheckable(True)
+            choice.setChecked(seconds == self.beep_before_s)
+            group.addAction(choice)
+            choice.triggered.connect(lambda _=False, s=seconds: self.set_beep(before_s=s))
+        last = menu.addAction("Son distinct à la dernière seconde")
+        last.setCheckable(True)
+        last.setChecked(self.beep_last_distinct)
+        last.setEnabled(self.beep_sound != "windows")
+        last.toggled.connect(lambda on: self.set_beep(last_distinct=on))
+        menu.addSeparator()
+        menu.addAction("Écouter le bip").triggered.connect(lambda: self._beep())
+        menu.addAction("Écouter la dernière seconde").triggered.connect(lambda: self._beep(last=True))
+        return menu
+
+    def _target_menu(self, pos) -> None:
+        """Clic droit sur la carte cible de la séance : bip avant chaque brique."""
+        self._beep_menu().popup(self.m_target.mapToGlobal(pos))
+
+    def _record_seconds(self, active, started_s: float, reading) -> None:
+        """Enregistre les secondes de chrono complétées pendant ce tic (moyennes de la seconde)."""
+        if reading is None:
+            seconds = self.sampler.feed(started_s, active.elapsed_s, None)
+        else:
+            seconds = self.sampler.feed(started_s, active.elapsed_s, reading.power_w, reading.cadence_rpm,
+                                        self._speed(reading), getattr(reading, "balance_left_pct", None))
+        if not seconds:
+            return
+        heart = self.heart_rate.latest() if self.heart_rate is not None else None
+        bpm = heart.bpm if heart is not None and heart.bpm > 0 else None  # 0 : ceinture qui décroche
+        for s in seconds:
+            active.record(s.power_w, s.cadence_rpm, bpm, s.speed_kmh, at=s.at, t=s.t,
+                          balance_left_pct=s.balance_left_pct)
 
     def _with_power_meter(self, reading, dt: float):
         """Avec un capteur de puissance qui répond, ses watts (et sa cadence s'il la donne) remplacent
@@ -1199,34 +1853,44 @@ class MainWindow(QMainWindow):
         if meter is None:
             return reading  # capteur muet : on garde la puissance du home trainer plutôt que rien
         if reading is None:
-            return Reading(meter.power_w, meter.cadence_rpm)
+            return Reading(meter.power_w, meter.cadence_rpm, balance_left_pct=meter.balance_left_pct)
         if isinstance(self.source, Trainer):  # le simulateur n'a pas d'écart à mesurer
             self.power_match.update(dt, reading.power_w, meter.power_w)
         cadence = meter.cadence_rpm if meter.cadence_rpm is not None else reading.cadence_rpm
-        return dataclasses.replace(reading, power_w=meter.power_w, cadence_rpm=cadence)
+        # L'équilibre ne vient que du capteur : un home trainer ne mesure que la puissance totale.
+        return dataclasses.replace(reading, power_w=meter.power_w, cadence_rpm=cadence,
+                                   balance_left_pct=meter.balance_left_pct)
 
     def _speed(self, reading) -> float:
-        """Vitesse donnée par le home trainer, sinon celle d'un cycliste de ce poids sur le plat (ou la pente)."""
+        """Vitesse de la sortie : par défaut celle du vélo sur la route à cette puissance (pente du mode libre,
+        plat en séance), calculée par l'application, ERG compris (avec un pignon unique, la vitesse du home
+        trainer ne suit que la cadence). Au choix, celle du home trainer quand il l'envoie."""
         if self.route_ride:  # sur un parcours, la distance suit la vitesse simulée de la route
             return round(self.route.speed_kmh, 2)
-        speed = getattr(reading, "speed_kmh", None)
-        if speed is not None:
-            return round(speed * self._speed_factor(), 2)
+        trainer = getattr(reading, "speed_kmh", None)
+        if self.speed_source == SPEED_TRAINER and trainer is not None:
+            return round(trainer * self._speed_factor(), 2)
+        return round(self.road_kmh, 2)
+
+    def set_speed_source(self, source: str) -> None:
+        """Vitesse calculée par l'application (`SPEED_APP`) ou celle du home trainer (`SPEED_TRAINER`) ;
+        gardé dans le profil."""
+        self.speed_source = source if source in (SPEED_APP, SPEED_TRAINER) else SPEED_APP
+        if self.profile is not None and self.profile.speed_source != self.speed_source:
+            self.profile.speed_source = self.speed_source
+            self.profiles.save()
+        self._refresh()
+
+    def _road_slope(self) -> Slope:
+        """Route roulée par la vitesse calculée : pente du mode libre en pente, plat sinon."""
         grade = self.free.grade_pct if self.free_ride and self.free.mode is FreeMode.SLOPE else 0.0
-        return round(road_speed_kmh(reading.power_w, Slope(grade, self.free.rider_kg)), 2)
+        return Slope(grade, self.free.rider_kg, self.bike_kg)
 
     def _speed_factor(self) -> float:
         """Le volant d'un home trainer réel tourne au braquet du vélo : la vitesse virtuelle suit le
         braquet virtuel. (Le simulateur donne déjà la vitesse sur la route, d'après la puissance.)"""
         running = self.active.state is State.RUNNING
         return self.gears.factor if running and self.gears_apply and isinstance(self.source, Trainer) else 1.0
-
-    def _shown_reading(self):
-        """Dernière mesure, vitesse ramenée au braquet virtuel."""
-        r = self._last_reading
-        if r is None or getattr(r, "speed_kmh", None) is None:
-            return r
-        return dataclasses.replace(r, speed_kmh=self._speed(r))
 
     def _push_target(self) -> None:
         # Hors séance (avant le départ, en pause), le home trainer reste en résistance libre.
@@ -1244,28 +1908,28 @@ class MainWindow(QMainWindow):
         self._refresh_power_chip()
         self._refresh_heart_chip()
         self._refresh_click_chip()
-        gear = self.gears.label if self.gears_apply else None
         page = "route" if self.route_ride else "free" if self.free_ride else "workout"
         if not self.tabs[page].isChecked():
             self.tabs[page].setChecked(True)
+        view = self._ride_view()
         if self.route_ride:
-            self.route_panel.refresh(self.route, self._last_reading, gear)
-            self._refresh_heart_rate(self.route_panel.m_heart, self.route)
+            self.route_panel.refresh(view)
             return
         if self.free_ride:
-            self.free_panel.refresh(self.free, self._shown_reading(), gear)
-            self._refresh_heart_rate(self.free_panel.m_heart, self.free)
+            self.free_panel.refresh(view)
             return
         s = self.session
-        r = self._last_reading
-        self.m_power.set(f"{r.power_w:.0f} W" if r else "—", f"{r.power_w / self.ftp * 100:.0f} % FTP" if r else "")
-        self.power_zones.set_zone(zone_index(r.power_w if r else None, self.ftp))
+        self.workout_grid.refresh(view)
         target = s.target_w
         base = s.base_target_w
         bpm = s.target_bpm
         sub = "" if base is None or s.intensity_pct == 100 else f"séance : {base:.0f} W  ({s.intensity_pct} %)"
         color = None if target is None or s.state is State.FINISHED else zone_color(target, self.ftp)
-        if target is None and bpm is not None:  # séance en FC roulée aux vitesses
+        if s.state is State.FINISHED:  # ni « libre » ni anneau plein sur 0:00 : la séance est finie
+            self.m_target.set("fin", "séance terminée · Espace : recommencer")
+            self.m_target.title.setText("CIBLE")
+            self.m_target.set_color(MUTED)
+        elif target is None and bpm is not None:  # séance en FC roulée aux vitesses
             self.m_target.set(f"{bpm:.0f} bpm", "FC cible · résistance libre, aux vitesses")
             self.m_target.title.setText("CIBLE FC")
             self.m_target.set_color(HEART)
@@ -1279,89 +1943,89 @@ class MainWindow(QMainWindow):
             # Récup (zone 1, grise) : chiffres en blanc, sinon ils auraient l'air éteints.
             self.m_target.set_color(TEXT if color is None or zone_index(target, self.ftp) == 0 else color)
         self.m_target.set_tint(color)
-        self.m_power.set_tint(color)
+        if "power" in self.cards:  # la place a pu recevoir un autre indicateur
+            self.cards["power"].set_tint(color)
         if color is None:
             self.zone_tag.hide()
         else:
             self.zone_tag.setText(f"{zone_label(target, self.ftp)}  ·  {target / self.ftp * 100:.0f} % FTP")
-            self.zone_tag.setStyleSheet(pill(color))
+            set_style(self.zone_tag, pill(color))
             self.zone_tag.show()
         self.erg_button.setChecked(s.erg)
         self.erg_button.setText("ERG on" if s.erg else "ERG off")
-        self.erg_button.setIcon(icon("check", "#6fd3a3") if s.erg else QIcon())
+        set_icon(self.erg_button, "check" if s.erg else None, "#6fd3a3")
         remaining = s.step_remaining_s
         seg = s.segment
         fraction = (remaining / seg.duration_s if remaining is not None and seg is not None and seg.duration_s
                     else None)
         brick = f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}"
-        self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick,
-                           color or MUTED)
-        self.m_total.set(hms(s.total_remaining_s), f"écoulé : {hms(s.elapsed_s)}")
-        self.total_bar.setValue(round(1000 * s.position_s / s.total_s) if s.total_s else 0)
-        # Sous la cadence, la vitesse : celle du home trainer, sinon celle estimée (comme dans l'enregistrement).
-        sub = "tr/min" if r is None else f"tr/min · {self._speed(r):.1f} km/h".replace(".", ",")
-        if gear:
-            sub += f" · braquet {gear}"
-        self.m_cadence.set(f"{r.cadence_rpm:.0f}" if r and r.cadence_rpm is not None else "—", sub)
-        self._refresh_heart_rate(self.m_heart, s)
-        self.intensity_label.setText(f"{s.intensity_pct} %")
-        self.intensity_label.setStyleSheet(f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
         if s.state is State.FINISHED:
-            self.current_label.setText("Séance terminée")
+            self.step_ring.set(0.0, "fin", f"{len(s.segments)} / {len(s.segments)}", MUTED)
+        else:
+            self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick, color or MUTED)
+        self.intensity_label.setText(f"{s.intensity_pct} %")
+        set_style(self.intensity_label, f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
+        note = self._brick_note if self._brick_note and time.monotonic() < self._brick_note[1] else None
+        countdown = self._countdown_s()
+        if s.state is State.FINISHED:
+            self.current_label.setText(note[0] if note else "Séance terminée")
             self.next_label.setText("")
         else:
-            self.current_label.setText(f"Maintenant : {describe_segment(s.segment, self.ftp, s.intensity_pct)}"
+            # Bilan de la brique qui vient de finir, quelques secondes, à la place de « Maintenant ».
+            self.current_label.setText(note[0] if note else
+                                       f"Maintenant : {describe_segment(s.segment, self.ftp, s.intensity_pct)}"
                                        f"   ·   {brick}")
-            self.next_label.setText(f"Ensuite : {describe_segment(s.next_segment, self.ftp, s.intensity_pct)}"
-                                    if s.next_segment else "Dernière brique")
+            when = "Ensuite" if countdown is None else f"Dans {countdown} s"
+            self.next_label.setText(f"{when} : {describe_segment(s.next_segment, self.ftp, s.intensity_pct)}"
+                                    if s.next_segment else
+                                    "Dernière brique" if countdown is None else f"Fin dans {countdown} s")
+        # Tailles à l'échelle de la fenêtre (15 px et 14 px à l'échelle 1, voir la feuille de style).
+        current_px = "" if self.scale == 1.0 else f"font-size: {round(15 * self.scale)}px;"
+        next_px = "" if self.scale == 1.0 else f"font-size: {round(SUB_PX * self.scale)}px;"
+        set_style(self.current_label, (f"color: {ACCENT};" if note else "") + current_px)
+        set_style(self.next_label, (f"color: {ACCENT}; font-weight: 600;" if countdown is not None else "") + next_px)
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
-        self.play_button.setIcon(icon("pause" if s.state is State.RUNNING else "play", "#18191c"))
-        self.chart.update()
+        set_icon(self.play_button, "pause" if s.state is State.RUNNING else "play", "#18191c")
+        self.chart.refresh()
 
     # --- vignette en arrière-plan ------------------------------------------
 
     def in_background(self) -> bool:
-        """Fenêtre réduite, ou une autre application au premier plan."""
-        return self.isMinimized() or QApplication.applicationState() != Qt.ApplicationActive
+        """Fenêtre réduite, ou une autre fenêtre au premier plan que la fenêtre principale et ses dialogues
+        (la vignette et son menu comptent pour l'arrière-plan). Sous Windows, demandé au système."""
+        if self.isMinimized():
+            return True
+        front = foreground_window()
+        if front is None:
+            return QApplication.applicationState() != Qt.ApplicationActive
+        hwnd, ours = front
+        if not ours:
+            return True
+        mini_windows = [self.mini, QApplication.activePopupWidget()]
+        return any(w is not None and w.windowHandle() is not None and int(w.windowHandle().winId()) == hwnd
+                   for w in mini_windows)
 
     def _refresh_mini(self) -> None:
         """Vignette affichée pendant une sortie (en cours ou en pause) tant que le logiciel est en arrière-plan."""
+        if self.mini.menu_open:  # menu du clic droit ouvert : la vignette reste telle quelle
+            return
         riding = self.active.state in (State.RUNNING, State.PAUSED)
         if not (riding and self.isVisible() and self.in_background()):
             self.mini.hide()
             return
-        self.mini.set_info(self.mini_info())
+        self.mini.refresh(self._ride_view(), self.mini_status())
         self.mini.popup(self)
 
-    def mini_info(self) -> MiniInfo:
-        r = self._last_reading
-        power = f"{r.power_w:.0f} W" if r else "—"
+    def mini_status(self) -> str:
+        """Ligne sous les valeurs de la vignette : pause ; en séance, brique et reste de la séance."""
         active = self.active
         status = "En pause" if active.state is State.PAUSED else ""
-        if self.route_ride:
-            grade = active.grade_pct
-            return MiniInfo(grade_text(grade), power, km_text(active.remaining_m), target_title="PENTE",
-                            color=route_grade_color(grade), status=status)
-        if self.free_ride:
-            if active.mode is FreeMode.ERG:
-                target, color = f"{active.target_w} W", zone_color(active.target_w, self.ftp)
-            else:
-                target, color = grade_text(active.grade_pct), grade_color(active.grade_pct)
-            return MiniInfo(target, power, hms(active.elapsed_s), remaining_title="DURÉE", color=color,
-                            status=status)
+        if active is not self.session:
+            return status
         s = self.session
-        target, bpm = s.target_w, s.target_bpm
-        if target is None and bpm is not None:  # séance en FC roulée aux vitesses
-            text, title, color = f"{bpm:.0f} bpm", "CIBLE FC", HEART
-        else:
-            text, title = ("libre" if target is None else f"{target:.0f} W"), "CIBLE"
-            color = None if target is None or zone_index(target, self.ftp) == 0 else zone_color(target, self.ftp)
-        brick = s.step_remaining_s  # brique en cours ; le reste de la séance passe en dessous
-        remaining = hms(s.total_remaining_s if brick is None else brick)
         where = f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}  ·  séance {hms(s.total_remaining_s)}"
-        status = "  ·  ".join(x for x in (status, where) if x)
-        return MiniInfo(text, power, remaining, target_title=title, color=color, status=status)
+        return "  ·  ".join(x for x in (status, where) if x)
 
     def bring_back(self) -> None:
         """Clic sur la vignette : la fenêtre principale revient au premier plan."""
@@ -1448,25 +2112,43 @@ class MainWindow(QMainWindow):
             self._heart_color = color
             self.heart_chip.setIcon(dot(color))
 
-    def _refresh_heart_rate(self, metric: Metric,
-                            session: WorkoutSession | FreeRideSession | RouteSession) -> None:
+    def _shown_reading(self):
+        """Dernière mesure, puissance moyennée sur le lissage choisi (affichage seulement)."""
+        r = self._last_reading
+        if r is not None and self.smoothing_s:
+            average = self.power_average.average(self.smoothing_s)
+            if average is not None:
+                r = dataclasses.replace(r, power_w=average)
+        return r
+
+    def _ride_view(self) -> RideView:
+        """Instantané de la sortie affichée, pour les cartes du catalogue d'indicateurs."""
+        active = self.active
+        r = self._shown_reading()
+        if isinstance(active, RouteSession):
+            speed = active.speed_kmh  # vitesse simulée sur la route
+        elif r is None:
+            speed = None
+        else:
+            speed = self._speed(r)  # la même que celle enregistrée
+        ftp = self.ftp if isinstance(active, WorkoutSession) else active.ftp or DEFAULT_FTP
+        heart, heart_off = self._heart_view()
+        gear = self.gears.label if self.gears_apply else None
+        return RideView(active, r, ftp, speed, gear, heart, heart_off, self.weight_box.value(),
+                        smoothing_s=self.smoothing_s, hr_max=self.profile.hr_max if self.profile is not None else None,
+                        cadence_low=self.cadence_low())
+
+    def _heart_view(self) -> tuple[HeartRateReading | None, str]:
+        """Dernière fréquence reçue, sinon pourquoi il n'y en a pas."""
         sensor = self.heart_rate
         if sensor is None:
-            metric.set("Off", "aucun capteur · pastille Cardio en haut")
-            return
+            return None, "aucun capteur · pastille Cardio en haut"
         self._remember("hr", sensor)
         heart = sensor.latest()
-        average = session.average_heart_rate()
         if heart is not None:
-            sub = f"bpm · moy. {average:.0f}" if average else "bpm"
-            if heart.battery_pct is not None and heart.battery_pct <= 20:
-                sub += f" · batterie {heart.battery_pct} %"
-            if heart.contact is False:
-                sub += " · mauvais contact"
-            metric.set(f"{heart.bpm}", sub)
-        else:
-            state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
-            metric.set("Off", f"{self._display_name('hr', sensor)} : {state}")
+            return heart, ""
+        state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
+        return None, f"{self._display_name('hr', sensor)} : {state}"
 
 
 CLICK_TIP = ("Zwift Click : ses boutons + / − changent le braquet virtuel hors ERG "
@@ -1893,6 +2575,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="numéro ANT+ du capteur de puissance (sinon le premier trouvé)")
     args = parser.parse_args(argv)
 
+    setup_logging()  # journaux/home-trainer.log : erreurs visibles même sans console
     _set_windows_app_id()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("Home trainer")
@@ -1903,6 +2586,9 @@ def main(argv: list[str] | None = None) -> int:
     book = DeviceBook.load()
     documents = documents_folder()
     profiles = ProfileBook.load(rides_root=default_rides_root(documents))  # sorties dans Documents
+    if profiles.problem:  # le fichier illisible sera gardé de côté (profils.illisible-…) à la première écriture
+        QMessageBox.warning(None, "Profils", profiles.problem + "\nLe fichier illisible est gardé à côté de "
+                            f"{profiles.path}.")
     profiles.migrate_legacy()  # comptes et sorties d'avant les profils → premier profil
     profiles.migrate_rides()  # sorties encore dans AppData → Documents
     if args.profile:
@@ -1942,13 +2628,10 @@ def main(argv: list[str] | None = None) -> int:
         workout = parse_workout(DEFAULT_BRICKS, name="Sweet spot (démo)")
     window = MainWindow(workout, profile.ftp, source=source, heart_rate=heart_rate, book=book,
                         profiles=profiles, profile=profile, power_meter=power_meter,
-                        click=None if click_kind is None else open_zwift_click(address=click_address))
+                        click=None if click_kind is None else open_zwift_click(address=click_address),
+                        rescue_dir=rescue_dir())
     window.resize(1400, 780)
-    if args.ftp:
-        window.ftp_box.setValue(int(args.ftp))
-        window._ftp_changed()
-    if args.weight:
-        window.weight_box.setValue(args.weight)
+    window.set_session_ftp_weight(args.ftp, args.weight)
     window.set_library(Library.load(documents=documents))
     window.show()
     if args.file:  # fichier passé en argument, ou glissé sur l'icône

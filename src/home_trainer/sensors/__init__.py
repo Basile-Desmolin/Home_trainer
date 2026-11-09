@@ -28,7 +28,7 @@ Le Zwift Click change le braquet virtuel (voir `home_trainer.gears`) :
 
 from __future__ import annotations
 
-from .base import BackgroundSensor, SensorState, SensorUnavailable
+from .base import BackgroundSensor, SensorState, SensorUnavailable, stop_all
 from .heart_rate import AntHeartRateDecoder, HeartRateReading, parse_ble_measurement
 from .power_meter import AntPowerDecoder, PowerMatch, PowerMeterReading
 from .trainer import Slope, Trainer, TrainerReading
@@ -82,4 +82,4 @@ def open_trainer(kind: str, *, address: str | None = None, device_number: int = 
 __all__ = ["AntHeartRateDecoder", "AntPowerDecoder", "BackgroundSensor", "HEART_RATE_KINDS", "HeartRateReading",
            "POWER_METER_KINDS", "PowerMatch", "PowerMeterReading", "SensorState", "SensorUnavailable", "Slope",
            "TRAINER_KINDS", "Trainer", "TrainerReading", "open_heart_rate_sensor", "open_power_meter",
-           "open_trainer", "open_zwift_click", "parse_ble_measurement"]
+           "open_trainer", "open_zwift_click", "parse_ble_measurement", "stop_all"]

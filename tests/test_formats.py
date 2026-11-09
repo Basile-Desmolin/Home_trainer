@@ -132,8 +132,22 @@ MINUTES   WATTS
     assert format_bricks(w.steps) == "1m30s@100W 1m30s@200W"
 
 
+def test_erg_and_mrc_read_the_decimal_comma():
+    """Virgule décimale : `10,50  200` était lu 10 min à 50 W, sans erreur."""
+    data = b"[COURSE DATA]\n0,00\t200\n10,50\t200\n10,50\t100\n12\t100\n[END COURSE DATA]"
+    assert format_bricks(decode_workout(data, ".erg").steps) == "10m30s@200W 1m30s@100W"
+    mrc = b"[COURSE HEADER]\nFTP = 252,5\nMINUTES PERCENT\n[END COURSE HEADER]\n" \
+          b"[COURSE DATA]\n0\t87,5\n2,5\t87,5\n[END COURSE DATA]"
+    w = decode_workout(mrc, ".mrc")
+    assert w.ftp == 252.5 and format_bricks(w.steps) == "2m30s@87.5%"
+    # Ligne d'un seul tenant : la virgule sépare les valeurs.
+    assert format_bricks(decode_workout(b"[COURSE DATA]\n0,150\n5,150\n[END COURSE DATA]", ".erg").steps) \
+        == "5m@150W"
+
+
 @pytest.mark.parametrize("bad", [
     b"",
+    b"[COURSE DATA]\n0,5,150\n5,150\n[END COURSE DATA]",  # virgule décimale ou séparateur : ambigu
     b"[COURSE DATA]\n0 100\n[END COURSE DATA]",
     b"[COURSE DATA]\n2 100\n1 100\n[END COURSE DATA]",
     b"[COURSE DATA]\n0 abc\n1 100\n[END COURSE DATA]",

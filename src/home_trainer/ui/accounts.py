@@ -17,8 +17,8 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
-from ..sync import (AccountBook, Outbox, SyncError, auto_services, finish_connect, open_service, parse_callback,
-                    start_connect)
+from ..sync import (AccountBook, Outbox, SyncError, auto_services, connection_times, finish_connect, open_service,
+                    parse_callback, start_connect)
 from ..sync.web import wait_for_code
 
 HELP = {
@@ -169,9 +169,10 @@ class ServiceBox(QGroupBox):
 
 
 class AccountsDialog(QDialog):
-    """Comptes Strava et Nolio ; `send_requested` demande l'envoi des sorties en attente."""
+    """Comptes Strava et Nolio ; `send_requested` demande l'envoi des sorties en attente
+    (True : y compris les fichiers refusés une première fois)."""
 
-    send_requested = Signal()
+    send_requested = Signal(bool)
 
     def __init__(self, book: AccountBook, outbox: Outbox, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -198,6 +199,11 @@ class AccountsDialog(QDialog):
         row.addWidget(self.send_button)
         row.addStretch(1)
         layout.addLayout(row)
+        # Sorties d'avant la connexion d'un compte : elles ne partent qu'avec le bouton (pas d'arriéré d'un coup).
+        self.backlog_label = QLabel()
+        self.backlog_label.setWordWrap(True)
+        self.backlog_label.setObjectName("metricSub")
+        layout.addWidget(self.backlog_label)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -207,15 +213,23 @@ class AccountsDialog(QDialog):
         self.boxes[key].connected(error)
         self._refresh_pending()
         if not error:
-            self.send_requested.emit()  # les sorties en attente partent aussitôt
+            self.send_requested.emit(False)  # les sorties d'après la connexion partent aussitôt (pas l'arriéré)
 
     def _refresh_pending(self) -> None:
-        n = len({name for name, _ in self.outbox.pending(auto_services(self.book))})
+        services = auto_services(self.book)
+        waiting = {name for name, _ in self.outbox.pending(services, retry_rejected=True)}
+        recent = {name for name, _ in self.outbox.pending(services, retry_rejected=True,
+                                                          since=connection_times(self.book))}
+        n, old = len(waiting), len(waiting - recent)
         self.send_button.setText(f"Envoyer les sorties en attente ({n})")
         self.send_button.setEnabled(n > 0)
+        self.backlog_label.setText(f"Dont {old} sortie{'s' if old > 1 else ''} d'avant la connexion du compte : "
+                                   "elle" + ("s ne partent" if old > 1 else " ne part")
+                                   + " qu'avec ce bouton." if old else "")
+        self.backlog_label.setVisible(bool(old))
 
     def _send(self) -> None:
-        self.send_requested.emit()
+        self.send_requested.emit(True)  # demande explicite : les fichiers refusés sont retentés
         self.send_button.setEnabled(False)
 
     def _open_folder(self) -> None:

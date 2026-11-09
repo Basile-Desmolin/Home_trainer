@@ -48,6 +48,47 @@ def test_fit_and_unknown_format(tmp_path):
         write_ride(POINTS, tmp_path / "s.gpx")
 
 
+def _read_fit(data: bytes):
+    fit_sdk = pytest.importorskip("garmin_fit_sdk")
+    msgs, errors = fit_sdk.Decoder(fit_sdk.Stream.from_byte_array(bytearray(data))).read(
+        convert_types_to_strings=False)
+    assert errors == []
+    return msgs
+
+
+def test_fit_left_right_balance():
+    """Écrit comme le Garmin : part de la jambe droite, bit « droite » levé ; % entier par seconde,
+    1/100 % pour le tour et la sortie, moyenne pondérée par le travail.
+    Tour 1 : 30 s à 200 W, 52 % gauche ; tour 2 : 30 s à 100 W, 46 % gauche ; sortie :
+    (52×200 + 46×100) / 300 = 50,00 % (moyenne simple : 49,0 %). Les secondes à 0 W ou sans
+    équilibre n'y comptent pas."""
+    from home_trainer.formats.fit_activity import encode_activity
+
+    t0 = 1_759_480_000
+    points = ([ActivityPoint(t0 + i, 200, 90, balance_left_pct=52) for i in range(30)]
+              + [ActivityPoint(t0 + 30 + i, 100, 90, balance_left_pct=46, lap=1) for i in range(30)]
+              + [ActivityPoint(t0 + 60, 0, 0, balance_left_pct=10, lap=1),
+                 ActivityPoint(t0 + 61, 150, 90, lap=1)])
+    msgs = _read_fit(encode_activity(points))
+    records = msgs["record_mesgs"]
+    assert records[0]["left_right_balance"] == 0x80 | 48 == 176  # valeur brute du Garmin pour 52 / 48
+    assert records[30]["left_right_balance"] == 0x80 | 54
+    assert "left_right_balance" not in records[-1]  # pas d'équilibre : champ vide
+    assert [lap["left_right_balance"] for lap in msgs["lap_mesgs"]] == [0x8000 | 4800, 0x8000 | 5400]
+    assert msgs["session_mesgs"][0]["left_right_balance"] == 0x8000 | 5000
+
+
+def test_fit_balance_matches_garmin_and_is_absent_without_sensor():
+    """Garmin du 7 novembre : 48,69 % droite, écrit 37637 (0x9305). Même valeur ici pour 51,31 % gauche."""
+    from home_trainer.formats.fit_activity import encode_activity
+
+    points = [ActivityPoint(1_759_480_000 + i, 130, 88, balance_left_pct=51.31) for i in range(60)]
+    assert _read_fit(encode_activity(points))["session_mesgs"][0]["left_right_balance"] == 37637
+    msgs = _read_fit(encode_activity(POINTS))
+    assert all("left_right_balance" not in m for kind in ("record_mesgs", "lap_mesgs", "session_mesgs")
+               for m in msgs[kind])
+
+
 def test_keep_awake_calls_windows_only_on_change():
     calls = []
     awake = KeepAwake(lambda flags: calls.append(flags) or 1)

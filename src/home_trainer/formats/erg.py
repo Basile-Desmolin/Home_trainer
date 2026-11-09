@@ -100,7 +100,7 @@ def decode(data: bytes, default_unit: PowerUnit, warnings: list[str] | None = No
             elif (kv := _HEADER_KV.match(line)):
                 header[kv.group(1).upper()] = kv.group(2)
         elif section == "COURSE DATA":
-            numbers = _NUMBER.findall(line)
+            numbers = _NUMBER.findall(_decimal_points(line, lineno, raw))
             if len(numbers) < 2:
                 raise FormatError(f"ligne {lineno} illisible : {raw.strip()!r}")
             minutes, value = float(numbers[0]), float(numbers[1])
@@ -129,6 +129,21 @@ def decode(data: bytes, default_unit: PowerUnit, warnings: list[str] | None = No
     description = header.get("DESCRIPTION", "") if header.get("FILE NAME") else ""
     return Workout(name=name, steps=compress_repeats(steps),
                    description=description, ftp=ftp)
+
+
+def _decimal_points(line: str, lineno: int, raw: str) -> str:
+    """Ligne de données où la virgule décimale (« 10,50 ») devient un point.
+
+    Valeurs séparées par des espaces ou des tabulations : chaque virgule est décimale
+    (« 10,50	200 » : 10,5 min à 200 W, et non 10 min à 50 W). Ligne d'un seul tenant :
+    la virgule sépare les valeurs (« 10.50,200 ») ; avec plusieurs virgules (« 10,5,200 »),
+    on ne peut pas savoir laquelle est décimale."""
+    fields = line.split()
+    if len(fields) >= 2:
+        return " ".join(f.replace(",", ".") for f in fields)
+    if line.count(",") > 1:
+        raise FormatError(f"ligne {lineno} ambiguë (virgule décimale ou séparateur ?) : {raw.strip()!r}")
+    return line.replace(",", " ")
 
 
 def _make_step(duration: float, v0: float, v1: float, unit: PowerUnit | str) -> Step:
@@ -177,6 +192,6 @@ def _one_line(text: str) -> str:
 
 def _float_or_none(text: str | None) -> float | None:
     try:
-        return float(text) if text else None
+        return float(text.replace(",", ".")) if text else None
     except ValueError:
         return None

@@ -7,9 +7,12 @@ les pauses, un tour par brique de séance, et le résumé de la sortie.
     points = [ActivityPoint(at=1759480000 + i, power_w=200, cadence_rpm=90, speed_kmh=32) for i in range(60)]
     write_activity(points, "sortie.fit")
 
-`at` est l'heure de la mesure (secondes depuis 1970, UTC). Un trou de plus de
-`PAUSE_GAP_S` secondes entre deux mesures est une pause : le chronomètre
-s'arrête, et la distance n'avance pas.
+`at` est l'heure de la mesure (secondes depuis 1970, UTC), `timer_s` le
+chronomètre de l'application. Un chronomètre arrêté plus de `PAUSE_GAP_S`
+secondes entre deux mesures est une pause : le chronomètre du .fit s'arrête,
+et la distance n'avance pas. Un trou de mesures pendant que le chronomètre
+tourne (capteur muet) n'en est pas une. Sans `timer_s`, tout trou de plus de
+`PAUSE_GAP_S` secondes est une pause.
 """
 
 from __future__ import annotations
@@ -21,12 +24,15 @@ from datetime import datetime
 from pathlib import Path
 
 from .fit import FIT_EPOCH, MANUFACTURER_DEVELOPMENT, SPORT_CYCLING, SUB_SPORT_INDOOR_CYCLING
-from .fit_encoder import ENUM, SINT16, UINT8, UINT16, UINT32, UINT32Z, FieldDef, FitWriter
+from .fit_encoder import ENUM, SINT16, SINT32, UINT8, UINT16, UINT32, UINT32Z, FieldDef, FitWriter
+
+SUB_SPORT_VIRTUAL_ACTIVITY = 58  # parcours GPX avec position : « sortie virtuelle » (Strava : Virtual Ride)
 
 PAUSE_GAP_S = 5.0
 SAMPLE_S = 1.0  # durée attribuée à une mesure qui suit une pause
 
 MESG_FILE_ID = 0
+MESG_ZONES_TARGET = 7
 MESG_SESSION = 18
 MESG_LAP = 19
 MESG_RECORD = 20
@@ -54,6 +60,27 @@ class ActivityPoint:
     grade_pct: float | None = None
     lap: int = 0  # numéro de tour (brique de la séance) ; un changement ouvre un nouveau tour
     timer_s: float | None = None  # temps de pédalage au moment de la mesure (chronomètre, pauses exclues)
+    balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
+    manual_lap: int = 0  # tours manuels (touche Tab) avant la mesure ; un changement ouvre un nouveau tour
+    # Parcours GPX seulement : position sur la trace (degrés), altitude (m), D+ et D− cumulés depuis le départ.
+    lat: float | None = None
+    lon: float | None = None
+    altitude_m: float | None = None
+    ascent_m: float | None = None
+    descent_m: float | None = None
+
+
+def lap_groups(points: list[ActivityPoint]) -> list[list[int]]:
+    """Indices des mesures de chaque tour : un tour change avec la brique (`lap`) ou un tour manuel."""
+    groups: list[list[int]] = []
+    for i, p in enumerate(points):
+        if not groups or (p.lap, p.manual_lap) != (points[i - 1].lap, points[i - 1].manual_lap):
+            groups.append([])
+        groups[-1].append(i)
+    return groups
+
+
+LAP_TRIGGER_MANUAL = 0  # lap_trigger (champ 24 du tour) : tour fermé par l'utilisateur
 
 
 @dataclass(frozen=True)
@@ -71,25 +98,58 @@ class ActivitySummary:
     avg_cadence: float | None
     max_cadence: float | None
     max_speed_kmh: float
+    balance_left_pct: float | None = None  # part du travail fournie par la jambe gauche
+    # Parcours GPX seulement : D+ et D− (cumuls du parcours), altitudes, positions de départ et d'arrivée.
+    ascent_m: float | None = None
+    descent_m: float | None = None
+    min_altitude_m: float | None = None
+    avg_altitude_m: float | None = None
+    max_altitude_m: float | None = None
+    start_position: tuple[float, float] | None = None
+    end_position: tuple[float, float] | None = None
 
     @property
     def avg_speed_kmh(self) -> float:
         return self.distance_m / self.timer_s * 3.6 if self.timer_s else 0.0
 
+    def intensity(self, ftp: float | None) -> float | None:
+        """Facteur d'intensité (IF) : puissance normalisée / FTP ; None sans FTP."""
+        return self.normalized_power_w / ftp if ftp and ftp > 0 else None
+
+    def tss(self, ftp: float | None) -> float | None:
+        """Training Stress Score sur le temps de pédalage : 100 = une heure à la FTP ; None sans FTP.
+        Même formule que le bilan de l'application (`RideSummary.tss`)."""
+        factor = self.intensity(ftp)
+        return None if factor is None else self.timer_s / 3600 * factor ** 2 * 100
+
+
+def _is_pause(prev: ActivityPoint, p: ActivityPoint) -> bool:
+    """Chronomètre arrêté entre deux mesures pendant plus de `PAUSE_GAP_S` : l'écart d'heure moins
+    l'écart de chronomètre quand il est connu (un capteur muet pendant que le chrono tourne n'est pas
+    une pause), sinon l'écart d'heure seul."""
+    stopped = p.at - prev.at
+    if p.timer_s is not None and prev.timer_s is not None:
+        stopped -= p.timer_s - prev.timer_s
+    return stopped > PAUSE_GAP_S
+
 
 def _durations(points: list[ActivityPoint]) -> list[float]:
     """Durée couverte par chaque mesure : l'écart avec la précédente au chronomètre (à défaut à
-    l'horloge), ou `SAMPLE_S` pour la première et après une pause."""
+    l'horloge, hors pause), ou `SAMPLE_S` pour la première."""
     out = []
     for i, p in enumerate(points):
         prev = points[i - 1] if i else None
-        if prev is None or p.at - prev.at > PAUSE_GAP_S:
+        if prev is None:
             gap = SAMPLE_S
         elif p.timer_s is not None and prev.timer_s is not None:
-            gap = p.timer_s - prev.timer_s
+            gap = p.timer_s - prev.timer_s  # le chronomètre fait foi, trou de capteur compris
+            gap = gap if gap > 0 else SAMPLE_S
+        elif p.at - prev.at > PAUSE_GAP_S:
+            gap = SAMPLE_S
         else:
             gap = p.at - prev.at
-        out.append(gap if 0 < gap <= PAUSE_GAP_S else SAMPLE_S)
+            gap = gap if gap > 0 else SAMPLE_S
+        out.append(gap)
     return out
 
 
@@ -115,7 +175,31 @@ def normalized_power(powers: list[float], window: int = 30) -> float:
     return (sum(r ** 4 for r in rolling) / len(rolling)) ** 0.25
 
 
-def summarize(points: list[ActivityPoint]) -> ActivitySummary:
+def _balance(points: list[ActivityPoint], durations: list[float]) -> float | None:
+    """Équilibre de la sortie : part du travail de la jambe gauche, chaque seconde pondérée par son
+    travail (puissance × durée), sur les seules secondes qui ont un équilibre."""
+    work = [(p.balance_left_pct, p.power_w * dt) for p, dt in zip(points, durations)
+            if p.balance_left_pct is not None and p.power_w > 0]
+    total = sum(w for _, w in work)
+    return sum(b * w for b, w in work) / total if total > 0 else None
+
+
+def _gained(points: list[ActivityPoint], before: ActivityPoint | None, name: str) -> float | None:
+    """D+ (`ascent_m`) ou D− (`descent_m`) de ces mesures : cumul du parcours à la dernière, moins
+    celui de la mesure d'avant (`before`, 0 au départ du parcours). None hors parcours."""
+    values = [getattr(p, name) for p in points if getattr(p, name) is not None]
+    if not values:
+        return None
+    start = getattr(before, name) if before is not None else None
+    return max(values[-1] - (start or 0.0), 0.0)
+
+
+def _positions(points: list[ActivityPoint]) -> list[tuple[float, float]]:
+    return [(p.lat, p.lon) for p in points if p.lat is not None and p.lon is not None]
+
+
+def summarize(points: list[ActivityPoint], before: ActivityPoint | None = None) -> ActivitySummary:
+    """Résumé de ces mesures ; `before` : la mesure qui précède (pour le D+ et le D− d'un tour)."""
     if not points:
         raise ValueError("sortie vide : aucune mesure")
     durations = _durations(points)
@@ -123,6 +207,8 @@ def summarize(points: list[ActivityPoint]) -> ActivitySummary:
     powers = [p.power_w for p in points]
     hearts = [p.heart_rate_bpm for p in points if p.heart_rate_bpm]
     cadences = [p.cadence_rpm for p in points if p.cadence_rpm]
+    altitudes = [p.altitude_m for p in points if p.altitude_m is not None]
+    positions = _positions(points)
     return ActivitySummary(
         start=points[0].at,
         elapsed_s=points[-1].at - points[0].at + SAMPLE_S,
@@ -137,6 +223,14 @@ def summarize(points: list[ActivityPoint]) -> ActivitySummary:
         avg_cadence=sum(cadences) / len(cadences) if cadences else None,
         max_cadence=max(cadences) if cadences else None,
         max_speed_kmh=max((p.speed_kmh or 0.0) for p in points),
+        balance_left_pct=_balance(points, durations),
+        ascent_m=_gained(points, before, "ascent_m"),
+        descent_m=_gained(points, before, "descent_m"),
+        min_altitude_m=min(altitudes) if altitudes else None,
+        avg_altitude_m=sum(altitudes) / len(altitudes) if altitudes else None,
+        max_altitude_m=max(altitudes) if altitudes else None,
+        start_position=positions[0] if positions else None,
+        end_position=positions[-1] if positions else None,
     )
 
 
@@ -148,12 +242,24 @@ def _opt(value: float | None, scale: float = 1.0) -> int | None:
     return None if value is None else int(round(value * scale))
 
 
+# Équilibre dans le .fit, comme l'écrit un compteur Garmin : part de la jambe droite, bit « droite » levé.
+BALANCE_RIGHT = 0x80  # record : % entier (left_right_balance)
+BALANCE_RIGHT_100 = 0x8000  # tour et session : 1/100 % (left_right_balance_100)
+
+
+def _balance_field(left_pct: float | None, per_100: bool) -> int | None:
+    if left_pct is None:
+        return None
+    right = min(max(100.0 - left_pct, 0.0), 100.0)
+    return BALANCE_RIGHT_100 | round(right * 100) if per_100 else BALANCE_RIGHT | round(right)
+
+
 def _summary_fields(s: ActivitySummary, lap: bool) -> list[tuple[FieldDef, object]]:
     """Champs communs aux messages lap (19) et session (18), dont les numéros diffèrent un peu."""
     n = {  # numéro du champ : (lap, session)
         "avg_speed": (13, 14), "max_speed": (14, 15), "avg_hr": (15, 16), "max_hr": (16, 17),
         "avg_cad": (17, 18), "max_cad": (18, 19), "avg_power": (19, 20), "max_power": (20, 21),
-        "np": (33, 34), "work": (41, 48),
+        "np": (33, 34), "work": (41, 48), "balance": (34, 37),
     }
     i = 0 if lap else 1
     return [
@@ -172,13 +278,80 @@ def _summary_fields(s: ActivitySummary, lap: bool) -> list[tuple[FieldDef, objec
         (FieldDef(n["max_power"][i], UINT16), _opt(s.max_power_w)),
         (FieldDef(n["np"][i], UINT16), _opt(s.normalized_power_w)),
         (FieldDef(n["work"][i], UINT32), _opt(s.work_j)),
+        (FieldDef(n["balance"][i], UINT16), _balance_field(s.balance_left_pct, per_100=True)),
+        *_route_summary_fields(s, lap),
     ]
 
 
-def encode_activity(points: list[ActivityPoint], serial_number: int | None = None) -> bytes:
-    """Fichier .fit d'activité complet (vélo d'intérieur) à partir des mesures, dans l'ordre."""
+def _altitude(meters: float | None) -> int | None:
+    """Altitude du .fit : (m + 500) × 5 (champs altitude et enhanced_altitude)."""
+    return None if meters is None else max(round((meters + 500) * 5), 0)
+
+
+def _semicircles(degrees: float) -> int:
+    return round(degrees * 2 ** 31 / 180)
+
+
+def _route_summary_fields(s: ActivitySummary, lap: bool) -> list[tuple[FieldDef, object]]:
+    """D+, D−, altitudes et positions d'un tour ou de la sortie ; rien hors parcours GPX (fichier inchangé)."""
+    fields: list[tuple[FieldDef, object]] = []
+    if s.ascent_m is not None or s.min_altitude_m is not None:
+        n = {"ascent": (21, 22), "descent": (22, 23), "avg_alt": (42, 49), "max_alt": (43, 50),
+             "min_alt": (62, 71)}
+        i = 0 if lap else 1
+        fields += [
+            (FieldDef(n["ascent"][i], UINT16), _opt(s.ascent_m)),  # total_ascent
+            (FieldDef(n["descent"][i], UINT16), _opt(s.descent_m)),  # total_descent
+            (FieldDef(n["avg_alt"][i], UINT16), _altitude(s.avg_altitude_m)),
+            (FieldDef(n["max_alt"][i], UINT16), _altitude(s.max_altitude_m)),
+            (FieldDef(n["min_alt"][i], UINT16), _altitude(s.min_altitude_m)),
+        ]
+    if s.start_position is not None and s.end_position is not None:
+        end_lat, end_long = (5, 6) if lap else (38, 39)
+        fields += [
+            (FieldDef(3, SINT32), _semicircles(s.start_position[0])),  # start_position_lat
+            (FieldDef(4, SINT32), _semicircles(s.start_position[1])),  # start_position_long
+            (FieldDef(end_lat, SINT32), _semicircles(s.end_position[0])),
+            (FieldDef(end_long, SINT32), _semicircles(s.end_position[1])),
+        ]
+    return fields
+
+
+def _route_record_fields(p: ActivityPoint, altitude: bool, position: bool) -> list[tuple[FieldDef, object]]:
+    """Position et altitude d'une mesure, si la sortie en a (parcours GPX)."""
+    fields: list[tuple[FieldDef, object]] = []
+    if position:
+        lat, lon = (p.lat, p.lon) if p.lat is not None and p.lon is not None else (None, None)
+        fields += [(FieldDef(0, SINT32), None if lat is None else _semicircles(lat)),  # position_lat
+                   (FieldDef(1, SINT32), None if lon is None else _semicircles(lon))]  # position_long
+    if altitude:
+        fields += [(FieldDef(2, UINT16), _altitude(p.altitude_m)),  # altitude
+                   (FieldDef(78, UINT32), _altitude(p.altitude_m))]  # enhanced_altitude
+    return fields
+
+
+PWR_CALC_PERCENT_FTP = 1  # zones_target : zones de puissance en % de la FTP
+HR_CALC_PERCENT_MAX = 1  # zones_target : zones de FC en % de la FC max
+
+
+def _positive(value: float | None) -> float | None:
+    return value if value and value > 0 else None
+
+
+def encode_activity(points: list[ActivityPoint], serial_number: int | None = None,
+                    ftp: float | None = None, hr_max: float | None = None) -> bytes:
+    """Fichier .fit d'activité complet (vélo d'intérieur) à partir des mesures, dans l'ordre.
+
+    Avec la FTP du profil : FTP, IF et TSS dans le résumé de la sortie (session), et FTP / FC max
+    dans le message zones_target, comme les écrit un compteur Garmin."""
+    ftp, hr_max = _positive(ftp), _positive(hr_max)
     points = sorted(points, key=lambda p: p.at)
     summary = summarize(points)
+    # Parcours GPX : altitude et position à chaque mesure ; avec une position, la sortie est « virtuelle »
+    # (Strava : Virtual Ride, hors classements des segments). Sans parcours, le fichier ne change pas.
+    has_altitude = any(p.altitude_m is not None for p in points)
+    has_position = bool(_positions(points))
+    sub_sport = SUB_SPORT_VIRTUAL_ACTIVITY if has_position else SUB_SPORT_INDOOR_CYCLING
     durations = _durations(points)
     distances = _distances(points, durations)
     w = FitWriter()
@@ -191,42 +364,55 @@ def encode_activity(points: list[ActivityPoint], serial_number: int | None = Non
         (FieldDef(3, UINT32Z), serial_number or (start & 0xFFFFFFFF) or 1),
         (FieldDef(4, UINT32), start),
     ])
+    if ftp or hr_max:
+        w.write(MESG_ZONES_TARGET, [
+            (FieldDef(1, UINT8), _opt(hr_max)),  # max_heart_rate
+            (FieldDef(3, UINT16), _opt(ftp)),  # functional_threshold_power
+            (FieldDef(5, ENUM), HR_CALC_PERCENT_MAX if hr_max else None),  # hr_calc_type
+            (FieldDef(7, ENUM), PWR_CALC_PERCENT_FTP if ftp else None),  # pwr_calc_type
+        ])
 
     def event(at: int, kind: int, event_type: int) -> None:
         w.write(MESG_EVENT, [(F_TIMESTAMP, at), (F_EVENT, kind), (F_EVENT_TYPE, event_type)])
 
     event(start, EVENT_TIMER, EVENT_START)
     for i, (p, distance) in enumerate(zip(points, distances)):
-        if i and p.at - points[i - 1].at > PAUSE_GAP_S:  # pause : chronomètre arrêté pendant le trou
+        if i and _is_pause(points[i - 1], p):  # pause : chronomètre arrêté pendant le trou
             event(_fit_time(points[i - 1].at), EVENT_TIMER, EVENT_STOP)
             event(_fit_time(p.at), EVENT_TIMER, EVENT_START)
         w.write(MESG_RECORD, [
             (F_TIMESTAMP, _fit_time(p.at)),
-            (FieldDef(3, UINT8), _opt(p.heart_rate_bpm)),
+            (FieldDef(3, UINT8), _opt(p.heart_rate_bpm or None)),  # 0 bpm : ceinture qui décroche, pas écrit
             (FieldDef(4, UINT8), _opt(p.cadence_rpm)),
             (FieldDef(5, UINT32), _opt(distance, 100)),
             (FieldDef(6, UINT16), _opt(None if p.speed_kmh is None else p.speed_kmh / 3.6, 1000)),
             (FieldDef(7, UINT16), _opt(max(p.power_w, 0))),
             (FieldDef(9, SINT16), _opt(p.grade_pct, 100)),
+            (FieldDef(30, UINT8), _balance_field(p.balance_left_pct, per_100=False)),
+            *_route_record_fields(p, has_altitude, has_position),
         ])
     event(end, EVENT_TIMER, EVENT_STOP_ALL)
 
-    laps: list[list[ActivityPoint]] = []
-    for p in points:
-        if not laps or p.lap != laps[-1][-1].lap:
-            laps.append([])
-        laps[-1].append(p)
+    groups = lap_groups(points)
+    laps = [[points[i] for i in group] for group in groups]
     for index, lap_points in enumerate(laps):
-        lap = summarize(lap_points)
+        first = groups[index][0]
+        lap = summarize(lap_points, before=points[first - 1] if first else None)
+        # Tour fermé par la touche Tab : le tour suivant a un compteur de tours manuels plus grand.
+        manual = index + 1 < len(laps) and laps[index + 1][0].manual_lap != lap_points[-1].manual_lap
         w.write(MESG_LAP, [(F_MESSAGE_INDEX, index), (F_TIMESTAMP, _fit_time(lap_points[-1].at)),
                            (F_EVENT, EVENT_LAP), (F_EVENT_TYPE, EVENT_STOP),
-                           (FieldDef(25, ENUM), SPORT_CYCLING), (FieldDef(39, ENUM), SUB_SPORT_INDOOR_CYCLING),
+                           (FieldDef(24, ENUM), LAP_TRIGGER_MANUAL if manual else None),
+                           (FieldDef(25, ENUM), SPORT_CYCLING), (FieldDef(39, ENUM), sub_sport),
                            *_summary_fields(lap, lap=True)])
     w.write(MESG_SESSION, [(F_MESSAGE_INDEX, 0), (F_TIMESTAMP, end), (F_EVENT, EVENT_SESSION),
                            (F_EVENT_TYPE, EVENT_STOP), (FieldDef(5, ENUM), SPORT_CYCLING),
-                           (FieldDef(6, ENUM), SUB_SPORT_INDOOR_CYCLING),
+                           (FieldDef(6, ENUM), sub_sport),
                            (FieldDef(25, UINT16), 0), (FieldDef(26, UINT16), len(laps)),
-                           *_summary_fields(summary, lap=False)])
+                           *_summary_fields(summary, lap=False),
+                           (FieldDef(35, UINT16), _opt(summary.tss(ftp), 10)),  # training_stress_score
+                           (FieldDef(36, UINT16), _opt(summary.intensity(ftp), 1000)),  # intensity_factor
+                           (FieldDef(45, UINT16), _opt(ftp))])  # threshold_power
     offset = datetime.fromtimestamp(points[-1].at).astimezone().utcoffset()
     local = end + int(offset.total_seconds()) if offset else end
     w.write(MESG_ACTIVITY, [(F_TIMESTAMP, end), (FieldDef(0, UINT32), _opt(summary.timer_s, 1000)),
@@ -236,9 +422,10 @@ def encode_activity(points: list[ActivityPoint], serial_number: int | None = Non
     return w.to_bytes()
 
 
-def write_activity(points: list[ActivityPoint], dest: str | os.PathLike) -> Path:
+def write_activity(points: list[ActivityPoint], dest: str | os.PathLike,
+                   ftp: float | None = None, hr_max: float | None = None) -> Path:
     path = Path(dest)
-    path.write_bytes(encode_activity(points))
+    path.write_bytes(encode_activity(points, ftp=ftp, hr_max=hr_max))
     return path
 
 

@@ -7,11 +7,12 @@ dans assets/fonts). Sans elles (fichiers absents), Qt retombe sur la police du s
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPixmap, QPolygonF
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy
 
 FONTS = Path(__file__).with_name("assets") / "fonts"
 UI_FAMILY = "Barlow"
@@ -20,13 +21,18 @@ BG = "#16181d"
 PANEL = "#20242c"
 TEXT = "#e8eaed"
 MUTED = "#8b919c"
+DETAIL = "#b4bac4"  # lignes de détail des cartes : plus claires que MUTED, lisibles de loin
+SUB_PX = 14  # taille des lignes de détail des cartes à l'échelle 1
 ACCENT = "#ffd24a"
 POWER = "#4fc3f7"
 HEART = "#ff5c6c"
 CADENCE = "#b6e36b"
+SPEED = "#c9a3ff"  # courbe de vitesse
 # Zones de Coggan (borne haute en % FTP) et couleurs associées.
 ZONES = [(55, "#7f8c9a"), (76, "#3d8bd9"), (91, "#3fb37f"), (106, "#e7c43a"),
          (121, "#f08a2c"), (151, "#e5484d"), (10_000, "#b84ae0")]
+# Zones de FC de l'échelle ESIE (i1 à i5), aux couleurs des zones de puissance d'effort comparable.
+HEART_ZONES = ["#7f8c9a", "#3d8bd9", "#3fb37f", "#e7c43a", "#e5484d"]
 RAISED = "#2a2f38"  # boutons, pastilles
 HOVER = "#353b46"
 LINE = "#2f3540"
@@ -102,6 +108,15 @@ def pill(color: QColor | str) -> str:
             f"padding: 3px 9px; font-weight: 600;")
 
 
+def hint_label(text: str = "") -> QLabel:
+    """Ligne d'aide des raccourcis, à droite des boutons : elle prend la place qui reste sans imposer sa
+    largeur à la fenêtre (sur un petit écran, elle est coupée plutôt que d'élargir la fenêtre)."""
+    label = QLabel(text)
+    label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+    return label
+
+
 def keycaps(text: str) -> str:
     """Raccourcis en touches : « [Espace] pause  [↑] [↓] ±1 % ». Les touches sont entre crochets."""
     out = []
@@ -113,6 +128,40 @@ def keycaps(text: str) -> str:
         else:
             out.append(part.replace(" ", "&nbsp;"))
     return f"<span style='color:{MUTED};'>{''.join(out)}</span>"
+
+
+BASE_SIZE = (1280, 800)  # fenêtre de référence : chiffres à leur taille d'origine
+MAX_SCALE = 1.8
+
+
+def window_scale(width: int, height: int) -> float:
+    """Facteur de taille des chiffres pour une fenêtre (ou un écran plein) de `width` × `height` :
+    1 jusqu'à 1 280 × 800, puis selon le côté le moins agrandi, 1,8 au plus, par pas de 0,05."""
+    scale = min(width / BASE_SIZE[0], height / BASE_SIZE[1])
+    return max(1.0, min(MAX_SCALE, math.floor(scale * 20) / 20))
+
+
+def set_style(widget, sheet: str) -> None:
+    """Feuille de style d'un widget, posée seulement si elle change : posée à chaque
+    rafraîchissement (5 fois par seconde), elle refaisait le style du widget et le redessinait."""
+    if widget.styleSheet() != sheet:
+        widget.setStyleSheet(sheet)
+
+
+def set_icon(widget, name: str | None, color: str = TEXT) -> None:
+    """Icône dessinée (`icon`) d'un bouton, None : aucune ; redessinée seulement si elle change."""
+    _set_icon(widget, (name, color), lambda: icon(name, color) if name else QIcon())
+
+
+def set_dot(widget, color: str) -> None:
+    """Pastille d'état (`dot`) d'un bouton, redessinée seulement si sa couleur change."""
+    _set_icon(widget, ("dot", color), lambda: dot(color))
+
+
+def _set_icon(widget, key: tuple, make) -> None:
+    if getattr(widget, "_icon_key", None) != key:
+        widget.setIcon(make())
+        widget._icon_key = key
 
 
 def dot(color: str, size: int = 10) -> QIcon:
@@ -216,7 +265,7 @@ QMenu::separator {{ height: 1px; background: {LINE}; margin: 4px 8px; }}
 QFrame#metric {{ background: {PANEL}; border-radius: 12px; }}
 QFrame#metric QLabel, QFrame#metric QWidget#plain {{ background: transparent; }}
 QLabel#metricTitle {{ color: {MUTED}; font-size: 11px; font-weight: bold; letter-spacing: 1.5px; }}
-QLabel#metricSub {{ color: {MUTED}; font-size: 13px; background: transparent; }}
+QLabel#metricSub {{ color: {DETAIL}; font-size: {SUB_PX}px; background: transparent; }}
 QLabel#unit {{ color: {MUTED}; background: transparent; }}
 QLabel#title {{ font-size: 20px; font-weight: bold; }}
 QLabel#current {{ font-size: 15px; color: #c4c8cf; }}

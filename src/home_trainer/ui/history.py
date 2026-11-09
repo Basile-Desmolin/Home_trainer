@@ -242,5 +242,8 @@ class HistoryDialog(QDialog):
         if QMessageBox.question(self, "Retirer de l'historique",
                                 f"Retirer « {ride.title or 'Sortie'} » du {ride_date(ride.start, False)} "
                                 f"de l'historique ? Son fichier reste sur le disque.") == QMessageBox.Yes:
-            self.history.remove(ride)
+            try:
+                self.history.remove(ride)
+            except OSError as e:  # la sortie reste dans la liste
+                QMessageBox.warning(self, "Historique non mis à jour", f"L'historique n'a pas pu être écrit : {e}")
             self.refresh()

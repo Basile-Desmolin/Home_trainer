@@ -4,7 +4,9 @@ import threading
 import pytest
 
 from home_trainer.sensors import SensorState, TrainerReading, open_trainer
-from home_trainer.sensors.trainer import (AntFecDecoder, CyclingPowerDecoder, Slope, TargetThrottle, Trainer,
+from home_trainer.sensors import trainer_ble
+from home_trainer.sensors.trainer import (AntFecDecoder, CyclingPowerDecoder, IndoorBikeData, Slope, TargetThrottle,
+                                          Trainer,
                                           WAHOO_UNLOCK, fec_page_for, fec_pages_for, fec_target_power,
                                           fec_track_resistance, fec_user_configuration, fec_wind_resistance,
                                           ftms_command_for, ftms_request_control, ftms_set_simulation,
@@ -39,6 +41,26 @@ def test_indoor_bike_data_without_speed_nor_power():
 def test_indoor_bike_data_truncated():
     with pytest.raises(ValueError):
         parse_indoor_bike_data(bytes([0x40, 0x00, 0x01]))
+
+
+SPEED_CADENCE = bytes([0x04, 0x00, 0xC4, 0x09, 0xB4, 0x00])  # 25 km/h, 90 tr/min, sans puissance
+POWER_ONLY = bytes([0x41, 0x00, 0xC8, 0x00])  # « More Data » (pas de vitesse), 200 W
+
+
+def test_split_frames_keep_the_power_instead_of_zero():
+    """Trame sans puissance : un home trainer qui envoie vitesse et cadence dans une trame,
+    la puissance dans une autre. À 200 W constants, 8 trames par seconde : chaque trame lue seule
+    donne 0, 200, 0, 200… (moyenne 100 W) ; assemblées, 200 W partout (moyenne 200 W)."""
+    frames = [POWER_ONLY, SPEED_CADENCE] * 4
+    alone = [parse_indoor_bike_data(f).power_w for f in frames]
+    assert alone == [200, 0] * 4 and sum(alone) / 8 == 100
+    data = IndoorBikeData()
+    readings = [data.feed(f, now=i / 8) for i, f in enumerate(frames)]
+    assert [r.power_w for r in readings] == [200] * 8 and sum(r.power_w for r in readings) / 8 == 200
+    assert readings[-1] == TrainerReading(200.0, 90.0, 25.0)
+    assert (readings[0].cadence_rpm, readings[0].speed_kmh) == (None, None)  # pas encore reçues
+    # Plus de puissance depuis plus de 2 s : elle manque, 0 W comme avant (pas de valeur figée).
+    assert data.feed(SPEED_CADENCE, now=0.875 + 2.1).power_w == 0
 
 
 # --- Bluetooth FTMS : Control Point (0x2AD9) ------------------------------------
@@ -98,11 +120,11 @@ def test_cycling_power_cadence_from_crank_revolutions():
 
 def test_cycling_power_cadence_drops_to_zero_when_pedaling_stops():
     d = CyclingPowerDecoder()
-    d.feed(crank(150, 10, 0))
-    assert d.feed(crank(150, 11, 700)).cadence_rpm > 80
-    for _ in range(3):
-        assert d.feed(crank(0, 11, 700)).cadence_rpm > 80  # simple répétition de la même mesure
-    assert d.feed(crank(0, 11, 700)).cadence_rpm == 0
+    d.feed(crank(150, 10, 0), now=0.0)
+    assert d.feed(crank(150, 11, 700), now=0.25).cadence_rpm > 80
+    for t in (0.5, 1.0, 2.0, 2.25):  # simple répétition de la même mesure, moins de 2 s sans tour
+        assert d.feed(crank(0, 11, 700), now=t).cadence_rpm > 80
+    assert d.feed(crank(0, 11, 700), now=2.5).cadence_rpm == 0
 
 
 def test_cycling_power_skips_balance_and_wheel_data():
@@ -214,6 +236,107 @@ def test_ble_trainer_control_refused():
     trainer, stop = BleTrainer(), threading.Event()
     with pytest.raises(RuntimeError, match="autre appli"):
         asyncio.run(trainer._ftms(FakeClient(result=0x05), stop, asyncio.Event()))
+
+
+class FlakyClient(FakeClient):
+    """Refuse (exception, comme bleak) les `fails` premières consignes de puissance."""
+
+    def __init__(self, fails):
+        super().__init__()
+        self.fails = fails
+
+    async def write_gatt_char(self, uuid, data, response=False):
+        if data[0] == 0x05 and self.fails > 0:  # Set Target Power
+            self.fails -= 1
+            raise OSError("écriture GATT refusée")
+        await super().write_gatt_char(uuid, data, response)
+
+
+def test_refused_write_is_retried_without_dropping_the_connection(monkeypatch):
+    """Une écriture Bluetooth refusée coupait la connexion (environ 15 s sans données)."""
+    monkeypatch.setattr(trainer_ble, "WRITE_RETRY_S", 0.1)
+    trainer, client, stop = BleTrainer("AA:BB"), FlakyClient(fails=2), threading.Event()
+    run_ftms(trainer, client, stop)  # se termine normalement : pas d'exception, pas de reconnexion
+    assert client.writes.count(ftms_set_target_power(250)) == 1 and client.fails == 0
+    assert trainer.state is SensorState.CONNECTED
+
+
+def test_three_refused_writes_in_a_row_reconnect(monkeypatch):
+    monkeypatch.setattr(trainer_ble, "WRITE_RETRY_S", 0.1)
+    trainer, client, stop = BleTrainer("AA:BB"), FlakyClient(fails=5), threading.Event()
+    with pytest.raises(RuntimeError, match="3 fois de suite"):
+        run_ftms(trainer, client, stop)
+
+
+class ResetClient(FakeClient):
+    """Home trainer réinitialisé : refuse la première consigne de puissance faute de contrôle (0x05)."""
+
+    def __init__(self):
+        super().__init__()
+        self.reset_done = False  # réinitialisé juste avant la première consigne de puissance
+        self.lost = False
+
+    async def write_gatt_char(self, uuid, data, response=False):
+        self.writes.append(bytes(data))
+        if data[0] == 0x05 and not self.reset_done:
+            self.reset_done = self.lost = True
+        result = 0x01
+        if data[0] == 0x05 and self.lost:
+            result = 0x05
+        elif data[0] == 0x00:  # Request Control : accordé, la consigne suivante passe
+            self.lost = False
+        callback = self.handlers.get(uuid)
+        if callback is not None:
+            callback(None, bytearray([0x80, data[0], result]))
+
+
+def test_lost_control_is_requested_again_and_the_target_resent():
+    """Contrôle du home trainer jamais redemandé : ERG ignoré en silence après une
+    réinitialisation du home trainer."""
+    trainer, client, stop = BleTrainer("AA:BB"), ResetClient(), threading.Event()
+    run_ftms(trainer, client, stop)
+    target = ftms_set_target_power(250)
+    first = client.writes.index(target)
+    assert client.writes[first + 1:first + 4] == [ftms_request_control(), ftms_start(), target]
+
+
+class SilentChannel:
+    """Canal ANT+ d'un home trainer hors de portée : l'envoi attend un accusé qui ne vient pas."""
+
+    def __init__(self, hang_s):
+        self.hang_s, self.calls = hang_s, 0
+
+    def send_acknowledged_data(self, data):
+        self.calls += 1
+        threading.Event().wait(self.hang_s)
+        raise OSError("pas d'accusé de réception")
+
+
+class FakeNode:
+    stopped = False
+
+    def stop(self):
+        self.stopped = True
+
+
+def test_ant_stop_does_not_freeze_the_interface():
+    """ANT+ : arrêt bloquant après une perte de signal (10 s ou plus)."""
+    import time
+
+    trainer, channel, node = AntTrainer(), SilentChannel(hang_s=5), FakeNode()
+    trainer._node, trainer._channel = node, channel
+    trainer._publish(TrainerReading(150.0, 85.0))  # parle encore : la résistance libre est tentée
+    start = time.monotonic()
+    trainer._interrupt()
+    assert time.monotonic() - start < 1.0 and channel.calls == 1 and node.stopped
+    # Signal perdu depuis plus de 3 s : rien n'est envoyé, le nœud est arrêté tout de suite.
+    trainer, channel, node = AntTrainer(), SilentChannel(hang_s=5), FakeNode()
+    trainer._node, trainer._channel = node, channel
+    trainer._publish(TrainerReading(150.0, 85.0))
+    trainer._latest_at -= 4
+    start = time.monotonic()
+    trainer._interrupt()
+    assert time.monotonic() - start < 0.1 and channel.calls == 0 and node.stopped
 
 
 def test_ant_trainer_sends_targets_once_connected():

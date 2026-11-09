@@ -96,11 +96,12 @@ class Slope:
 
 @dataclass(frozen=True)
 class TrainerReading:
-    """Mesure du home trainer : mêmes champs que `ui.power.Reading`, plus la vitesse."""
+    """Mesure du home trainer : mêmes champs que `ui.power.Reading`."""
 
     power_w: float
     cadence_rpm: float | None = None
     speed_kmh: float | None = None
+    balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
 
 
 def _clamp_target(watts: float) -> int:
@@ -118,11 +119,44 @@ def _u16(value: int) -> bytes:
 # --- Bluetooth FTMS : mesures ------------------------------------------------
 
 def parse_indoor_bike_data(data: bytes | bytearray) -> TrainerReading:
-    """Décode une notification « Indoor Bike Data » (0x2AD2).
+    """Décode une notification « Indoor Bike Data » (0x2AD2) seule (puissance absente : 0 W).
 
     Les champs présents dépendent des drapeaux (16 bits) ; attention, le bit 0
-    est inversé : à 0, la vitesse instantanée est présente.
+    est inversé : à 0, la vitesse instantanée est présente. Pour un home trainer,
+    voir `IndoorBikeData`, qui assemble les trames découpées.
     """
+    speed, cadence, power = _indoor_bike_fields(data)
+    return TrainerReading(float(power or 0), cadence, speed)
+
+
+class IndoorBikeData:
+    """Assemble les trames « Indoor Bike Data » d'un home trainer.
+
+    Beaucoup de home trainers découpent leurs mesures en deux notifications (drapeau « More
+    Data ») : l'une avec vitesse et cadence, l'autre avec la puissance. Lue seule, la première
+    donnait 0 W : la moitié des mesures à 0, une moyenne de la
+    seconde divisée par deux. Un champ absent reprend sa dernière valeur reçue, si elle a moins de
+    `hold_s` secondes ; sinon il manque (puissance : 0 W, comme avant).
+    """
+
+    hold_s = 2.0
+
+    def __init__(self) -> None:
+        self._last: dict[str, tuple[float, float]] = {}  # champ → (valeur, heure de réception)
+
+    def feed(self, data: bytes | bytearray, now: float | None = None) -> TrainerReading:
+        now = time.monotonic() if now is None else now
+        values = dict(zip(("speed", "cadence", "power"), _indoor_bike_fields(data)))
+        for key, value in values.items():
+            if value is not None:
+                self._last[key] = (value, now)
+            elif key in self._last and now - self._last[key][1] <= self.hold_s:
+                values[key] = self._last[key][0]
+        return TrainerReading(float(values["power"] or 0), values["cadence"], values["speed"])
+
+
+def _indoor_bike_fields(data: bytes | bytearray) -> tuple[float | None, float | None, float | None]:
+    """(vitesse km/h, cadence tr/min, puissance W) d'une trame ; None pour un champ absent."""
     if len(data) < 2:
         raise ValueError("trame FTMS trop courte")
     flags = int.from_bytes(data[:2], "little")
@@ -151,12 +185,13 @@ def parse_indoor_bike_data(data: bytes | bytearray) -> TrainerReading:
         take(2, signed=True)  # niveau de résistance
     if flags & 0x0040:
         power = take(2, signed=True)
-    return TrainerReading(float(power or 0), cadence, speed)
+    return speed, cadence, None if power is None else float(power)
 
 
 # --- Bluetooth FTMS : consignes ----------------------------------------------
 
 FTMS_REQUEST_CONTROL = 0x00
+FTMS_CONTROL_NOT_PERMITTED = 0x05  # code de réponse : contrôle non accordé (perdu après une réinitialisation)
 FTMS_RESET = 0x01
 FTMS_SET_TARGET_POWER = 0x05
 FTMS_START_OR_RESUME = 0x07
@@ -272,27 +307,42 @@ class CyclingPowerDecoder:
     (virtuelle sur un home trainer à transmission directe), quand ils sont transmis.
     """
 
+    # Arrêt : plus aucun tour depuis STALL_MIN_S secondes, ou deux fois la durée du dernier tour si elle
+    # est plus longue (pas de faux zéro à basse cadence). Compté en secondes et non en trames : un capteur
+    # de puissance notifie à ~1 Hz, un home trainer à ~4 Hz.
+    STALL_MIN_S = 2.0
+    STALL_PERIODS = 2.0
+
     _revs: int | None = None
     _event: int | None = None
     _cadence: float | None = None
-    _idle: int = 0
+    _rev_at: float = 0.0  # heure de la dernière trame qui a apporté un tour de pédalier
     _wheel: int | None = None
     _wheel_event: int | None = None
     _speed: float | None = None
-    _wheel_idle: int = 0
+    _wheel_at: float = 0.0
 
-    def feed(self, data: bytes | bytearray) -> TrainerReading:
+    def _stalled(self, now: float, since: float, period_s: float) -> bool:
+        return now - since > max(self.STALL_MIN_S, self.STALL_PERIODS * period_s)
+
+    def feed(self, data: bytes | bytearray, now: float | None = None) -> TrainerReading:
+        """`now` : heure de réception de la trame, en secondes (horloge monotone par défaut)."""
+        now = time.monotonic() if now is None else now
         if len(data) < 4:
             raise ValueError("trame Cycling Power trop courte")
         flags = int.from_bytes(data[:2], "little")
         power = int.from_bytes(data[2:4], "little", signed=True)
         i = 4
-        if flags & 0x0001:
-            i += 1  # équilibre gauche / droite
+        balance = None
+        if flags & 0x0001 and i < len(data):
+            # Équilibre en 1/2 % (bit 1 : de la jambe gauche, sinon jambe non précisée, comptée à gauche).
+            balance = data[i] / 2 if data[i] <= 200 else None
+            i += 1
         if flags & 0x0004:
             i += 2  # couple cumulé
         if flags & 0x0010 and i + 6 <= len(data):
-            self._feed_wheel(int.from_bytes(data[i:i + 4], "little"), int.from_bytes(data[i + 4:i + 6], "little"))
+            self._feed_wheel(int.from_bytes(data[i:i + 4], "little"), int.from_bytes(data[i + 4:i + 6], "little"),
+                             now)
             i += 6
         if flags & 0x0020 and i + 4 <= len(data):
             revs = int.from_bytes(data[i:i + 2], "little")
@@ -302,26 +352,22 @@ class CyclingPowerDecoder:
                 d_time = (event - self._event) % 65536
                 if d_revs and d_time:
                     self._cadence = d_revs * 60 * 1024 / d_time
-                    self._idle = 0
-                else:
-                    self._idle += 1
-                    if self._idle >= 4:  # plus de tour de pédalier depuis ~2 s
-                        self._cadence = 0.0
+                    self._rev_at = now
+                elif self._cadence and self._stalled(now, self._rev_at, 60 / self._cadence):
+                    self._cadence = 0.0  # plus de tour de pédalier : arrêt
             self._revs, self._event = revs, event
-        return TrainerReading(float(power), self._cadence, self._speed)
+        return TrainerReading(float(power), self._cadence, self._speed, balance)
 
-    def _feed_wheel(self, revs: int, event: int) -> None:
+    def _feed_wheel(self, revs: int, event: int, now: float) -> None:
         """Tours de roue cumulés (32 bits) et instant du dernier tour (1/2048 s)."""
         if self._wheel is not None:
             d_revs = (revs - self._wheel) % 2**32
             d_time = (event - self._wheel_event) % 65536
             if d_revs and d_time:
                 self._speed = round(d_revs * WHEEL_CIRCUMFERENCE_M * 2048 / d_time * 3.6, 2)
-                self._wheel_idle = 0
-            else:
-                self._wheel_idle += 1
-                if self._wheel_idle >= 4:  # roue arrêtée depuis ~2 s
-                    self._speed = 0.0
+                self._wheel_at = now
+            elif self._speed and self._stalled(now, self._wheel_at, WHEEL_CIRCUMFERENCE_M / (self._speed / 3.6)):
+                self._speed = 0.0  # roue arrêtée
         self._wheel, self._wheel_event = revs, event
 
 

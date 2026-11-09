@@ -20,10 +20,12 @@ import os
 import re
 import shutil
 import unicodedata
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from .config import config_dir
+from .sensors.trainer import DEFAULT_BIKE_KG
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +33,12 @@ FILE_NAME = "profils.json"
 PROFILES_DIR = "profils"
 DEFAULT_FTP = 250
 DEFAULT_WEIGHT_KG = 66.0  # poids du cycliste seul, comme la case « Poids »
+MIN_BIKE_KG, MAX_BIKE_KG = 5.0, 30.0  # poids du vélo saisi dans la fiche Profil (9 kg par défaut)
+SPEED_APP, SPEED_TRAINER = "app", "trainer"  # vitesse calculée par l'application, ou celle du home trainer
+BEEP_SOUNDS = ("double", "court", "montant", "windows")  # sons du bip (fabriqués par `ui/sounds.py`)
+BEEP_BEFORE_CHOICES = (3, 5, 10)  # secondes de bip et de compte à rebours avant la brique suivante
+CADENCE_ALERT_CHOICES = (0, 50, 60, 70, 80, 90)  # seuil de l'alerte de cadence basse ; 0 : pas d'alerte
+DEFAULT_CADENCE_ALERT_RPM = 50
 FIRST_PROFILE_NAME = "Mon profil"
 RIDES_SUBFOLDER = Path("HomeTrainer") / "Sorties"
 HISTORY_FILE = "historique.json"  # voir home_trainer.history
@@ -52,7 +60,96 @@ class Profile:
     name: str
     ftp: int = DEFAULT_FTP
     weight_kg: float = DEFAULT_WEIGHT_KG
+    bike_kg: float = DEFAULT_BIKE_KG  # poids du vélo : vitesse calculée et consignes de pente
     hr_max: int | None = None  # FC max, demandée à la première séance en fréquence cardiaque
+    # Indicateurs choisis par écran (« séance », « libre », « parcours ») : un par place de la grille ;
+    # écran absent : disposition d'origine.
+    layouts: dict[str, list[str]] = field(default_factory=dict)
+    power_smoothing_s: int = 0  # puissance affichée : instantanée (0) ou moyenne sur 3, 5, 10, 30 s
+    brick_beep: bool = True  # séance : bip avant chaque changement de brique
+    beep_sound: str = "double"  # son du bip (`ui/sounds.py`) : double, court, montant ou windows
+    beep_before_s: int = 3  # bip et compte à rebours : 3, 5 ou 10 s avant la brique suivante
+    beep_last_distinct: bool = True  # son plus long et plus aigu à la dernière seconde
+    cadence_alert_rpm: int = DEFAULT_CADENCE_ALERT_RPM  # alerte sous ce seuil (0 : pas d'alerte)
+    chart_curves: list[str] | None = None  # courbes en plus de la puissance ; None : cadence et cardio
+    speed_source: str = SPEED_APP  # vitesse : calculée par l'application, ou celle du home trainer
+
+
+def _read(path: Path) -> tuple[dict | None, str | None]:
+    """(contenu, erreur) : (None, None) si le fichier n'existe pas."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, None
+    except (OSError, ValueError) as e:
+        return None, str(e)
+    if not isinstance(data, dict) or not isinstance(data.get("profiles", []), list):
+        return None, "contenu inattendu"
+    return data, None
+
+
+def _backup(path: Path) -> Path:
+    """Copie de la version précédente : profils.bak.json."""
+    return path.with_name(f"{path.stem}.bak.json")
+
+
+def _number(value, default, low: float, high: float, kind=float):
+    """`value` en nombre (`kind`) s'il est lisible et dans [low, high], sinon `default`."""
+    if isinstance(value, bool):
+        return default
+    try:
+        number = kind(float(str(value).replace(",", ".")))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if low <= number <= high else default
+
+
+def _profile_from(item: dict) -> Profile:
+    """Profil lu du fichier : un réglage vide ou invalide (fichier modifié à la main) prend sa
+    valeur par défaut, au lieu de faire planter le démarrage."""
+    from .heart_zones import MAX_HR_MAX, MIN_HR_MAX
+
+    profile = Profile(str(item["id"]), str(item["name"]))
+    bad = []
+
+    def take(key: str, value, default):
+        if key in item and value == default and item[key] != default:
+            bad.append(key)
+        return value
+
+    profile.ftp = take("ftp", _number(item.get("ftp"), DEFAULT_FTP, 1, 2000, int), DEFAULT_FTP)
+    profile.weight_kg = take("weight_kg", _number(item.get("weight_kg"), DEFAULT_WEIGHT_KG, 20, 300),
+                             DEFAULT_WEIGHT_KG)
+    profile.bike_kg = take("bike_kg", _number(item.get("bike_kg"), DEFAULT_BIKE_KG, 1, 50), DEFAULT_BIKE_KG)
+    hr_max = item.get("hr_max")
+    profile.hr_max = None if hr_max is None else take("hr_max", _number(hr_max, None, MIN_HR_MAX, MAX_HR_MAX, int),
+                                                      None)
+    layouts = item.get("layouts", {})
+    if isinstance(layouts, dict):
+        profile.layouts = {k: [str(x) for x in v] for k, v in layouts.items()
+                           if isinstance(k, str) and isinstance(v, list)}
+    else:
+        bad.append("layouts")
+    profile.power_smoothing_s = take("power_smoothing_s", _number(item.get("power_smoothing_s"), 0, 0, 600, int), 0)
+    beep = item.get("brick_beep", True)
+    profile.brick_beep = beep if isinstance(beep, bool) else True
+    sound = item.get("beep_sound", "double")
+    profile.beep_sound = sound if sound in BEEP_SOUNDS else "double"
+    before = item.get("beep_before_s", 3)
+    profile.beep_before_s = before if before in BEEP_BEFORE_CHOICES and not isinstance(before, bool) else 3
+    distinct = item.get("beep_last_distinct", True)
+    profile.beep_last_distinct = distinct if isinstance(distinct, bool) else True
+    alert = item.get("cadence_alert_rpm", DEFAULT_CADENCE_ALERT_RPM)
+    profile.cadence_alert_rpm = (alert if alert in CADENCE_ALERT_CHOICES and not isinstance(alert, bool)
+                                 else DEFAULT_CADENCE_ALERT_RPM)
+    curves = item.get("chart_curves")
+    profile.chart_curves = [str(c) for c in curves] if isinstance(curves, list) else None
+    source = item.get("speed_source", SPEED_APP)
+    profile.speed_source = source if source in (SPEED_APP, SPEED_TRAINER) else SPEED_APP
+    if bad:
+        log.warning("profil %s : réglages invalides remplacés par leur valeur par défaut : %s",
+                    profile.id, ", ".join(bad))
+    return profile
 
 
 def _slug(name: str) -> str:
@@ -68,6 +165,9 @@ class ProfileBook:
         self.profiles: list[Profile] = []
         self.last: str | None = None  # dernier profil choisi
         self.remember = False  # au lancement, reprendre le dernier profil sans demander
+        self.problem: str | None = None  # fichier illisible à la lecture : message pour l'utilisateur
+        self.set_aside: Path | None = None  # où le fichier illisible a été gardé (à la première écriture)
+        self._damaged = False  # fichier principal illisible : à garder de côté avant d'écrire
 
     # --- fichiers du profil ----------------------------------------------
 
@@ -134,21 +234,23 @@ class ProfileBook:
 
     @classmethod
     def load(cls, path: Path | str | None = None, rides_root: Path | str | None = None) -> ProfileBook:
+        """Lit les profils. Un fichier illisible est relu depuis sa copie (`profils.bak.json`) et
+        gardé de côté à la première écriture, au lieu d'être écrasé ; `problem` le dit."""
         book = cls(default_path() if path is None else path, rides_root)
-        try:
-            data = json.loads(book.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        data, error = _read(book.path)
+        if error is not None:
+            log.warning("profils illisibles (%s) : %s", book.path, error)
+            book._damaged = True
+            data, _ = _read(_backup(book.path))
+            book.problem = (f"Profils illisibles ({error}) : relus depuis la copie de secours." if data is not None
+                            else f"Profils illisibles ({error}), sans copie de secours lisible.")
+        if data is None:
             return book
-        except (OSError, ValueError) as e:
-            log.warning("profils illisibles (%s) : %s", book.path, e)
-            return book
-        if not isinstance(data, dict):
-            return book
-        known = {f.name for f in fields(Profile)}
         for item in data.get("profiles", []):
             if isinstance(item, dict) and item.get("id") and item.get("name"):
-                book.profiles.append(Profile(**{k: v for k, v in item.items() if k in known}))
-        book.last = data.get("last")
+                book.profiles.append(_profile_from(item))
+        last = data.get("last")
+        book.last = last if isinstance(last, str) else None
         book.remember = bool(data.get("remember", False))
         return book
 
@@ -158,6 +260,14 @@ class ProfileBook:
         data = {"profiles": [asdict(p) for p in self.profiles], "last": self.last, "remember": self.remember}
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self._damaged and self.path.exists():
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                aside = self.path.with_name(f"{self.path.stem}.illisible-{stamp}.json")
+                self.path.replace(aside)
+                self.set_aside = aside
+            elif self.path.exists():
+                shutil.copyfile(self.path, _backup(self.path))
+            self._damaged = False
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self.path)

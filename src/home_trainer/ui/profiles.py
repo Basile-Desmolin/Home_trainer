@@ -13,7 +13,9 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QDoubleSpin
                                QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox,
                                QVBoxLayout)
 
-from ..profiles import DEFAULT_FTP, DEFAULT_WEIGHT_KG, Profile, ProfileBook
+from ..heart_zones import MAX_HR_MAX, MIN_HR_MAX
+from ..profiles import DEFAULT_FTP, DEFAULT_WEIGHT_KG, MAX_BIKE_KG, MIN_BIKE_KG, Profile, ProfileBook
+from ..sensors.trainer import DEFAULT_BIKE_KG
 
 NEW_NAME = "Nouveau profil"
 
@@ -30,7 +32,8 @@ class ProfileDialog(QDialog):
         self.setMinimumWidth(460)
 
         layout = QVBoxLayout(self)
-        intro = QLabel("Chaque profil a sa FTP, son poids, ses comptes Strava / Nolio et ses sorties.")
+        intro = QLabel("Chaque profil a sa FTP, son poids, celui de son vélo, sa FC max, ses comptes Strava / Nolio "
+                       "et ses sorties.")
         intro.setWordWrap(True)
         intro.setObjectName("metricSub")
         layout.addWidget(intro)
@@ -65,9 +68,26 @@ class ProfileDialog(QDialog):
         self.weight_box.setSuffix(" kg")
         self.weight_box.setLocale(QLocale(QLocale.French))
         self.weight_box.valueChanged.connect(self._weight_edited)
+        self.bike_box = QDoubleSpinBox()
+        self.bike_box.setRange(MIN_BIKE_KG, MAX_BIKE_KG)
+        self.bike_box.setDecimals(1)
+        self.bike_box.setSingleStep(0.5)
+        self.bike_box.setSuffix(" kg")
+        self.bike_box.setLocale(QLocale(QLocale.French))
+        self.bike_box.setToolTip("S'ajoute au poids du cycliste : vitesse calculée et pente envoyée au home trainer")
+        self.bike_box.valueChanged.connect(self._bike_edited)
+        # FC max : zones de fréquence cardiaque (échelle ESIE) et séances en FC. Minimum : non renseignée.
+        self.hr_max_box = QSpinBox()
+        self.hr_max_box.setRange(MIN_HR_MAX - 1, MAX_HR_MAX)
+        self.hr_max_box.setSpecialValueText("non renseignée")
+        self.hr_max_box.setSuffix(" bpm")
+        self.hr_max_box.setToolTip("Fréquence cardiaque maximale : zones de FC sous la carte Cardio")
+        self.hr_max_box.valueChanged.connect(self._hr_max_edited)
         form.addRow("Nom", self.name_edit)
         form.addRow("FTP", self.ftp_box)
         form.addRow("Poids", self.weight_box)
+        form.addRow("Poids du vélo", self.bike_box)
+        form.addRow("FC max", self.hr_max_box)
         body.addLayout(form, 1)
         layout.addLayout(body)
 
@@ -132,13 +152,18 @@ class ProfileDialog(QDialog):
     def _selected(self, row: int) -> None:
         profile = self.selected()
         enabled = profile is not None
-        for widget in (self.name_edit, self.ftp_box, self.weight_box, self.delete_button):
+        for widget in (self.name_edit, self.ftp_box, self.weight_box, self.bike_box, self.hr_max_box,
+                       self.delete_button):
             widget.setEnabled(enabled)
         if profile is None:
             return
         self.name_edit.setText(profile.name)
         self.ftp_box.setValue(profile.ftp)
         self.weight_box.setValue(profile.weight_kg)
+        bike = profile.bike_kg  # hors bornes (fichier modifié à la main) : ramené dans les bornes de la case
+        self.bike_box.setValue(bike if isinstance(bike, (int, float)) else DEFAULT_BIKE_KG)
+        hr_max = profile.hr_max
+        self.hr_max_box.setValue(hr_max if hr_max is not None else self.hr_max_box.minimum())
 
     def _name_edited(self, text: str) -> None:
         profile = self.selected()
@@ -153,6 +178,14 @@ class ProfileDialog(QDialog):
     def _weight_edited(self, value: float) -> None:
         if (profile := self.selected()) is not None:
             profile.weight_kg = value
+
+    def _bike_edited(self, value: float) -> None:
+        if (profile := self.selected()) is not None:
+            profile.bike_kg = value
+
+    def _hr_max_edited(self, value: int) -> None:
+        if (profile := self.selected()) is not None:
+            profile.hr_max = None if value < MIN_HR_MAX else value
 
     # --- validation ----------------------------------------------------------
 
