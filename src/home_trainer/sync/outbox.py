@@ -80,11 +80,12 @@ class Outbox:
     # --- sorties ---------------------------------------------------------
 
     def add(self, points: list[ActivityPoint], title: str, description: str = "",
-            dest: Path | str | None = None) -> Path:
+            dest: Path | str | None = None, ftp: float | None = None, hr_max: float | None = None) -> Path:
         """Enregistre la sortie en .fit et la met en attente d'envoi.
 
         Sans `dest`, le fichier prend un nom libre dans le dossier des sorties ; avec, il
-        est écrit là (remplacé s'il existe) et envoyé depuis là."""
+        est écrit là (remplacé s'il existe) et envoyé depuis là. `ftp` et `hr_max` (profil) : FTP,
+        TSS, IF et FC max écrits dans le .fit."""
         start = min(p.at for p in points)
         if dest is None:
             self.dir.mkdir(parents=True, exist_ok=True)
@@ -97,7 +98,7 @@ class Outbox:
             path = Path(dest).absolute()
             path.parent.mkdir(parents=True, exist_ok=True)
             self.dir.mkdir(parents=True, exist_ok=True)  # pour envois.json
-        write_activity(points, path)
+        write_activity(points, path, ftp=ftp, hr_max=hr_max)
         # Hors du dossier des sorties, la clé est le chemin complet (dossier / chemin absolu = ce chemin).
         key = path.name if path.parent == self.dir.absolute() else str(path)
         with self._lock:

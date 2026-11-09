@@ -55,6 +55,12 @@ class Sample:
     position_s: float | None = None  # place sur l'axe de la séance (diffère de `t` après une brique passée)
     balance_left_pct: float | None = None  # part de la jambe gauche (capteur double seulement)
     manual_lap: int = 0  # tours manuels (touche Tab) avant cette mesure : un tour de plus dans le .fit
+    # Parcours GPX seulement (étape 12) : place sur la trace, altitude lissée, D+ et D− depuis le départ.
+    lat: float | None = None
+    lon: float | None = None
+    altitude_m: float | None = None
+    ascent_m: float | None = None
+    descent_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -472,10 +478,15 @@ class RouteSession(_LiveStatsMixin):
     def record(self, power_w: float, cadence_rpm: float | None = None,
                heart_rate_bpm: float | None = None, speed_kmh: float | None = None,
                at: float | None = None, t: float | None = None, balance_left_pct: float | None = None) -> None:
+        d = self.distance_m
+        lat, lon = self.route.position_at(d)
         self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, None, cadence_rpm, heart_rate_bpm,
                                    self.trainer_grade_pct, self.speed_kmh if speed_kmh is None else speed_kmh,
                                    time.time() if at is None else at, balance_left_pct=balance_left_pct,
-                                   manual_lap=self.manual_lap))
+                                   manual_lap=self.manual_lap, lat=lat, lon=lon,
+                                   altitude_m=self.route.smoothed_elevation_at(d),
+                                   ascent_m=self.route.climb_between(0.0, d),
+                                   descent_m=self.route.descent_between(0.0, d)))
 
     # --- lecture ---------------------------------------------------------
 
@@ -619,7 +630,8 @@ def brick_summary(samples: list[Sample], index: int) -> BrickSummary | None:
 def ride_points(samples: list[Sample]) -> list[ActivityPoint]:
     """Mesures de la séance ou du mode libre, prêtes pour le .fit d'activité."""
     return [ActivityPoint(x.at, x.power_w, x.cadence_rpm, x.heart_rate_bpm, x.speed_kmh, x.grade_pct, x.lap,
-                          x.t, x.balance_left_pct, x.manual_lap) for x in samples if x.at is not None]
+                          x.t, x.balance_left_pct, x.manual_lap, x.lat, x.lon, x.altitude_m, x.ascent_m,
+                          x.descent_m) for x in samples if x.at is not None]
 
 
 def ride_title(session: WorkoutSession | FreeRideSession | RouteSession) -> tuple[str, str]:

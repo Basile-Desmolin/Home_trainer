@@ -1222,16 +1222,17 @@ class MainWindow(QMainWindow):
         session.exported = True
         title, description = ride_title(session)
         points = ride_points(session.samples)
+        athlete = {"ftp": self.ftp, "hr_max": self._hr_max()}  # FTP, TSS, IF et FC max dans le .fit
         while True:
             try:
                 if export is None:
-                    path = self.outbox.add(points, title, description)
+                    path = self.outbox.add(points, title, description, **athlete)
                 elif export.fmt == "fit":
-                    path = self.outbox.add(points, title, description, dest=export.path)
+                    path = self.outbox.add(points, title, description, dest=export.path, **athlete)
                 else:
                     export.path.parent.mkdir(parents=True, exist_ok=True)
                     path = write_ride(points, export.path)
-                    self.outbox.add(points, title, description)
+                    self.outbox.add(points, title, description, **athlete)
                 break
             except (OSError, ValueError) as e:
                 where = export.path if export is not None else self.outbox.dir
@@ -1339,7 +1340,8 @@ class MainWindow(QMainWindow):
     def _save_rescued(self, ride: RescuedRide) -> None:
         """Sortie retrouvée : .fit dans le dossier des sorties, historique, envoi ; le secours part ensuite."""
         try:
-            path = self.outbox.add(ride_points(ride.samples), ride.title, ride.description)
+            path = self.outbox.add(ride_points(ride.samples), ride.title, ride.description,
+                                   ftp=self.ftp, hr_max=self._hr_max())
         except (OSError, ValueError) as e:
             QMessageBox.warning(self, "Sortie non enregistrée", f"{self.outbox.dir} : {e}\n\n"
                                 "Elle reste gardée et vous sera proposée au prochain lancement.")
