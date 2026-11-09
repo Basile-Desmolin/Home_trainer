@@ -61,6 +61,48 @@ def test_rejects_bad_files(tmp_path):
     assert load_route(path).name == "boucle"
 
 
+def _reference_interpolate(known, d):
+    """Interpolation d'avant l'étape 4 (liste des distances refaite à chaque appel) : la référence."""
+    import bisect
+    if d <= known[0][0]:
+        return known[0][1]
+    if d >= known[-1][0]:
+        return known[-1][1]
+    i = bisect.bisect_right([k[0] for k in known], d)
+    (d0, e0), (d1, e1) = known[i - 1], known[i]
+    return e0 if d1 == d0 else e0 + (e1 - e0) * (d - d0) / (d1 - d0)
+
+
+def long_coords(n, missing_every=3):
+    """`n` points vers le nord, tous les 10 m ; une altitude sur `missing_every` manque."""
+    return [(45 + i * 10 / M_PER_DEG_LAT, 6.0,
+             None if i % missing_every == 1 else 300 + 50 * math.sin(i / 37) + (i % 7) * 0.3)
+            for i in range(n)]
+
+
+def test_missing_elevations_are_the_same_as_before_step_4():
+    coords = long_coords(2000)
+    r = Route.from_coordinates("ref", coords)
+    known = [(p.distance_m, ele) for p, (_, _, ele) in zip(r.points, coords) if ele is not None]
+    assert len(r.points) == len(coords)
+    for p in r.points:
+        assert p.ele_m == _reference_interpolate(known, p.distance_m)  # égalité exacte, pas approchée
+    # Exemple chiffré : le point 1 (sans altitude) est au milieu des points 0 et 2.
+    assert r.points[1].ele_m == pytest.approx((coords[0][2] + coords[2][2]) / 2)
+
+
+def test_long_gpx_loads_quickly():
+    import time
+    body = "".join(f'<trkpt lat="{lat:.8f}" lon="{lon}">' + (f"<ele>{e:.1f}</ele>" if e is not None else "")
+                   + "</trkpt>" for lat, lon, e in long_coords(20_000))
+    data = (f'<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>{body}</trkseg></trk></gpx>').encode()
+    t = time.perf_counter()
+    r = parse_gpx(data)
+    elapsed = time.perf_counter() - t
+    assert r.total_m == pytest.approx(199_990, rel=1e-3)
+    assert elapsed < 2.0  # avant l'étape 4 : une vingtaine de secondes (calcul en N²)
+
+
 def test_session_advances_with_power_and_sends_route_grade():
     s = RouteSession(parse_gpx(gpx([(2000, 0), (1000, 6)])), ftp=250, rider_kg=70)
     s.ride(10, 250)

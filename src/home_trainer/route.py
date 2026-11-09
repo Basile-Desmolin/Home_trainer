@@ -64,7 +64,8 @@ class Route:
             kept.append((lat, lon, ele))
         # Altitudes : celles du fichier, interpolées selon la distance là où elles manquent.
         known_d = [(d, ele) for d, (_, _, ele) in zip(distances, kept) if ele is not None]
-        return cls(name, [RoutePoint(lat, lon, _interpolate(known_d, d), d)
+        known_x = [d for d, _ in known_d]  # une seule fois : la refaire par point coûtait N² au chargement
+        return cls(name, [RoutePoint(lat, lon, _interpolate(known_d, d, known_x), d)
                           for d, (lat, lon, _) in zip(distances, kept)])
 
     # --- lecture ---------------------------------------------------------
@@ -131,12 +132,14 @@ class Route:
         return max(p.ele_m for p in self.points)
 
 
-def _interpolate(known: list[tuple[float, float]], d: float) -> float:
+def _interpolate(known: list[tuple[float, float]], d: float,
+                 known_x: list[float] | None = None) -> float:
+    """Altitude au mètre `d` entre les points `known` (distance, altitude) ; `known_x` : leurs distances."""
     if d <= known[0][0]:
         return known[0][1]
     if d >= known[-1][0]:
         return known[-1][1]
-    i = bisect.bisect_right([k[0] for k in known], d)
+    i = bisect.bisect_right(known_x if known_x is not None else [k[0] for k in known], d)
     (d0, e0), (d1, e1) = known[i - 1], known[i]
     return e0 if d1 == d0 else e0 + (e1 - e0) * (d - d0) / (d1 - d0)
 
