@@ -161,6 +161,7 @@ def test_rescue_keeps_route_data(tmp_path):
     """La sortie de secours garde altitude, D+ et position ; un ancien secours (sans eux) se relit."""
     import json
 
+    pytest.importorskip("PySide6.QtWidgets")  # ui/rescue.py importe Qt (absent de la CI)
     from home_trainer.ui.rescue import RescueFile, read_rescue
 
     s, _ = ride_col()
