@@ -85,7 +85,8 @@ def test_the_power_card_shows_the_chosen_average_and_the_ride_keeps_raw_power(ap
     window.set_smoothing(3)
     # 3 dernières secondes : 5 × 200 + 10 × 300 sur 15 mesures = 266,7 W.
     assert (card.title.text(), card.value.text()) == ("PUISSANCE · 3 S", "267")
-    assert window.mini_info().power == "267 W"
+    window.mini.refresh(window._ride_view())
+    assert ("PUISSANCE · 3 S", "267 W") in window.mini.texts()
     # Enregistrement : une mesure par seconde, moyenne de ses 5 mesures brutes (pas la moyenne sur 3 s).
     assert [x.power_w for x in window.session.samples] == pytest.approx([200, 200, 300, 300], abs=0.01)
     assert ProfileBook.load(book.path, tmp_path / "sorties").get(profile.id).power_smoothing_s == 3

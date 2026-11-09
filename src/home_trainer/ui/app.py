@@ -65,12 +65,12 @@ from .chart import ACCENT, CURVES, DEFAULT_CURVES, HEART, MUTED, TEXT, WorkoutCh
 from .library import Library, LibraryDialog, documents_folder
 from .editor import SAVE_FILTERS, WorkoutEditor, _file_name, _filter_for
 from .gauges import BrickRing
-from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel, grade_color, grade_text
+from .free_ride import BIG_STEP_PCT, BIG_STEP_W, FreeRidePanel
 from .heart_rate_mode import ask_heart_rate_mode
 from .indicators import Mode, RideView
 from .loader import load_workout
 from .metric import Metric, MetricGrid, Slot
-from .mini import MiniInfo, MiniWindow
+from .mini import MiniWindow, foreground_window, layout_key as mini_layout_key
 from .profiles import choose_profile
 from .history import HistoryDialog
 from .ride_export import DISCARD, RideExport, ask_ride_export
@@ -78,7 +78,7 @@ from .rescue import (DISCARD as RESCUE_DISCARD, RESCUE_EVERY_S, SAVE as RESCUE_S
                      ask_rescued, ask_unsaved, duration_text, find_rescued, remove_file, rescue_dir)
 from .power import (SMOOTHING_CHOICES_S, PowerAverage, PowerSource, Reading, SimulatedTrainer, open_power_source,
                     next_speed_kmh)
-from .route_ride import RoutePanel, km_text, route_grade_color
+from .route_ride import RoutePanel
 from .theme import (GOOD, OFF, WAIT, dot, hint_label, icon, install, keycaps, number_font, pill, set_icon, set_style,
                     zone_index, zone_label)
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
@@ -226,6 +226,7 @@ class MainWindow(QMainWindow):
         # Vignette au premier plan quand le logiciel passe en arrière-plan pendant une sortie.
         self.mini = MiniWindow()
         self.mini.clicked.connect(self.bring_back)
+        self.mini.changed.connect(self._mini_chosen)  # valeurs choisies par clic droit : gardées dans le profil
 
         self.clock = QElapsedTimer()
         self.timer = QTimer(self)
@@ -1375,6 +1376,7 @@ class MainWindow(QMainWindow):
         layouts = profile.layouts if isinstance(profile.layouts, dict) else {}
         for mode, grid in self._grids().items():
             grid.set_keys(layouts.get(mode.value))
+        self.mini.set_choices({mode: layouts.get(mini_layout_key(mode)) for mode in Mode})
         self.set_smoothing(profile.power_smoothing_s)
         self.set_speed_source(profile.speed_source)
         self.brick_beep = profile.brick_beep is not False
@@ -1437,15 +1439,24 @@ class MainWindow(QMainWindow):
 
     def _layout_chosen(self, mode: Mode, keys: list[str] | None) -> None:
         """Indicateurs d'un écran choisis par clic droit (None : disposition d'origine)."""
-        if self.profile is not None:
-            if not isinstance(self.profile.layouts, dict):
-                self.profile.layouts = {}
-            if keys is None:
-                self.profile.layouts.pop(mode.value, None)
-            else:
-                self.profile.layouts[mode.value] = keys
-            self.profiles.save()
+        self._save_layout(mode.value, keys)
         self._refresh()
+
+    def _mini_chosen(self, mode: Mode, keys: list[str] | None) -> None:
+        """Valeurs de la vignette choisies par clic droit, pour un mode (None : valeurs d'origine)."""
+        self._save_layout(mini_layout_key(mode), keys)
+        self._refresh_mini()
+
+    def _save_layout(self, name: str, keys: list[str] | None) -> None:
+        if self.profile is None:
+            return
+        if not isinstance(self.profile.layouts, dict):
+            self.profile.layouts = {}
+        if keys is None:
+            self.profile.layouts.pop(name, None)
+        else:
+            self.profile.layouts[name] = keys
+        self.profiles.save()
 
     def _choose_profile(self) -> None:
         profile = choose_profile(self.profiles, self.profile, self)
@@ -1744,46 +1755,40 @@ class MainWindow(QMainWindow):
     # --- vignette en arrière-plan ------------------------------------------
 
     def in_background(self) -> bool:
-        """Fenêtre réduite, ou une autre application au premier plan."""
-        return self.isMinimized() or QApplication.applicationState() != Qt.ApplicationActive
+        """Fenêtre réduite, ou une autre fenêtre au premier plan que la fenêtre principale et ses dialogues
+        (la vignette et son menu comptent pour l'arrière-plan). Sous Windows, demandé au système."""
+        if self.isMinimized():
+            return True
+        front = foreground_window()
+        if front is None:
+            return QApplication.applicationState() != Qt.ApplicationActive
+        hwnd, ours = front
+        if not ours:
+            return True
+        mini_windows = [self.mini, QApplication.activePopupWidget()]
+        return any(w is not None and w.windowHandle() is not None and int(w.windowHandle().winId()) == hwnd
+                   for w in mini_windows)
 
     def _refresh_mini(self) -> None:
         """Vignette affichée pendant une sortie (en cours ou en pause) tant que le logiciel est en arrière-plan."""
+        if self.mini.menu_open:  # menu du clic droit ouvert : la vignette reste telle quelle
+            return
         riding = self.active.state in (State.RUNNING, State.PAUSED)
         if not (riding and self.isVisible() and self.in_background()):
             self.mini.hide()
             return
-        self.mini.set_info(self.mini_info())
+        self.mini.refresh(self._ride_view(), self.mini_status())
         self.mini.popup(self)
 
-    def mini_info(self) -> MiniInfo:
-        r = self._shown_reading()
-        power = f"{r.power_w:.0f} W" if r else "—"
+    def mini_status(self) -> str:
+        """Ligne sous les valeurs de la vignette : pause ; en séance, brique et reste de la séance."""
         active = self.active
         status = "En pause" if active.state is State.PAUSED else ""
-        if self.route_ride:
-            grade = active.grade_pct
-            return MiniInfo(grade_text(grade), power, km_text(active.remaining_m), target_title="PENTE",
-                            color=route_grade_color(grade), status=status)
-        if self.free_ride:
-            if active.mode is FreeMode.ERG:
-                target, color = f"{active.target_w} W", zone_color(active.target_w, self.ftp)
-            else:
-                target, color = grade_text(active.grade_pct), grade_color(active.grade_pct)
-            return MiniInfo(target, power, hms(active.elapsed_s), remaining_title="DURÉE", color=color,
-                            status=status)
+        if active is not self.session:
+            return status
         s = self.session
-        target, bpm = s.target_w, s.target_bpm
-        if target is None and bpm is not None:  # séance en FC roulée aux vitesses
-            text, title, color = f"{bpm:.0f} bpm", "CIBLE FC", HEART
-        else:
-            text, title = ("libre" if target is None else f"{target:.0f} W"), "CIBLE"
-            color = None if target is None or zone_index(target, self.ftp) == 0 else zone_color(target, self.ftp)
-        brick = s.step_remaining_s  # brique en cours ; le reste de la séance passe en dessous
-        remaining = hms(s.total_remaining_s if brick is None else brick)
         where = f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}  ·  séance {hms(s.total_remaining_s)}"
-        status = "  ·  ".join(x for x in (status, where) if x)
-        return MiniInfo(text, power, remaining, target_title=title, color=color, status=status)
+        return "  ·  ".join(x for x in (status, where) if x)
 
     def bring_back(self) -> None:
         """Clic sur la vignette : la fenêtre principale revient au premier plan."""

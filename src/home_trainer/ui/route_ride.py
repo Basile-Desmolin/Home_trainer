@@ -18,8 +18,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QSizePo
                                QVBoxLayout, QWidget)
 
 from .chart import ACCENT, MUTED, TEXT, hms, paint_panel
-from .free_ride import grade_color, grade_text
-from .indicators import Mode, RideView, km_text
+from .indicators import DESCENT, Mode, RideView, grade_color, grade_text, km_text, route_grade_color  # noqa: F401
 from .metric import MetricGrid, Slot
 from .session import DIFFICULTY_STEP, RouteSession, State
 from .theme import hint_label, icon, keycaps, number_font, set_icon, set_style
@@ -29,14 +28,6 @@ BEHIND_M = 200.0
 # Cartes du catalogue d'indicateurs ; la pente occupe la colonne 1 (lignes 0 et 1).
 SLOTS = [Slot("power", 0, 0, 44), Slot("heart", 0, 2, 44), Slot("route_remaining", 0, 3, 44),
          Slot("cadence", 1, 0, 26), Slot("speed", 1, 2, 26), Slot("elapsed", 1, 3, 26)]
-
-
-DESCENT = "#3d8bd9"
-
-
-def route_grade_color(grade_pct: float) -> QColor:
-    """Comme le mode libre (vert → rouge en montée), avec les descentes en bleu."""
-    return QColor(DESCENT) if grade_pct <= -1 else grade_color(grade_pct)
 
 
 @dataclass(frozen=True)

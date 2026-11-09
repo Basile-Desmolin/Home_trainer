@@ -13,7 +13,9 @@ from home_trainer.heart_zones import esie_zone  # noqa: E402
 from home_trainer.ride_stats import normalized_power  # noqa: E402
 from home_trainer.route import load_route  # noqa: E402
 from home_trainer.sensors import HeartRateReading  # noqa: E402
-from home_trainer.ui.indicators import CATALOG, Mode, RideView, km_text  # noqa: E402
+from home_trainer.ui.chart import HEART, TEXT, zone_color  # noqa: E402
+from home_trainer.ui.indicators import (CATALOG, Mode, RideView, grade_color, grade_text, km_text,  # noqa: E402
+                                        route_grade_color)
 from home_trainer.ui.power import Reading  # noqa: E402
 from home_trainer.ui.session import FreeMode, FreeRideSession, RouteSession, WorkoutSession  # noqa: E402
 from home_trainer.ui.theme import zone_index  # noqa: E402
@@ -193,6 +195,52 @@ def test_each_indicator_has_a_title_and_a_known_gauge():
     for key, indicator in CATALOG.items():
         assert indicator.key == key and indicator.title and indicator.modes
         assert indicator.gauge in (None, "zones", "heart_zones", "progress")
+
+
+def test_target_in_each_mode_with_its_color():
+    """Étape 10 : la cible de la vignette, reprise de `mini_info` (texte, titre et couleur)."""
+    s = workout()  # 10 min à 150 W (60 % FTP, zone 2), puis 5 min à 280 W
+    shown = show("target", s)
+    assert (shown.value, shown.title, shown.color) == ("150 W", None, zone_color(150, 250).name())
+    s.start()
+    s.tick(660)
+    assert show("target", s).value == "280 W"
+    easy = WorkoutSession(parse_workout("10m@100"), 250)  # 40 % FTP : zone 1, en blanc
+    assert show("target", easy).color is None and CATALOG["target"].value_color(show("target", easy)) == TEXT
+
+    class ByHeart(WorkoutSession):  # séance en FC roulée aux vitesses
+        target_w = None
+        target_bpm = 132.0
+    shown = show("target", ByHeart(parse_workout("10m@100"), 250))
+    assert (shown.value, shown.title, shown.color) == ("132 bpm", "CIBLE FC", HEART)
+
+    free = FreeRideSession(250, target_w=200)
+    assert (show("target", free).value, show("target", free).color) == ("200 W", zone_color(200, 250).name())
+    slope = FreeRideSession(250, mode=FreeMode.SLOPE, grade_pct=4.5)
+    shown = show("target", slope)
+    assert (shown.value, shown.title, shown.color) == ("4,5 %", "PENTE", grade_color(4.5).name())
+
+    r = route()
+    shown = show("target", r)
+    assert (shown.value, shown.title) == (grade_text(r.grade_pct), "PENTE")
+    assert shown.color == route_grade_color(r.grade_pct).name()
+
+
+def test_brick_remaining():
+    s = workout()
+    s.start()
+    s.tick(400)  # 6 min 40 dans la brique de 10 min
+    assert (show("brick_remaining", s).value, show("brick_remaining", s).sub) == ("3:20", "brique 1 / 2")
+    s.tick(900)  # séance finie : plus de brique
+    assert show("brick_remaining", s).value == "0:00"
+    assert Mode.FREE not in CATALOG["brick_remaining"].modes and Mode.ROUTE not in CATALOG["brick_remaining"].modes
+
+
+def test_vignette_only_indicators_stay_off_the_screen_menus():
+    from home_trainer.ui.metric import MetricGrid, Slot
+    for mode in Mode:
+        choices = MetricGrid([Slot("power", 0, 0)], mode).choices()
+        assert "target" not in choices and "brick_remaining" not in choices and "power" in choices
 
 
 def test_heart_rate_zones_follow_the_esie_scale():

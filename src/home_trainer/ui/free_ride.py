@@ -19,25 +19,13 @@ from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushB
 
 from .chart import (ACCENT, DEFAULT_CURVES, DEFAULT_FTP, LABELS_MARGIN, MUTED, TEXT, TimeAxis, draw_curves,
                     draw_cursor, draw_power, draw_watts_axis, hms, paint_panel, traced_runs, zone_color)
-from .indicators import Mode, RideView
+from .indicators import GRADES, Mode, RideView, grade_color, grade_text  # noqa: F401 (réexportés)
 from .metric import MetricGrid, Slot
 from .session import FREE_STEP_W, GRADE_STEP_PCT, FreeMode, FreeRideSession, State
 from .theme import hint_label, icon, keycaps, number_font, set_icon, set_style, zone_index
 
 BIG_STEP_W = 25
 BIG_STEP_PCT = 2.0
-# Pente : du vert (plat) au rouge (mur).
-GRADES = [(1, "#3fb37f"), (4, "#e7c43a"), (8, "#f08a2c"), (1_000, "#e5484d")]
-
-
-def grade_text(grade_pct: float) -> str:
-    """« 4,5 % », « −2 % » : à la française."""
-    text = f"{grade_pct:.1f}".rstrip("0").rstrip(".").replace(".", ",").replace("-", "−")
-    return f"{text} %"
-
-
-def grade_color(grade_pct: float) -> QColor:
-    return QColor(next(color for limit, color in GRADES if grade_pct < limit))
 
 
 def _time(sample) -> float:

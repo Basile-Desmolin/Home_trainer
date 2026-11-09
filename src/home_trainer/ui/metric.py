@@ -119,7 +119,7 @@ class MetricGrid(QGridLayout):
 
     def choices(self) -> list[str]:
         """Indicateurs qui ont un sens sur cet écran, dans l'ordre du catalogue."""
-        return [key for key, i in CATALOG.items() if self.mode is None or self.mode in i.modes]
+        return [key for key, i in CATALOG.items() if i.on_grid and (self.mode is None or self.mode in i.modes)]
 
     def _build(self) -> None:
         for card in self.cards.values():

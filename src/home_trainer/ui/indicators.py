@@ -13,9 +13,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
+from PySide6.QtGui import QColor
+
 from ..heart_zones import ESIE_NAMES, esie_zone
 from ..sensors import HeartRateReading
-from .chart import CADENCE, HEART, TEXT, hms
+from .chart import CADENCE, HEART, TEXT, hms, zone_color
 from .power import Reading
 from .session import FreeMode, FreeRideSession, RouteSession, WorkoutSession
 from .theme import zone_index
@@ -36,6 +38,26 @@ def km_text(meters: float, decimals: int = 1) -> str:
 
 def kmh_text(speed_kmh: float) -> str:
     return f"{speed_kmh:.1f}".replace(".", ",")
+
+
+# Pente : du vert (plat) au rouge (mur) ; en parcours, les descentes en bleu.
+GRADES = [(1, "#3fb37f"), (4, "#e7c43a"), (8, "#f08a2c"), (1_000, "#e5484d")]
+DESCENT = "#3d8bd9"
+
+
+def grade_text(grade_pct: float) -> str:
+    """« 4,5 % », « −2 % » : à la française."""
+    text = f"{grade_pct:.1f}".rstrip("0").rstrip(".").replace(".", ",").replace("-", "−")
+    return f"{text} %"
+
+
+def grade_color(grade_pct: float) -> QColor:
+    return QColor(next(color for limit, color in GRADES if grade_pct < limit))
+
+
+def route_grade_color(grade_pct: float) -> QColor:
+    """Comme le mode libre (vert → rouge en montée), avec les descentes en bleu."""
+    return QColor(DESCENT) if grade_pct <= -1 else grade_color(grade_pct)
 
 
 @dataclass(frozen=True)
@@ -71,6 +93,7 @@ class Shown:
     zone: int | None = None  # zone de puissance (barre de zones)
     progress: float | None = None  # avancement de 0 à 1 (barre d'avancement)
     title: str | None = None  # titre de la carte, s'il diffère de celui de l'indicateur
+    color: str | None = None  # couleur de la valeur, si elle dépend de la mesure (zone de la cible, pente)
 
 
 @dataclass(frozen=True)
@@ -82,10 +105,14 @@ class Indicator:
     modes: frozenset[Mode] = ALL_MODES  # écrans où l'indicateur a un sens
     gauge: str | None = None  # « zones » (puissance), « heart_zones » (FC, ESIE) ou « progress » : barre sous la valeur
     label: str = ""  # nom dans le menu du clic droit (par défaut, le titre en minuscules)
+    on_grid: bool = True  # proposé aux cartes des écrans ; sinon, vignette seulement (étape 10)
 
     @property
     def menu_name(self) -> str:
         return self.label or self.title.capitalize()
+
+    def value_color(self, shown: Shown) -> str:
+        return shown.color or self.color
 
 
 # --- indicateurs --------------------------------------------------------------
@@ -206,6 +233,32 @@ def _route_remaining(v: RideView) -> Shown:
     return Shown(km_text(s.remaining_m), f"D+ restant {s.climb_remaining_m:.0f} m · fait {km_text(s.distance_m)}")
 
 
+def _target(v: RideView) -> Shown:
+    """Ce que demande la sortie : cible en W (ou en bpm, séance en FC), ou pente. Couleur de sa zone."""
+    s = v.session
+    if isinstance(s, RouteSession):
+        return Shown(grade_text(s.grade_pct), title="PENTE", color=route_grade_color(s.grade_pct).name())
+    if isinstance(s, FreeRideSession):
+        if s.mode is FreeMode.ERG:
+            return Shown(f"{s.target_w} W", color=zone_color(s.target_w, v.ftp).name())
+        return Shown(grade_text(s.grade_pct), title="PENTE", color=grade_color(s.grade_pct).name())
+    target, bpm = s.target_w, s.target_bpm
+    if target is None and bpm is not None:  # séance en FC roulée aux vitesses
+        return Shown(f"{bpm:.0f} bpm", title="CIBLE FC", color=HEART)
+    if target is None:
+        return Shown("libre")
+    return Shown(f"{target:.0f} W", color=None if zone_index(target, v.ftp) == 0 else zone_color(target, v.ftp).name())
+
+
+def _brick_remaining(v: RideView) -> Shown:
+    """Temps restant dans la brique en cours (séance finie ou sans brique : reste de la séance)."""
+    s = v.session
+    assert isinstance(s, WorkoutSession)
+    brick = s.step_remaining_s
+    return Shown(hms(s.total_remaining_s if brick is None else brick),
+                 f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}")
+
+
 def _speed(v: RideView) -> Shown:
     s = v.session
     # Parcours : distance / temps ; ailleurs, moyenne des vitesses enregistrées.
@@ -230,4 +283,8 @@ CATALOG: dict[str, Indicator] = {i.key: i for i in (
     Indicator("workout_remaining", "RESTE AU TOTAL", _workout_remaining, modes=frozenset({Mode.WORKOUT}),
               gauge="progress"),
     Indicator("route_remaining", "RESTE", _route_remaining, modes=frozenset({Mode.ROUTE})),
+    # Vignette seulement : les écrans montrent déjà la cible et la brique dans leur bloc de commande.
+    Indicator("target", "CIBLE", _target, label="Cible (ou pente)", on_grid=False),
+    Indicator("brick_remaining", "RESTE", _brick_remaining, modes=frozenset({Mode.WORKOUT}),
+              label="Reste de la brique", on_grid=False),
 )}
