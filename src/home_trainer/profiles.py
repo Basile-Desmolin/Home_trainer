@@ -35,6 +35,10 @@ DEFAULT_FTP = 250
 DEFAULT_WEIGHT_KG = 66.0  # poids du cycliste seul, comme la case « Poids »
 MIN_BIKE_KG, MAX_BIKE_KG = 5.0, 30.0  # poids du vélo saisi dans la fiche Profil (9 kg par défaut)
 SPEED_APP, SPEED_TRAINER = "app", "trainer"  # vitesse calculée par l'application, ou celle du home trainer
+BEEP_SOUNDS = ("double", "court", "montant", "windows")  # sons du bip (fabriqués par `ui/sounds.py`)
+BEEP_BEFORE_CHOICES = (3, 5, 10)  # secondes de bip et de compte à rebours avant la brique suivante
+CADENCE_ALERT_CHOICES = (0, 50, 60, 70, 80, 90)  # seuil de l'alerte de cadence basse ; 0 : pas d'alerte
+DEFAULT_CADENCE_ALERT_RPM = 50
 FIRST_PROFILE_NAME = "Mon profil"
 RIDES_SUBFOLDER = Path("HomeTrainer") / "Sorties"
 HISTORY_FILE = "historique.json"  # voir home_trainer.history
@@ -62,7 +66,11 @@ class Profile:
     # écran absent : disposition d'origine.
     layouts: dict[str, list[str]] = field(default_factory=dict)
     power_smoothing_s: int = 0  # puissance affichée : instantanée (0) ou moyenne sur 3, 5, 10, 30 s
-    brick_beep: bool = True  # séance : bip aux 3 dernières secondes de chaque brique
+    brick_beep: bool = True  # séance : bip avant chaque changement de brique
+    beep_sound: str = "double"  # son du bip (`ui/sounds.py`) : double, court, montant ou windows
+    beep_before_s: int = 3  # bip et compte à rebours : 3, 5 ou 10 s avant la brique suivante
+    beep_last_distinct: bool = True  # son plus long et plus aigu à la dernière seconde
+    cadence_alert_rpm: int = DEFAULT_CADENCE_ALERT_RPM  # alerte sous ce seuil (0 : pas d'alerte)
     chart_curves: list[str] | None = None  # courbes en plus de la puissance ; None : cadence et cardio
     speed_source: str = SPEED_APP  # vitesse : calculée par l'application, ou celle du home trainer
 
@@ -125,6 +133,15 @@ def _profile_from(item: dict) -> Profile:
     profile.power_smoothing_s = take("power_smoothing_s", _number(item.get("power_smoothing_s"), 0, 0, 600, int), 0)
     beep = item.get("brick_beep", True)
     profile.brick_beep = beep if isinstance(beep, bool) else True
+    sound = item.get("beep_sound", "double")
+    profile.beep_sound = sound if sound in BEEP_SOUNDS else "double"
+    before = item.get("beep_before_s", 3)
+    profile.beep_before_s = before if before in BEEP_BEFORE_CHOICES and not isinstance(before, bool) else 3
+    distinct = item.get("beep_last_distinct", True)
+    profile.beep_last_distinct = distinct if isinstance(distinct, bool) else True
+    alert = item.get("cadence_alert_rpm", DEFAULT_CADENCE_ALERT_RPM)
+    profile.cadence_alert_rpm = (alert if alert in CADENCE_ALERT_CHOICES and not isinstance(alert, bool)
+                                 else DEFAULT_CADENCE_ALERT_RPM)
     curves = item.get("chart_curves")
     profile.chart_curves = [str(c) for c in curves] if isinstance(curves, list) else None
     source = item.get("speed_source", SPEED_APP)

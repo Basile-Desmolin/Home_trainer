@@ -7,6 +7,7 @@ dans assets/fonts). Sans elles (fichiers absents), Qt retombe sur la police du s
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -20,6 +21,8 @@ BG = "#16181d"
 PANEL = "#20242c"
 TEXT = "#e8eaed"
 MUTED = "#8b919c"
+DETAIL = "#b4bac4"  # lignes de détail des cartes : plus claires que MUTED, lisibles de loin (étape 11)
+SUB_PX = 14  # taille des lignes de détail des cartes (13 px avant l'étape 11), à l'échelle 1
 ACCENT = "#ffd24a"
 POWER = "#4fc3f7"
 HEART = "#ff5c6c"
@@ -125,6 +128,17 @@ def keycaps(text: str) -> str:
         else:
             out.append(part.replace(" ", "&nbsp;"))
     return f"<span style='color:{MUTED};'>{''.join(out)}</span>"
+
+
+BASE_SIZE = (1280, 800)  # fenêtre de référence : chiffres à leur taille d'origine
+MAX_SCALE = 1.8
+
+
+def window_scale(width: int, height: int) -> float:
+    """Facteur de taille des chiffres pour une fenêtre (ou un écran plein) de `width` × `height` :
+    1 jusqu'à 1 280 × 800, puis selon le côté le moins agrandi, 1,8 au plus, par pas de 0,05."""
+    scale = min(width / BASE_SIZE[0], height / BASE_SIZE[1])
+    return max(1.0, min(MAX_SCALE, math.floor(scale * 20) / 20))
 
 
 def set_style(widget, sheet: str) -> None:
@@ -251,7 +265,7 @@ QMenu::separator {{ height: 1px; background: {LINE}; margin: 4px 8px; }}
 QFrame#metric {{ background: {PANEL}; border-radius: 12px; }}
 QFrame#metric QLabel, QFrame#metric QWidget#plain {{ background: transparent; }}
 QLabel#metricTitle {{ color: {MUTED}; font-size: 11px; font-weight: bold; letter-spacing: 1.5px; }}
-QLabel#metricSub {{ color: {MUTED}; font-size: 13px; background: transparent; }}
+QLabel#metricSub {{ color: {DETAIL}; font-size: {SUB_PX}px; background: transparent; }}
 QLabel#unit {{ color: {MUTED}; background: transparent; }}
 QLabel#title {{ font-size: 20px; font-weight: bold; }}
 QLabel#current {{ font-size: 15px; color: #c4c8cf; }}

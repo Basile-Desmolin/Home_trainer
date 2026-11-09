@@ -12,10 +12,10 @@ from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, Q
 
 from .gauges import ZoneBar
 from .indicators import CATALOG, Mode, RideView
-from .theme import HEART_ZONES, TEXT, number_font, set_style, tinted_card
+from .theme import HEART_ZONES, SUB_PX, TEXT, number_font, set_style, tinted_card
 
 # Unité détachée de la valeur et affichée en petit : « 238 W » → « 238 » + « W ».
-UNITS = ("W", "W/kg", "km", "%", "bpm", "rpm", "km/h", "tr/min")
+UNITS = ("W", "W/kg", "km", "%", "bpm", "rpm", "km/h", "tr/min", "kcal")
 
 
 def split_unit(text: str) -> tuple[str, str]:
@@ -34,22 +34,20 @@ class Metric(QFrame):
         layout.setSpacing(0)
         self.title = QLabel(title)
         self.title.setObjectName("metricTitle")
-        size = round(size * 1.25)  # police condensée : plus haute à largeur égale
+        self._size = round(size * 1.25)  # police condensée : plus haute à largeur égale
+        self.scale = 1.0  # tailles suivant la fenêtre (étape 11, `set_scale`)
         self.value = QLabel("—")
-        self.value.setFont(number_font(size))
         self.unit = QLabel("")
         self.unit.setObjectName("unit")
-        self.unit.setFont(number_font(max(11, round(size * 0.36)), QFont.DemiBold))
         self.set_color(color)
         self.row = row = QHBoxLayout()  # valeur, unité, puis de la place (anneau de la cible…)
         row.setSpacing(5)
         row.addWidget(self.value, 0, Qt.AlignBottom)
         row.addWidget(self.unit, 0, Qt.AlignBottom)
         row.addStretch(1)
-        self._unit_gap = round(size * 0.22)  # l'unité se pose sur la ligne de base des chiffres
-        self.unit.setContentsMargins(0, 0, 0, self._unit_gap)
         self.sub = QLabel("")
         self.sub.setObjectName("metricSub")
+        self._apply_sizes()
         self.body = QVBoxLayout()  # zone libre sous la valeur (barre de zones…)
         self.body.setSpacing(6)
         layout.addWidget(self.title)
@@ -57,6 +55,19 @@ class Metric(QFrame):
         layout.addStretch(1)
         layout.addLayout(self.body)
         layout.addWidget(self.sub)
+
+    def _apply_sizes(self) -> None:
+        size = round(self._size * self.scale)
+        self.value.setFont(number_font(size))
+        self.unit.setFont(number_font(max(11, round(size * 0.36)), QFont.DemiBold))
+        self.unit.setContentsMargins(0, 0, 0, round(size * 0.22))  # l'unité se pose sur la ligne de base
+        set_style(self.sub, "" if self.scale == 1.0 else f"font-size: {round(SUB_PX * self.scale)}px;")
+
+    def set_scale(self, scale: float) -> None:
+        """Tailles des chiffres et de la ligne de détail × `scale` (fenêtre agrandie, plein écran)."""
+        if scale != self.scale:
+            self.scale = scale
+            self._apply_sizes()
 
     def add(self, widget: QWidget) -> None:
         self.body.addWidget(widget)
@@ -109,6 +120,11 @@ class MetricGrid(QGridLayout):
         self.keys = [slot.key for slot in slots]
         self.cards: dict[str, Metric] = {}  # même dictionnaire pour toute la vie de la grille
         self._gauges: dict[str, ZoneBar | QProgressBar] = {}
+        # Couleur de valeur et teinte de carte posées par l'indicateur (`Shown.color`, `Shown.tint`) : une
+        # carte n'est touchée que quand elles changent (la teinte de zone de la carte puissance, posée par
+        # la fenêtre, reste).
+        self._colors: dict[str, tuple[str | None, str | None]] = {}
+        self.scale = 1.0  # tailles suivant la fenêtre : appliquée aussi aux cartes recréées
         self._view: RideView | None = None
         self.menu_hook: Callable[[str, QMenu], None] | None = None  # ajoute au menu d'une carte (indicateur, menu)
         self._build()
@@ -128,9 +144,11 @@ class MetricGrid(QGridLayout):
             card.deleteLater()
         self.cards.clear()
         self._gauges.clear()
+        self._colors.clear()
         for index, (slot, key) in enumerate(zip(self.slots, self.keys)):
             indicator = CATALOG[key]
             card = Metric(indicator.title, slot.size, indicator.color)
+            card.set_scale(self.scale)
             if indicator.gauge in ("zones", "heart_zones"):
                 self._gauges[key] = gauge = ZoneBar(colors=HEART_ZONES if indicator.gauge == "heart_zones" else None)
                 card.add(gauge)
@@ -194,6 +212,11 @@ class MetricGrid(QGridLayout):
             title = shown.title or CATALOG[key].title
             if card.title.text() != title:
                 card.title.setText(title)
+            colors = (shown.color, shown.tint)
+            if self._colors.get(key, (None, None)) != colors:
+                self._colors[key] = colors
+                card.set_color(CATALOG[key].value_color(shown))
+                card.set_tint(shown.tint)
             gauge = self._gauges.get(key)
             if isinstance(gauge, ZoneBar):
                 gauge.set_zone(shown.zone)

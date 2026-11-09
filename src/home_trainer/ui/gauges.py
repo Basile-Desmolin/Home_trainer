@@ -50,7 +50,13 @@ class BrickRing(QWidget):
         self.text = "—"
         self.caption = ""
         self.color = QColor(TEXT)
+        self.diameter = diameter  # à l'échelle 1 (`set_scale` l'agrandit avec la fenêtre)
         self.setFixedSize(QSize(diameter, diameter))
+
+    def set_scale(self, scale: float) -> None:
+        d = round(self.diameter * scale)
+        if d != self.width():
+            self.setFixedSize(QSize(d, d))
 
     def set(self, fraction: float | None, text: str, caption: str = "", color: str | QColor = TEXT) -> None:
         self.fraction = 1.0 if fraction is None else max(0.0, min(1.0, fraction))

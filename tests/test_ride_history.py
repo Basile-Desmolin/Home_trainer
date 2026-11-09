@@ -36,6 +36,38 @@ def test_steady_hour_at_ftp_is_100_tss():
     assert r.avg_hr_bpm == 140 and r.avg_cadence_rpm == 90
 
 
+def heart_ride():
+    """190 s à 200 W : 60 s à 130 bpm, 60 s à 150, 30 s à 170, 20 s à 180, 10 s à 185, 10 s sans FC."""
+    rates = [130] * 60 + [150] * 60 + [170] * 30 + [180] * 20 + [185] * 10 + [None] * 10
+    return [S(i + 1, 200, heart_rate_bpm=bpm) for i, bpm in enumerate(rates)]
+
+
+def test_heart_rate_zones_percent_of_max_and_calories():
+    """Étape 11g. FC max 190 : 130 bpm = 68 % (i1), 150 = 79 % (i2), 170 = 89 % (i3), 180 = 95 % (i4),
+    185 = 97 % (i5) ; les 10 s sans FC ne vont dans aucune zone. FC moyenne 27 350 / 180 = 151,9 bpm,
+    soit 80 % de la FC max ; max 185 = 97 %. 190 s à 200 W = 38 kJ ≈ 38 kcal."""
+    r = summarize(heart_ride(), 250, "FC", 1_759_480_000, hr_max=190)
+    assert r.hr_max == 190 and r.hr_zone_s == [60, 60, 30, 20, 10]
+    assert r.avg_hr_bpm == pytest.approx(27_350 / 180)
+    assert r.hr_pct(r.avg_hr_bpm) == pytest.approx(79.97, abs=0.01) and r.hr_pct(r.max_hr_bpm) == pytest.approx(97.37, abs=0.01)
+    assert r.work_kj == pytest.approx(38) and r.calories_kcal == pytest.approx(38)
+    # Sans FC max (profil sans FC max) ou sans cardio : pas de zones de FC.
+    assert summarize(heart_ride(), 250).hr_zone_s == [] and summarize(heart_ride(), 250).hr_pct(150) is None
+    assert summarize(ride([200] * 60, heart_rate_bpm=None), 250, hr_max=190).hr_zone_s == []
+
+
+def test_heart_zones_survive_the_history_and_old_entries_still_load():
+    r = summarize(heart_ride(), 250, "FC", 1_759_480_000, hr_max=190)
+    again = RideSummary.from_dict(json.loads(json.dumps(r.to_dict())))
+    assert again.hr_zone_s == [60, 60, 30, 20, 10] and again.hr_max == 190
+    old = r.to_dict()
+    del old["hr_zone_s"], old["hr_max"]  # sortie enregistrée avant l'étape 11
+    before = RideSummary.from_dict(old)
+    assert before.hr_zone_s == [] and before.hr_max is None
+    broken = dict(r.to_dict(), hr_zone_s=[1, 2])  # liste incomplète (fichier modifié à la main)
+    assert RideSummary.from_dict(broken).hr_zone_s == []
+
+
 def test_intervals_raise_normalized_power_above_average():
     powers = ([400] * 60 + [100] * 60) * 10
     r = summarize(ride(powers), 250)

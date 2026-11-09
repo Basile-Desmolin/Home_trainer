@@ -152,6 +152,34 @@ class WorkoutSession(_LiveStatsMixin):
         if self.index >= len(self.segments):
             self._finish()
 
+    def previous_step(self) -> None:
+        """Revient à la brique précédente (saut accidentel, étape 11) : reprise là où elle a été
+        quittée si elle a été passée avant son terme, sinon à son début. Le temps écoulé continue ;
+        le .fit ouvre un nouveau tour (le numéro de brique change). Sur la première brique : elle
+        recommence."""
+        if self.state is State.FINISHED:
+            return
+        if self.index == 0:
+            self.restart_step()
+            return
+        back = self.index - 1
+        seg = self.segments[back]
+        left = next((c for c in reversed(self._changes) if c.index == back), None)
+        done = 0.0 if left is None else left.position_s - seg.start_s
+        self._changes.append(_BrickChange(self.elapsed_s, self.index, self.target_w, self.position_s))
+        self.index = back
+        # Brique ouverte (pas de place sur l'axe) ou finie : on la reprend au début.
+        self.step_elapsed_s = done if seg.duration_s and done < seg.duration_s - 1 else 0.0
+
+    def restart_step(self) -> None:
+        """Recommence la brique en cours à son début (étape 11). Le temps écoulé continue ; le .fit
+        ouvre un nouveau tour, comme la touche Tab."""
+        if self.state is State.FINISHED:
+            return
+        self._changes.append(_BrickChange(self.elapsed_s, self.index, self.target_w, self.position_s))
+        self.step_elapsed_s = 0.0
+        self.new_lap()
+
     def tick(self, dt: float) -> None:
         """Fait avancer la séance de `dt` secondes (sans effet hors « en cours »)."""
         if self.state is not State.RUNNING:
@@ -200,7 +228,8 @@ class WorkoutSession(_LiveStatsMixin):
     def chart_runs(self) -> list[list[Sample]]:
         """Mesures placées sur l'axe de la séance, pour le graphique, en tronçons roulés d'une
         traite : passer une brique avant son terme fait sauter l'axe sans faire avancer le temps
-        écoulé, et ouvre un nouveau tronçon (rien n'a été roulé sur la partie sautée).
+        écoulé, et ouvre un nouveau tronçon (rien n'a été roulé sur la partie sautée). Revenir en
+        arrière (brique précédente ou recommencée, étape 11) ouvre aussi un tronçon.
 
         Étape 9 : tenu au fil des mesures (seules les nouvelles sont placées) ; recalculé en entier
         si la liste a été remplacée ou raccourcie. Le résultat est partagé : ne pas le modifier."""
@@ -213,8 +242,9 @@ class WorkoutSession(_LiveStatsMixin):
                 n, runs = done, kept
         previous: Sample | None = samples[n - 1] if n else None
         for x in samples[n:]:
-            jumped = (previous is not None and x.position_s is not None and previous.position_s is not None
-                      and x.position_s - previous.position_s > x.t - previous.t + 1.0)
+            moved = (None if previous is None or x.position_s is None or previous.position_s is None
+                     else x.position_s - previous.position_s)
+            jumped = moved is not None and (moved > x.t - previous.t + 1.0 or moved < -1.0)
             if not runs or jumped:
                 runs.append([])
             runs[-1].append(x if x.position_s is None else replace(x, t=x.position_s))
@@ -318,6 +348,17 @@ class FreeRideSession(_LiveStatsMixin):
         self.samples: list[Sample] = []
         self.exported = False
         self.export_asked = False
+        self.lap = 0  # numéro de tour des mesures (après une séance : un de plus que sa dernière brique)
+        self.after: WorkoutSession | None = None  # séance dont ce mode libre est la suite (même fichier)
+
+    def continue_from(self, workout: WorkoutSession) -> None:
+        """Suite d'une séance finie, dans le même fichier (étape 11) : ses mesures sont reprises (même
+        liste, donc même secours), le temps continue, et le mode libre forme un tour à part."""
+        self.samples = workout.samples
+        self.elapsed_s = workout.elapsed_s
+        self.lap = len(workout.segments)
+        self.manual_lap = workout.manual_lap
+        self.after = workout
 
     def start(self) -> None:
         if self.state in (State.READY, State.PAUSED):
@@ -360,8 +401,8 @@ class FreeRideSession(_LiveStatsMixin):
         erg = self.mode is FreeMode.ERG
         self.samples.append(Sample(self.elapsed_s if t is None else t, power_w, self.target_w if erg else None, cadence_rpm,
                                    heart_rate_bpm, None if erg else self.grade_pct, speed_kmh,
-                                   time.time() if at is None else at, balance_left_pct=balance_left_pct,
-                                   manual_lap=self.manual_lap))
+                                   time.time() if at is None else at, self.lap,
+                                   balance_left_pct=balance_left_pct, manual_lap=self.manual_lap))
 
     @property
     def target_pct(self) -> float | None:
@@ -599,7 +640,11 @@ def ride_title(session: WorkoutSession | FreeRideSession | RouteSession) -> tupl
         if session.ftp:
             text += f", FTP {session.ftp:.0f} W"
         return title, text + "."
-    slope = any(x.grade_pct is not None for x in session.samples)
-    erg = any(x.grade_pct is None for x in session.samples)
+    free = [x for x in session.samples if x.lap == session.lap]
+    slope = any(x.grade_pct is not None for x in free)
+    erg = any(x.grade_pct is None for x in free)
     kind = "ERG et pente simulée" if slope and erg else "pente simulée" if slope else "ERG"
+    if session.after is not None:  # suite d'une séance, même fichier : titre de la séance
+        title, text = ride_title(session.after)
+        return title, f"{text[:-1]}, puis mode libre ({kind})."
     return "Mode libre", f"Mode libre sur home trainer ({kind})."

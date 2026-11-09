@@ -12,6 +12,8 @@ from datetime import date, timedelta
 from dataclasses import asdict, dataclass, field, fields
 from typing import Iterable, Protocol
 
+from .heart_zones import ESIE_NAMES, esie_zone
+
 # Bornes hautes des zones de Coggan en % FTP (la dernière n'a pas de borne).
 ZONE_LIMITS = [55, 76, 91, 106, 121, 151]
 ZONE_NAMES = ["Récup", "Endurance", "Tempo", "Seuil", "VO2max", "Anaérobie", "Neuromusculaire"]
@@ -57,6 +59,20 @@ class RideSummary:
     zone_s: list[float] = field(default_factory=lambda: [0.0] * len(ZONE_NAMES))
     best_w: dict[int, float] = field(default_factory=dict)  # durée (s) -> meilleure puissance moyenne
     file: str | None = None  # fichier enregistré
+    # Étape 11 : FC max du profil au moment de la sortie, et temps dans chaque zone de FC ESIE (i1 à i5) ;
+    # vides sans FC max ou sans cardio (sorties d'avant l'étape 11 aussi).
+    hr_max: float | None = None
+    hr_zone_s: list[float] = field(default_factory=list)
+
+    @property
+    def calories_kcal(self) -> float:
+        """Calories dépensées ≈ travail fourni : 1 kJ ≈ 1 kcal (rendement du corps ≈ 24 %, compensé
+        par la conversion 1 kcal = 4,184 kJ)."""
+        return self.work_kj
+
+    def hr_pct(self, bpm: float | None) -> float | None:
+        """`bpm` en % de la FC max du profil, None sans l'un ou l'autre."""
+        return bpm / self.hr_max * 100 if bpm and self.hr_max else None
     # Rempli au moment du bilan, pas enregistré : meilleures puissances battues (durée -> ancien record).
     records: dict[int, float | None] = field(default_factory=dict)
 
@@ -87,6 +103,9 @@ class RideSummary:
         values["best_w"] = {int(k): float(v) for k, v in (data.get("best_w") or {}).items()}
         zones = list(data.get("zone_s") or [])
         values["zone_s"] = (zones + [0.0] * len(ZONE_NAMES))[:len(ZONE_NAMES)]
+        heart = data.get("hr_zone_s")
+        values["hr_zone_s"] = ([float(x) for x in heart][:len(ESIE_NAMES)]
+                               if isinstance(heart, list) and len(heart) == len(ESIE_NAMES) else [])
         return cls(**values)
 
 
@@ -274,8 +293,9 @@ def _mean(values: Iterable[float | None]) -> float | None:
     return sum(kept) / len(kept) if kept else None
 
 
-def summarize(samples: list[_Sample], ftp: float, title: str = "", start: float = 0.0) -> RideSummary:
-    """Bilan des mesures d'une sortie."""
+def summarize(samples: list[_Sample], ftp: float, title: str = "", start: float = 0.0,
+              hr_max: float | None = None) -> RideSummary:
+    """Bilan des mesures d'une sortie ; avec la FC max du profil, temps par zone de FC (ESIE)."""
     powers = [max(0.0, float(s.power_w)) for s in samples]
     steps, distance, has_speed = [], 0.0, False
     previous = None
@@ -292,6 +312,13 @@ def summarize(samples: list[_Sample], ftp: float, title: str = "", start: float 
         zones[zone_of(p, ftp)] += dt
     best = {d: round(w, 1) for d in CURVE_S if (w := best_average(powers, d)) is not None}
     rates = [s.heart_rate_bpm for s in samples if s.heart_rate_bpm]
+    heart_zones: list[float] = []
+    if hr_max and rates:  # secondes sans FC (ceinture décrochée) : dans aucune zone
+        heart_zones = [0.0] * len(ESIE_NAMES)
+        for s, dt in zip(samples, steps):
+            zone = esie_zone(s.heart_rate_bpm, hr_max)
+            if zone is not None:
+                heart_zones[zone] += dt
     return RideSummary(
         start=start, title=title, duration_s=duration, ftp=float(ftp),
         avg_power_w=sum(powers) / len(powers) if powers else 0.0,
@@ -301,7 +328,7 @@ def summarize(samples: list[_Sample], ftp: float, title: str = "", start: float 
         distance_km=distance / 1000 if has_speed else None,
         avg_hr_bpm=_mean(rates), max_hr_bpm=max(rates) if rates else None,
         avg_cadence_rpm=_mean(s.cadence_rpm for s in samples),
-        zone_s=zones, best_w=best)
+        zone_s=zones, best_w=best, hr_max=float(hr_max) if hr_max else None, hr_zone_s=heart_zones)
 
 
 def fitness(daily_tss: dict[date, float], today: date) -> tuple[float, float]:

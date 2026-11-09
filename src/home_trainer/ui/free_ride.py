@@ -194,7 +194,7 @@ class FreeRidePanel(QWidget):
             b = QPushButton(text)
             b.setObjectName("mode")
             b.setCheckable(True)
-            b.setToolTip(tip)
+            b.setToolTip(f"{tip}\nTouche P : ERG ↔ pente")
             b.setFocusPolicy(Qt.NoFocus)
             group.addButton(b)
             top.addWidget(b)
@@ -238,8 +238,8 @@ class FreeRidePanel(QWidget):
                 step = BIG_STEP_PCT if big else GRADE_STEP_PCT
                 text = ("+" if direction > 0 else "−") + grade_text(step).replace(" ", "\u202f")
             b.setText(text.replace("-", "−"))
-        self.hint.setText(keycaps("[Espace] pause   [↑] [↓] ±5 W   [Pg↑] [Pg↓] ±25 W   [Tab] tour" if erg
-                                  else "[Espace] pause   [↑] [↓] ±0,5 %   [Maj+↑] [Maj+↓] braquet   [Tab] tour"))
+        self.hint.setText(keycaps("[Espace] pause   [↑] [↓] ±5 W   [Pg↑] [Pg↓] ±25 W   [P] pente   [Tab] tour" if erg
+                                  else "[Espace] pause   [↑] [↓] ±0,5 %   [Maj+↑] [Maj+↓] braquet   [P] ERG   [Tab] tour"))
 
     def refresh(self, view: RideView) -> None:
         """Cartes du catalogue et consigne ; le braquet virtuel (`view.gear`) est montré en pente."""

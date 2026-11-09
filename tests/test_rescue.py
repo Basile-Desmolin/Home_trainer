@@ -103,7 +103,7 @@ def new_window(tmp_path) -> MainWindow:
 @pytest.fixture
 def window(app, tmp_path, monkeypatch):
     w = new_window(tmp_path)
-    w.ask_ride_export = lambda parent, default, summary="": default
+    w.ask_ride_export = lambda parent, default, summary="", **kw: default
     w.confirm_stop = lambda parent, action, question: True
     w.warnings = []
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda parent, title, text: w.warnings.append(text))
@@ -154,7 +154,7 @@ def test_rescue_follows_ftp_change(window, tmp_path):
 def test_discarded_ride_removes_rescue(window, tmp_path):
     pedal(window.session, 30)
     save_now(window)
-    window.ask_ride_export = lambda parent, default, summary="": DISCARD
+    window.ask_ride_export = lambda parent, default, summary="", **kw: DISCARD
     window.finish_button.click()
     assert rescues(tmp_path) == []
 

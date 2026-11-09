@@ -19,8 +19,8 @@ from ..heart_zones import ESIE_NAMES, esie_zone
 from ..sensors import HeartRateReading
 from .chart import CADENCE, HEART, TEXT, hms, zone_color
 from .power import Reading
-from .session import FreeMode, FreeRideSession, RouteSession, WorkoutSession
-from .theme import zone_index
+from .session import FreeMode, FreeRideSession, RouteSession, State, WorkoutSession
+from .theme import WAIT as ALERT, zone_index
 
 
 class Mode(str, Enum):
@@ -75,6 +75,7 @@ class RideView:
     on_screen: frozenset[str] = frozenset()  # indicateurs affichés sur l'écran (rempli par la grille)
     smoothing_s: int = 0  # puissance de `reading` : instantanée (0) ou moyenne sur n secondes
     hr_max: int | None = None  # FC max du profil (zones de FC ESIE)
+    cadence_low: int | None = None  # seuil passé par en dessous depuis 5 s (alerte de cadence basse), sinon None
 
     @property
     def mode(self) -> Mode:
@@ -94,6 +95,7 @@ class Shown:
     progress: float | None = None  # avancement de 0 à 1 (barre d'avancement)
     title: str | None = None  # titre de la carte, s'il diffère de celui de l'indicateur
     color: str | None = None  # couleur de la valeur, si elle dépend de la mesure (zone de la cible, pente)
+    tint: str | None = None  # teinte de la carte (alerte de cadence basse)
 
 
 @dataclass(frozen=True)
@@ -168,8 +170,11 @@ def _cadence(v: RideView) -> Shown:
     # En mode libre, le braquet ne sert qu'en pente.
     erg = isinstance(s, FreeRideSession) and s.mode is FreeMode.ERG
     gear = f"braquet {v.gear}" if v.gear and not erg else None
-    return Shown(f"{r.cadence_rpm:.0f} tr/min" if r and r.cadence_rpm is not None else "—",
-                 _join(average is not None and f"moy. {average:.0f}", speed, gear))
+    value = f"{r.cadence_rpm:.0f} tr/min" if r and r.cadence_rpm is not None else "—"
+    if v.cadence_low is not None:  # alerte : en orange, et dit en premier
+        return Shown(value, _join(f"cadence basse (< {v.cadence_low})", average is not None and f"moy. {average:.0f}"),
+                     color=ALERT, tint=ALERT)
+    return Shown(value, _join(average is not None and f"moy. {average:.0f}", speed, gear))
 
 
 def _heart(v: RideView) -> Shown:
@@ -217,7 +222,15 @@ def _tour(v: RideView) -> Shown:
 
 def _elapsed(v: RideView) -> Shown:
     s = v.session
-    return Shown(hms(s.elapsed_s), f"D+ fait {s.climb_done_m:.0f} m" if isinstance(s, RouteSession) else "")
+    if isinstance(s, RouteSession):
+        return Shown(hms(s.elapsed_s), f"D+ fait {s.climb_done_m:.0f} m")
+    if isinstance(s, WorkoutSession):  # en dessous : reste de la brique et de la séance
+        if s.state is State.FINISHED:
+            return Shown(hms(s.elapsed_s), "séance finie")
+        brick = s.step_remaining_s
+        return Shown(hms(s.elapsed_s), _join("brique ouverte" if brick is None else f"brique {hms(brick)}",
+                                             f"reste {hms(s.total_remaining_s)}"))
+    return Shown(hms(s.elapsed_s))
 
 
 def _workout_remaining(v: RideView) -> Shown:
@@ -243,6 +256,8 @@ def _target(v: RideView) -> Shown:
             return Shown(f"{s.target_w} W", color=zone_color(s.target_w, v.ftp).name())
         return Shown(grade_text(s.grade_pct), title="PENTE", color=grade_color(s.grade_pct).name())
     target, bpm = s.target_w, s.target_bpm
+    if s.state is State.FINISHED:
+        return Shown("fin", "séance terminée")
     if target is None and bpm is not None:  # séance en FC roulée aux vitesses
         return Shown(f"{bpm:.0f} bpm", title="CIBLE FC", color=HEART)
     if target is None:

@@ -34,7 +34,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QElapsedTimer, QEvent, QLocale, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy, QSpinBox,
@@ -50,8 +50,8 @@ from ..heart_zones import to_power
 from ..history import FILE_NAME as HISTORY_FILE, RideHistory
 from ..logs import setup_logging
 from ..keep_awake import KeepAwake
-from ..profiles import (MAX_BIKE_KG, MIN_BIKE_KG, SPEED_APP, SPEED_TRAINER, Profile, ProfileBook,
-                        default_rides_root)
+from ..profiles import (BEEP_BEFORE_CHOICES, CADENCE_ALERT_CHOICES, DEFAULT_CADENCE_ALERT_RPM, MAX_BIKE_KG,
+                        MIN_BIKE_KG, SPEED_APP, SPEED_TRAINER, Profile, ProfileBook, default_rides_root)
 from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
@@ -73,21 +73,24 @@ from .metric import Metric, MetricGrid, Slot
 from .mini import MiniWindow, foreground_window, layout_key as mini_layout_key
 from .profiles import choose_profile
 from .history import HistoryDialog
-from .ride_export import DISCARD, RideExport, ask_ride_export
+from .ride_export import CONTINUE, DISCARD, RideExport, ask_ride_export
 from .rescue import (DISCARD as RESCUE_DISCARD, RESCUE_EVERY_S, SAVE as RESCUE_SAVE, RescueFile, RescuedRide,
                      ask_rescued, ask_unsaved, duration_text, find_rescued, remove_file, rescue_dir)
 from .power import (SMOOTHING_CHOICES_S, PowerAverage, PowerSource, Reading, SimulatedTrainer, open_power_source,
                     next_speed_kmh)
 from .route_ride import RoutePanel
 from .theme import (GOOD, OFF, WAIT, dot, hint_label, icon, install, keycaps, number_font, pill, set_icon, set_style,
-                    zone_index, zone_label)
+                    SUB_PX, window_scale, zone_index, zone_label)
+from .sounds import SOUND_NAMES, BeepPlayer
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
                       FreeRideSession, RouteSession, SecondSampler, State, WorkoutSession, brick_summary,
                       ride_points, ride_title)
 
 log = logging.getLogger(__name__)
 
-BEEP_BEFORE_S = 3  # bip et compte à rebours aux 3 dernières secondes d'une brique
+BEEP_BEFORE_S = 3  # bip et compte à rebours aux 3 dernières secondes d'une brique (réglable : profil)
+BEEP_ALWAYS_S = 3  # au-delà de 3 s : un bip au début du compte à rebours, puis aux 3 dernières secondes
+CADENCE_ALERT_AFTER_S = 5  # alerte de cadence basse après 5 s sous le seuil (pas pour un coup de pédale)
 BRICK_NOTE_S = 8.0  # bilan de la brique finie affiché 8 s
 BRICK_NOTE_MIN_S = 5  # pas de bilan pour une brique passée aussitôt (moins de 5 s roulées)
 
@@ -161,6 +164,12 @@ class MainWindow(QMainWindow):
         self._rescued_at = time.monotonic()
         self._proposing = False
         self._closed = False  # fenêtre fermée : plus rien à proposer (proposition différée par QTimer)
+        # Tailles des chiffres suivant la fenêtre (étape 11) : facteur recalculé peu après un redimensionnement.
+        self.scale = 1.0
+        self._scale_timer = QTimer(self)
+        self._scale_timer.setSingleShot(True)
+        self._scale_timer.setInterval(80)
+        self._scale_timer.timeout.connect(self._apply_scale)
         self.ask_rescued = ask_rescued  # sortie retrouvée au lancement (remplaçable dans les tests)
         self.ask_unsaved = ask_unsaved  # ni .fit ni secours : Réessayer / Jeter
         self._keep_in_profile = True  # FTP et poids changés : gardés dans le profil (sauf `--ftp`, `--weight`)
@@ -201,8 +210,17 @@ class MainWindow(QMainWindow):
         # Puissance affichée : instantanée (0) ou moyenne sur 3, 5, 10, 30 s (choix du profil).
         self.power_average = PowerAverage()
         self.smoothing_s = 0
-        # Changement de brique : bip aux 3 dernières secondes (choix du profil), bilan de la brique finie.
+        # Changement de brique : bip et compte à rebours (son et durée choisis dans le profil), bilan de la
+        # brique finie.
         self.brick_beep = True
+        self.beep_sound = "double"
+        self.beep_before_s = BEEP_BEFORE_S
+        self.beep_last_distinct = True
+        self.beeper = BeepPlayer()
+        # Alerte de cadence basse : seuil du profil (0 : pas d'alerte), et depuis quand (temps de la sortie)
+        # la cadence est sous ce seuil.
+        self.cadence_alert_rpm = DEFAULT_CADENCE_ALERT_RPM
+        self._cadence_low_since: float | None = None
         self._brick_index: int | None = None  # brique suivie (bilan quand elle change)
         self._brick_note: tuple[str, float] | None = None  # bilan affiché, jusqu'à quand (time.monotonic)
         self._last_beep: tuple[int, int] | None = None  # (brique, seconde) du dernier bip
@@ -463,7 +481,10 @@ class MainWindow(QMainWindow):
         self.next_button = QPushButton("Brique suivante")
         self.next_button.setIcon(icon("next"))
         self.next_button.clicked.connect(self._next_step)
-        self.next_button.setToolTip("Raccourci : → ou N")
+        self.next_button.setToolTip("Raccourci : → ou N\nClic droit : brique précédente (←), recommencer la brique (R)")
+        self.next_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.next_button.customContextMenuRequested.connect(
+            lambda pos: self._step_menu().popup(self.next_button.mapToGlobal(pos)))
         self.reset_button = QPushButton("Recommencer")
         self.reset_button.setIcon(icon("restart"))
         self.reset_button.clicked.connect(self.restart_ride)
@@ -546,15 +567,20 @@ class MainWindow(QMainWindow):
 
     def _build_shortcuts(self) -> None:
         # ↑ ↓ : ±1 % sur une séance, ±5 W en mode libre ; Page↑ Page↓ : ±5 % ou ±25 W.
-        for keys, slot in (((Qt.Key_Space,), self._toggle),
+        for keys, slot in (((Qt.Key_Space,), self._space),
                            ((Qt.Key_Up, Qt.Key_Plus, Qt.Key_Equal), lambda: self._step(+1)),
                            ((Qt.Key_Down, Qt.Key_Minus), lambda: self._step(-1)),
                            ((Qt.Key_PageUp,), lambda: self._step(+5)),
                            ((Qt.Key_PageDown,), lambda: self._step(-5)),
-                           ((Qt.Key_Right, Qt.Key_N), self._next_step)):
+                           ((Qt.Key_Right, Qt.Key_N), self._next_step),
+                           ((Qt.Key_Left,), self.previous_step),
+                           ((Qt.Key_R,), self.restart_step)):
             for key in keys:
                 QShortcut(QKeySequence(key), self, activated=slot)
         QShortcut(QKeySequence(Qt.Key_E), self, activated=self.toggle_erg)
+        QShortcut(QKeySequence(Qt.Key_P), self, activated=self.toggle_free_mode)  # mode libre : ERG ↔ pente
+        QShortcut(QKeySequence(Qt.Key_F11), self, activated=self.toggle_full_screen)
+        self._was_maximized = False
         # Maj+↑ / Maj+↓ : braquet virtuel plus dur / plus souple, comme les boutons + / − du Zwift Click.
         QShortcut(QKeySequence("Shift+Up"), self, activated=lambda: self.shift_gear(+1))
         QShortcut(QKeySequence("Shift+Down"), self, activated=lambda: self.shift_gear(-1))
@@ -747,6 +773,33 @@ class MainWindow(QMainWindow):
             self.ride_route(old.route)
             self.route.difficulty_pct = old.difficulty_pct
 
+    def continue_free(self, workout: WorkoutSession) -> None:
+        """Après une séance finie : le mode libre prend la suite, dans le même fichier (même mesures,
+        même secours), à la puissance de la dernière brique, en ERG, et démarre aussitôt."""
+        if workout.state is not State.FINISHED or workout.exported:
+            return
+        self.end_ride(self.free)  # le mode libre d'avant, s'il a été roulé, part dans son propre fichier
+        last = next((x.target_w for x in reversed(workout.samples) if x.target_w), None)
+        old = self.free
+        self.free = FreeRideSession(self.ftp, last or old.target_w, old.rider_kg, FreeMode.ERG, old.grade_pct)
+        self.free.bike_kg = self.bike_kg
+        self.free.continue_from(workout)
+        workout.exported = True  # enregistrée avec sa suite, au bouton « Terminer » du mode libre
+        self.free_panel.chart.set_session(self.free)
+        self.pages.setCurrentWidget(self.free_panel)
+        self.setWindowTitle(f"{workout.workout.name} + mode libre — Home trainer")
+        self.free.start()
+        self.clock.restart()
+        self._push_target()
+        self._refresh()
+        self.statusBar().showMessage("Mode libre : la suite de la séance, enregistrée dans le même fichier "
+                                     "au bouton « Terminer »", 10000)
+
+    def toggle_free_mode(self) -> None:
+        """Mode libre : ERG ↔ pente (touche P)."""
+        if self.free_ride:
+            self.set_free_mode(FreeMode.SLOPE if self.free.mode is FreeMode.ERG else FreeMode.ERG)
+
     def _toggle_free_ride(self) -> None:
         self.leave_free_ride() if self.free_ride else self.enter_free_ride()
 
@@ -780,12 +833,50 @@ class MainWindow(QMainWindow):
         self.clock.restart()
         self._refresh()
 
+    def _space(self) -> None:
+        """Touche Espace : pause et reprise. Séance finie ou parcours arrivé : la relance se confirme
+        (un Espace de trop ne repart plus aussitôt sur une nouvelle sortie)."""
+        if (not self.free_ride and self.active.state is State.FINISHED and not self.confirm_stop(
+                self, "Recommencer", "La sortie est finie. En recommencer une depuis le début ?")):
+            return
+        self._toggle()
+
     def _next_step(self) -> None:
         if self.free_ride or self.route_ride:
             return
         self.session.next_step()
         self._push_target()
         self._refresh()
+
+    def previous_step(self) -> None:
+        """Brique précédente (←) : rattrape un saut de brique accidentel."""
+        if self.free_ride or self.route_ride:
+            return
+        self.session.previous_step()
+        self._last_beep = None  # le compte à rebours de la brique reprise sonne à nouveau
+        self._push_target()
+        self._refresh()
+
+    def restart_step(self) -> None:
+        """Recommencer la brique en cours (R)."""
+        if self.free_ride or self.route_ride:
+            return
+        self.session.restart_step()
+        self._last_beep = None
+        self._push_target()
+        self._refresh()
+
+    def _step_menu(self) -> QMenu:
+        """Clic droit sur « Brique suivante » : brique précédente, recommencer la brique."""
+        menu = QMenu(self)
+        finished = self.session.state is State.FINISHED
+        back = menu.addAction(icon("back"), "Brique précédente  (←)")
+        back.triggered.connect(self.previous_step)
+        again = menu.addAction(icon("restart"), "Recommencer la brique  (R)")
+        again.triggered.connect(self.restart_step)
+        for action in (back, again):
+            action.setEnabled(not finished)
+        return menu
 
     def _reset(self) -> None:
         self.load(self.session.workout)
@@ -1097,9 +1188,15 @@ class MainWindow(QMainWindow):
         history = self.ride_history()
         if history is not None:
             history.mark_records(summary)
-        choice = self.ask_ride_export(self, default, summary)
+        # Séance finie : « Continuer en mode libre » est proposé (la suite ira dans le même fichier).
+        can_continue = isinstance(session, WorkoutSession) and session.state is State.FINISHED
+        choice = (self.ask_ride_export(self, default, summary, can_continue=True) if can_continue
+                  else self.ask_ride_export(self, default, summary))
         if choice is None:
             return False
+        if choice == CONTINUE:
+            self.continue_free(session)
+            return False  # rien d'enregistré : la sortie continue
         if choice == DISCARD:
             session.exported = True
             self._drop_rescue(session)  # jetée volontairement : le secours part aussi
@@ -1250,17 +1347,21 @@ class MainWindow(QMainWindow):
         remove_file(ride.path)
         history = self.ride_history()
         if history is not None:
-            summary = summarize(ride.samples, self.ftp, ride.title, ride.start or time.time())
+            summary = summarize(ride.samples, self.ftp, ride.title, ride.start or time.time(), self._hr_max())
             summary.file = str(Path(path).absolute())
             self._add_to_history(history, summary)
         self.statusBar().showMessage(f"Sortie retrouvée enregistrée : {path.name}", 15000)
         self.send_rides()
 
     def ride_summary(self, session: WorkoutSession | FreeRideSession | RouteSession) -> RideSummary:
-        """Bilan de la sortie : chiffres, temps par zone, meilleures puissances."""
+        """Bilan de la sortie : chiffres, temps par zone (puissance, et FC avec la FC max du profil),
+        meilleures puissances."""
         title, _ = ride_title(session)
         start = next((x.at for x in session.samples if x.at is not None), time.time())
-        return summarize(session.samples, self.ftp, title, start)
+        return summarize(session.samples, self.ftp, title, start, self._hr_max())
+
+    def _hr_max(self) -> int | None:
+        return self.profile.hr_max if self.profile is not None else None
 
     def ride_history(self) -> RideHistory | None:
         """Historique du profil, dans son dossier des sorties (None sans dossier des sorties)."""
@@ -1380,6 +1481,10 @@ class MainWindow(QMainWindow):
         self.set_smoothing(profile.power_smoothing_s)
         self.set_speed_source(profile.speed_source)
         self.brick_beep = profile.brick_beep is not False
+        self.beep_sound, self.beep_before_s = profile.beep_sound, profile.beep_before_s
+        self.beep_last_distinct = profile.beep_last_distinct
+        self.beeper.preload(self.beep_sound)  # premier bip à l'heure
+        self.cadence_alert_rpm = profile.cadence_alert_rpm
         chosen = profile.chart_curves
         self.set_curves(DEFAULT_CURVES if not isinstance(chosen, list) else chosen)
         self.profile_action.setText(f"Profil : {profile.name}")
@@ -1405,6 +1510,8 @@ class MainWindow(QMainWindow):
         vitesse (carte vitesse, et carte cadence qui la montre quand la carte vitesse n'est pas à l'écran)."""
         if key in ("speed", "cadence"):
             self._speed_menu(menu)
+        if key == "cadence":
+            self._cadence_menu(menu)
         if key not in ("power", "watts_per_kg"):
             return
         sub = menu.addMenu("Puissance affichée")
@@ -1512,6 +1619,7 @@ class MainWindow(QMainWindow):
                 active.ride(dt, reading.power_w if reading is not None else 0.0)
                 if active.state is State.FINISHED:
                     self._push_target()  # arrivée : résistance libre
+        self._watch_cadence(active, reading)
         if active is self.session:
             self._watch_brick()
         for session in (self.session, self.route):  # fin de séance ou arrivée : fenêtre d'enregistrement
@@ -1525,14 +1633,85 @@ class MainWindow(QMainWindow):
             self._refresh()
         self._refresh_mini()
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        super().resizeEvent(event)
+        self._scale_timer.start()  # une fois le redimensionnement fini, pas à chaque pixel
+
+    def _apply_scale(self) -> None:
+        """Chiffres à l'échelle de la fenêtre : cartes des trois écrans, anneau, intensité, consignes."""
+        scale = window_scale(self.width(), self.height())
+        if scale == self.scale:
+            return
+        self.scale = scale
+        for grid in self._grids().values():
+            grid.scale = scale  # les cartes recréées par un choix au clic droit gardent l'échelle
+        for card in self.findChildren(Metric):
+            card.set_scale(scale)
+        self.step_ring.set_scale(scale)
+        for label, size in ((self.intensity_label, 40), (self.free_panel.target_label, 84),
+                            (self.route_panel.grade_label, 72)):
+            label.setFont(number_font(round(size * scale)))
+        self._refresh()
+
+    def toggle_full_screen(self) -> None:
+        """F11 : plein écran, et retour à la fenêtre d'avant (F11 ou Échap)."""
+        if self.isFullScreen():
+            self.showMaximized() if self._was_maximized else self.showNormal()
+        else:
+            self._was_maximized = self.isMaximized()
+            self.showFullScreen()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        # Échap ne sort du plein écran que si personne d'autre ne l'a pris (case de saisie, menu).
+        if event.key() == Qt.Key_Escape and self.isFullScreen():
+            self.toggle_full_screen()
+            return
+        super().keyPressEvent(event)
+
     def changeEvent(self, event) -> None:  # noqa: N802 (API Qt)
         super().changeEvent(event)
         if event.type() == QEvent.WindowStateChange and not self.isMinimized():
             # Différé d'un tour : la fenêtre peut changer d'état pendant sa construction.
             QTimer.singleShot(0, lambda: None if self._closed or self.isMinimized() else self._refresh())
 
+    def _watch_cadence(self, active, reading) -> None:
+        """Alerte de cadence basse : en roulant, cadence mesurée sous le seuil. Une cadence de 0 (roue
+        libre, arrêt de pédalage) ou absente ne compte pas et remet l'alerte à zéro."""
+        cadence = getattr(reading, "cadence_rpm", None)
+        low = (self.cadence_alert_rpm > 0 and active.state is State.RUNNING and cadence is not None
+               and 0 < cadence < self.cadence_alert_rpm)
+        if not low:
+            self._cadence_low_since = None
+        elif self._cadence_low_since is None or self._cadence_low_since > active.elapsed_s:
+            self._cadence_low_since = active.elapsed_s
+
+    def cadence_low(self) -> int | None:
+        """Seuil de l'alerte si la cadence est sous ce seuil depuis `CADENCE_ALERT_AFTER_S`, sinon None."""
+        since = self._cadence_low_since
+        if since is None or self.active.elapsed_s - since < CADENCE_ALERT_AFTER_S:
+            return None
+        return self.cadence_alert_rpm
+
+    def set_cadence_alert(self, rpm: int) -> None:
+        """Seuil de l'alerte de cadence basse (0 : pas d'alerte) ; gardé dans le profil."""
+        self.cadence_alert_rpm = rpm if rpm in CADENCE_ALERT_CHOICES else DEFAULT_CADENCE_ALERT_RPM
+        self._cadence_low_since = None
+        if self.profile is not None and self.profile.cadence_alert_rpm != self.cadence_alert_rpm:
+            self.profile.cadence_alert_rpm = self.cadence_alert_rpm
+            self.profiles.save()
+        self._refresh()
+
+    def _cadence_menu(self, menu: QMenu) -> None:
+        sub = menu.addMenu("Alerte de cadence basse")
+        for rpm in CADENCE_ALERT_CHOICES:
+            action = sub.addAction("Pas d'alerte" if rpm == 0 else f"Sous {rpm} tr/min")
+            action.setCheckable(True)
+            action.setChecked(rpm == self.cadence_alert_rpm)
+            action.triggered.connect(lambda _=False, r=rpm: self.set_cadence_alert(r))
+
     def _watch_brick(self) -> None:
-        """Séance : bip aux 3 dernières secondes d'une brique, bilan de la brique quand elle change."""
+        """Séance : bip avant la fin d'une brique (`beep_before_s` ; au-delà de 3 s, un bip au début du
+        compte à rebours puis aux 3 dernières secondes), bilan de la brique quand elle change."""
         s = self.session
         if self._brick_index is None or s.index < self._brick_index:  # première brique, séance recommencée
             self._brick_index = s.index
@@ -1541,29 +1720,48 @@ class MainWindow(QMainWindow):
             self._brick_index = s.index
             if summary is not None and summary.seconds >= BRICK_NOTE_MIN_S:
                 self._brick_note = (summary.text(), time.monotonic() + BRICK_NOTE_S)
-        remaining = s.step_remaining_s
-        if s.state is State.RUNNING and remaining is not None and 0 < remaining <= BEEP_BEFORE_S:
-            key = (s.index, math.ceil(remaining))
+        second = self._countdown_s()
+        if second is not None:
+            key = (s.index, second)
             if key != self._last_beep:
                 self._last_beep = key
-                if self.brick_beep:
-                    self._beep()
+                if self.brick_beep and (second <= BEEP_ALWAYS_S or second == self.beep_before_s):
+                    self._beep(last=second == 1)
 
-    def _beep(self) -> None:
-        QApplication.beep()  # son système de Windows
+    def _beep(self, last: bool = False) -> None:
+        self.beeper.play(self.beep_sound, last, self.beep_last_distinct)
 
     def _countdown_s(self) -> int | None:
-        """Secondes avant la brique suivante (3, 2, 1) pendant la séance, sinon None."""
+        """Secondes avant la brique suivante (… 3, 2, 1) pendant la séance, sinon None."""
         s = self.session
         remaining = s.step_remaining_s
-        if s.state is State.RUNNING and remaining is not None and 0 < remaining <= BEEP_BEFORE_S:
+        if s.state is State.RUNNING and remaining is not None and 0 < remaining <= self.beep_before_s:
             return math.ceil(remaining)
         return None
 
     def set_brick_beep(self, on: bool) -> None:
         self.brick_beep = on
-        if self.profile is not None and self.profile.brick_beep != on:
-            self.profile.brick_beep = on
+        self._save_beep()
+
+    def set_beep(self, sound: str | None = None, before_s: int | None = None,
+                 last_distinct: bool | None = None) -> None:
+        """Son, durée du compte à rebours, son distinct à la dernière seconde : gardés dans le profil."""
+        if sound in SOUND_NAMES:
+            self.beep_sound = sound
+            self.beeper.preload(sound)
+        if before_s in BEEP_BEFORE_CHOICES:
+            self.beep_before_s = before_s
+        if last_distinct is not None:
+            self.beep_last_distinct = last_distinct
+        self._save_beep()
+
+    def _save_beep(self) -> None:
+        p = self.profile
+        if p is None:
+            return
+        chosen = (self.brick_beep, self.beep_sound, self.beep_before_s, self.beep_last_distinct)
+        if (p.brick_beep, p.beep_sound, p.beep_before_s, p.beep_last_distinct) != chosen:
+            p.brick_beep, p.beep_sound, p.beep_before_s, p.beep_last_distinct = chosen
             self.profiles.save()
 
     def curves(self) -> set[str]:
@@ -1594,14 +1792,42 @@ class MainWindow(QMainWindow):
     def _chart_menu(self, chart: QWidget, pos) -> None:
         self._curves_menu().popup(chart.mapToGlobal(pos))
 
-    def _target_menu(self, pos) -> None:
-        """Clic droit sur la carte cible de la séance : bip avant chaque brique."""
+    def _beep_menu(self) -> QMenu:
+        """Bip avant chaque brique : marche, son, durée du compte à rebours, son de la dernière seconde."""
         menu = QMenu(self)
-        action = menu.addAction("Bip 3 s avant chaque brique")
+        action = menu.addAction(f"Bip {self.beep_before_s} s avant chaque brique")
         action.setCheckable(True)
         action.setChecked(self.brick_beep)
         action.toggled.connect(self.set_brick_beep)
-        menu.popup(self.m_target.mapToGlobal(pos))
+        sounds = menu.addMenu("Son du bip")
+        group = QActionGroup(sounds)
+        for key, name in SOUND_NAMES.items():
+            choice = sounds.addAction(name)
+            choice.setCheckable(True)
+            choice.setChecked(key == self.beep_sound)
+            group.addAction(choice)
+            choice.triggered.connect(lambda _=False, k=key: (self.set_beep(sound=k), self._beep()))
+        durations = menu.addMenu("Compte à rebours")
+        group = QActionGroup(durations)
+        for seconds in BEEP_BEFORE_CHOICES:
+            choice = durations.addAction(f"{seconds} s avant la brique suivante")
+            choice.setCheckable(True)
+            choice.setChecked(seconds == self.beep_before_s)
+            group.addAction(choice)
+            choice.triggered.connect(lambda _=False, s=seconds: self.set_beep(before_s=s))
+        last = menu.addAction("Son distinct à la dernière seconde")
+        last.setCheckable(True)
+        last.setChecked(self.beep_last_distinct)
+        last.setEnabled(self.beep_sound != "windows")
+        last.toggled.connect(lambda on: self.set_beep(last_distinct=on))
+        menu.addSeparator()
+        menu.addAction("Écouter le bip").triggered.connect(lambda: self._beep())
+        menu.addAction("Écouter la dernière seconde").triggered.connect(lambda: self._beep(last=True))
+        return menu
+
+    def _target_menu(self, pos) -> None:
+        """Clic droit sur la carte cible de la séance : bip avant chaque brique."""
+        self._beep_menu().popup(self.m_target.mapToGlobal(pos))
 
     def _record_seconds(self, active, started_s: float, reading) -> None:
         """Enregistre les secondes de chrono complétées pendant ce tic (moyennes de la seconde)."""
@@ -1697,7 +1923,11 @@ class MainWindow(QMainWindow):
         bpm = s.target_bpm
         sub = "" if base is None or s.intensity_pct == 100 else f"séance : {base:.0f} W  ({s.intensity_pct} %)"
         color = None if target is None or s.state is State.FINISHED else zone_color(target, self.ftp)
-        if target is None and bpm is not None:  # séance en FC roulée aux vitesses
+        if s.state is State.FINISHED:  # ni « libre » ni anneau plein sur 0:00 : la séance est finie
+            self.m_target.set("fin", "séance terminée · Espace : recommencer")
+            self.m_target.title.setText("CIBLE")
+            self.m_target.set_color(MUTED)
+        elif target is None and bpm is not None:  # séance en FC roulée aux vitesses
             self.m_target.set(f"{bpm:.0f} bpm", "FC cible · résistance libre, aux vitesses")
             self.m_target.title.setText("CIBLE FC")
             self.m_target.set_color(HEART)
@@ -1727,8 +1957,10 @@ class MainWindow(QMainWindow):
         fraction = (remaining / seg.duration_s if remaining is not None and seg is not None and seg.duration_s
                     else None)
         brick = f"brique {min(s.index + 1, len(s.segments))} / {len(s.segments)}"
-        self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick,
-                           color or MUTED)
+        if s.state is State.FINISHED:
+            self.step_ring.set(0.0, "fin", f"{len(s.segments)} / {len(s.segments)}", MUTED)
+        else:
+            self.step_ring.set(fraction, "tour" if remaining is None else hms(remaining), brick, color or MUTED)
         self.intensity_label.setText(f"{s.intensity_pct} %")
         set_style(self.intensity_label, f"color: {TEXT if s.intensity_pct == 100 else ACCENT};")
         note = self._brick_note if self._brick_note and time.monotonic() < self._brick_note[1] else None
@@ -1745,8 +1977,11 @@ class MainWindow(QMainWindow):
             self.next_label.setText(f"{when} : {describe_segment(s.next_segment, self.ftp, s.intensity_pct)}"
                                     if s.next_segment else
                                     "Dernière brique" if countdown is None else f"Fin dans {countdown} s")
-        set_style(self.current_label, f"color: {ACCENT};" if note else "")
-        set_style(self.next_label, f"color: {ACCENT}; font-weight: 600;" if countdown is not None else "")
+        # Tailles à l'échelle de la fenêtre (15 px et 14 px à l'échelle 1, voir la feuille de style).
+        current_px = "" if self.scale == 1.0 else f"font-size: {round(15 * self.scale)}px;"
+        next_px = "" if self.scale == 1.0 else f"font-size: {round(SUB_PX * self.scale)}px;"
+        set_style(self.current_label, (f"color: {ACCENT};" if note else "") + current_px)
+        set_style(self.next_label, (f"color: {ACCENT}; font-weight: 600;" if countdown is not None else "") + next_px)
         self.play_button.setText({State.RUNNING: "Pause", State.PAUSED: "Reprendre",
                                   State.FINISHED: "Recommencer"}.get(s.state, "Démarrer"))
         set_icon(self.play_button, "pause" if s.state is State.RUNNING else "play", "#18191c")
@@ -1898,7 +2133,8 @@ class MainWindow(QMainWindow):
         heart, heart_off = self._heart_view()
         gear = self.gears.label if self.gears_apply else None
         return RideView(active, r, ftp, speed, gear, heart, heart_off, self.weight_box.value(),
-                        smoothing_s=self.smoothing_s, hr_max=self.profile.hr_max if self.profile is not None else None)
+                        smoothing_s=self.smoothing_s, hr_max=self.profile.hr_max if self.profile is not None else None,
+                        cadence_low=self.cadence_low())
 
     def _heart_view(self) -> tuple[HeartRateReading | None, str]:
         """Dernière fréquence reçue, sinon pourquoi il n'y en a pas."""

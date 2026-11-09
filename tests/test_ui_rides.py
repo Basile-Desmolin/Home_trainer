@@ -7,6 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 QtGui = pytest.importorskip("PySide6.QtGui")
+QtCore = pytest.importorskip("PySide6.QtCore")
 
 from home_trainer.bricks import parse_workout  # noqa: E402
 from home_trainer.sync import AccountBook, Outbox  # noqa: E402
@@ -27,7 +28,7 @@ def window(app, tmp_path):
                    outbox=Outbox(tmp_path / "sorties"))
     w.asked = []
 
-    def answer(parent, default, summary=""):  # « Enregistrer » sans rien changer
+    def answer(parent, default, summary="", **kw):  # « Enregistrer » sans rien changer
         w.asked.append(default)
         return default
 
@@ -58,6 +59,83 @@ def test_finished_workout_is_saved_once(window):
     assert len(files) == 1
     entry = window.outbox.entries()[files[0].name]
     assert entry["title"] == window.session.workout.name
+
+
+def test_continue_in_free_ride_after_a_workout_goes_in_the_same_file(window):
+    """Étape 11d : en fin de séance, « Continuer en mode libre » : la suite démarre en ERG à la
+    puissance de la dernière brique ; « Terminer » enregistre un seul .fit (séance 2:00, puis mode
+    libre 0:30 dans un tour à part), au nom de la séance."""
+    from home_trainer.ui.ride_export import CONTINUE
+    from home_trainer.ui.session import FreeMode
+    fit_sdk = pytest.importorskip("garmin_fit_sdk")
+    asked = []
+    window.ask_ride_export = lambda parent, default, summary="", **kw: asked.append(kw) or CONTINUE
+    pedal(window.session, 120)
+    window._on_tick()
+    QtWidgets.QApplication.processEvents()  # la fenêtre d'enregistrement s'ouvre hors du tic
+    assert asked == [{"can_continue": True}]
+    assert window.free_ride and window.free.state is State.RUNNING and window.free.mode is FreeMode.ERG
+    assert window.free.target_w == 150 and window.free.samples is window.session.samples
+    assert window.free.elapsed_s == 120 and not list(window.outbox.dir.glob("*.fit"))
+    window.free.pause()
+    pedal(window.free, 30, start=1_759_480_120)
+    window.ask_ride_export = lambda parent, default, summary="", **kw: asked.append(kw) or default
+    window.free_panel.finish_button.click()
+    assert asked[-1] == {}  # plus de « continuer » une fois en mode libre
+    [entry] = window.outbox.entries().values()
+    assert entry["title"] == window.session.workout.name
+    assert entry["description"].endswith(", puis mode libre (ERG).")
+    [path] = window.outbox.dir.glob("*.fit")
+    msgs, errors = fit_sdk.Decoder(fit_sdk.Stream.from_byte_array(bytearray(path.read_bytes()))).read()
+    assert errors == [] and [lap["total_timer_time"] for lap in msgs["lap_mesgs"]] == [120, 30]
+    window._on_tick()  # la séance finie n'est pas enregistrée une seconde fois
+    QtWidgets.QApplication.processEvents()
+    assert len(list(window.outbox.dir.glob("*.fit"))) == 1
+
+
+def test_window_scale_follows_the_window_size():
+    """Étape 11f : facteur 1 jusqu'à 1 280 × 800, puis selon le côté le moins agrandi, 1,8 au plus."""
+    from home_trainer.ui.theme import window_scale
+    assert window_scale(1280, 800) == 1.0 and window_scale(1000, 700) == 1.0
+    assert window_scale(1920, 1080) == 1.35  # 1,5 en largeur, 1,35 en hauteur
+    assert window_scale(2560, 1440) == 1.8 and window_scale(3840, 2160) == 1.8
+
+
+def test_numbers_grow_with_the_window_and_full_screen(window):
+    window.resize(1280, 800)
+    window._apply_scale()
+    power = window.cards["power"]
+    size = power.value.font().pointSize()
+    ring = window.step_ring.width()
+    window.resize(1920, 1080)
+    window._apply_scale()
+    assert window.scale == 1.35
+    assert power.value.font().pointSize() == round(size * 1.35)
+    assert window.step_ring.width() == round(124 * 1.35)
+    assert "font-size: 19px" in power.sub.styleSheet()  # 14 px × 1,35
+    assert window.free_panel.grid.cards["power"].scale == 1.35
+    window.workout_grid.choose(3, "elapsed")  # carte recréée : à la même échelle
+    assert window.cards["elapsed"].scale == 1.35
+    window.resize(1280, 800)
+    window._apply_scale()
+    assert power.value.font().pointSize() == size and window.step_ring.width() == ring
+    assert power.sub.styleSheet() == ""
+    window.toggle_full_screen()
+    assert window.isFullScreen()
+    QtWidgets.QApplication.sendEvent(window, QtGui.QKeyEvent(QtGui.QKeyEvent.KeyPress, QtCore.Qt.Key_Escape,
+                                                             QtCore.Qt.NoModifier))
+    assert not window.isFullScreen()
+
+
+def test_p_switches_free_ride_between_erg_and_slope(window):
+    from home_trainer.ui.session import FreeMode
+    window.toggle_free_mode()  # en séance : rien
+    assert window.free.mode is FreeMode.ERG
+    window.enter_free_ride()
+    window.toggle_free_mode()
+    assert window.free.mode is FreeMode.SLOPE
+    window.toggle_free_mode()
+    assert window.free.mode is FreeMode.ERG
 
 
 def test_finish_button_saves_free_ride_and_resets(window):
@@ -120,7 +198,7 @@ def test_one_second_ride_is_saved(window):
 def test_finish_asks_format_name_and_folder(window, tmp_path):
     pedal(window.session, 30)
     elsewhere = tmp_path / "ailleurs"
-    window.ask_ride_export = lambda parent, default, summary="": RideExport(elsewhere, "Ma sortie", "fit")
+    window.ask_ride_export = lambda parent, default, summary="", **kw: RideExport(elsewhere, "Ma sortie", "fit")
     window.finish_button.click()
     assert (elsewhere / "Ma sortie.fit").exists()
     assert not list(window.outbox.dir.glob("*.fit"))
@@ -131,7 +209,7 @@ def test_finish_asks_format_name_and_folder(window, tmp_path):
 
 def test_other_format_keeps_a_fit_copy_for_upload(window, tmp_path):
     pedal(window.session, 30)
-    window.ask_ride_export = lambda parent, default, summary="": RideExport(tmp_path, "sortie", "tcx")
+    window.ask_ride_export = lambda parent, default, summary="", **kw: RideExport(tmp_path, "sortie", "tcx")
     window.finish_button.click()
     assert (tmp_path / "sortie.tcx").read_text(encoding="utf-8").startswith("<?xml")
     assert len(list(window.outbox.dir.glob("*.fit"))) == 1
@@ -140,7 +218,7 @@ def test_other_format_keeps_a_fit_copy_for_upload(window, tmp_path):
 
 def test_cancel_goes_back_to_the_ride(window):
     pedal(window.session, 30)
-    window.ask_ride_export = lambda parent, default, summary="": None
+    window.ask_ride_export = lambda parent, default, summary="", **kw: None
     window.finish_button.click()
     assert len(window.session.samples) == 30 and window.session.state is State.PAUSED
     assert not window.outbox.dir.exists() or not list(window.outbox.dir.glob("*.fit"))
@@ -148,7 +226,7 @@ def test_cancel_goes_back_to_the_ride(window):
 
 def test_discard_drops_the_ride(window):
     pedal(window.session, 30)
-    window.ask_ride_export = lambda parent, default, summary="": DISCARD
+    window.ask_ride_export = lambda parent, default, summary="", **kw: DISCARD
     window.finish_button.click()
     assert window.session.samples == []
     assert not window.outbox.dir.exists() or not list(window.outbox.dir.glob("*.fit"))
@@ -185,7 +263,7 @@ def test_pc_stays_awake_during_a_ride(window):
     window.session.pause()
     window._on_tick()
     assert window.keep_awake.active  # en pause au milieu de la sortie : toujours pas de veille
-    window.ask_ride_export = lambda parent, default, summary="": DISCARD
+    window.ask_ride_export = lambda parent, default, summary="", **kw: DISCARD
     window.finish_button.click()
     window._on_tick()
     assert not window.keep_awake.active
@@ -218,7 +296,7 @@ def test_failed_save_keeps_the_ride(window, tmp_path, monkeypatch):
     pedal(window.session, 30)
     blocker = tmp_path / "fichier"
     blocker.write_text("")  # un fichier là où devrait être le dossier
-    window.ask_ride_export = lambda parent, default, summary="": RideExport(blocker, "sortie", "tcx")
+    window.ask_ride_export = lambda parent, default, summary="", **kw: RideExport(blocker, "sortie", "tcx")
     monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: None)
     window.finish_button.click()
     assert len(window.session.samples) == 30 and not window.session.exported
@@ -252,7 +330,7 @@ def test_nolio_redirect_field_and_cancel(window, monkeypatch):
 def test_finish_shows_the_summary_and_fills_the_history(window):
     from home_trainer.ride_stats import RideSummary
     seen = []
-    window.ask_ride_export = lambda parent, default, summary="": seen.append(summary) or default
+    window.ask_ride_export = lambda parent, default, summary="", **kw: seen.append(summary) or default
     pedal(window.session, 30)
     window.finish_button.click()
     [summary] = seen
@@ -292,8 +370,21 @@ def test_history_problems_are_shown(window, monkeypatch):
     assert len(list(window.outbox.dir.glob("*.fit"))) == 2  # le .fit, lui, est là
 
 
+def test_summary_shows_heart_rate_zones_with_the_profile_max(app):
+    """Étape 11g : bilan avec la FC max du profil : % de FC max sous la FC moyenne, temps par zone de FC."""
+    from home_trainer.ride_stats import RideSummary
+    from home_trainer.ui.ride_summary import SummaryPanel
+    ride = RideSummary(1_759_480_000, "FC", 190, 250, 200, 200, 200, 38, avg_hr_bpm=27_350 / 180,
+                       max_hr_bpm=185, hr_max=190, hr_zone_s=[60, 60, 30, 20, 10])
+    panel = SummaryPanel(ride)
+    assert panel.tiles["FC MOY."].sub.text() == "80 % FC max · max 97 %"
+    assert panel.tiles["FC MAX"].value.text() == "185"
+    assert panel.heart_zones is not None and panel.heart_zones.zone_s == [60, 60, 30, 20, 10]
+    assert panel.tiles["CALORIES"].value.text() == "38"
+
+
 def test_discarded_ride_stays_out_of_the_history(window):
-    window.ask_ride_export = lambda parent, default, summary="": DISCARD
+    window.ask_ride_export = lambda parent, default, summary="", **kw: DISCARD
     pedal(window.session, 30)
     window.finish_button.click()
     assert window.ride_history().rides == []
@@ -307,6 +398,11 @@ def test_summary_and_history_windows(window):
     dialog = RideExportDialog(RideExport(window.outbox.dir, "x"), history.rides[0])
     assert dialog.panel is not None and dialog.panel.tiles["PUISSANCE MOY."].value.text() == "150"
     assert dialog.panel.tiles["PUISSANCE MOY."].unit.text() == "W"
+    tiles = dialog.panel.tiles
+    # 30 s à 150 W : 4,5 kJ ≈ 4,5 kcal, affichées arrondies.
+    assert history.rides[0].calories_kcal == pytest.approx(4.5)
+    assert tiles["CALORIES"].value.text() in ("4", "5") and tiles["CALORIES"].unit.text() == "kcal"
+    assert dialog.panel.heart_zones is None  # sans FC max dans le profil
     hist = HistoryDialog(history, "Moi")
     assert hist.tree.topLevelItemCount() == 1
     assert hist.week_tile.value.text() != "—"
@@ -397,6 +493,24 @@ def test_restart_resets_every_mode_once_confirmed(window):
     window.free.pause()
     window.free_panel.reset_button.click()
     assert window.free.state is State.READY and window.confirmed[-1] == "Recommencer"
+
+
+def test_space_after_the_end_asks_before_starting_again(window):
+    """Étape 11a : séance finie, Espace ne relance plus une séance sans confirmation ; carte cible et
+    anneau disent que la séance est finie."""
+    pedal(window.session, 120)
+    window.save_ride = lambda session: True
+    window._refresh()
+    assert window.m_target.value.text() == "fin" and window.step_ring.fraction == 0.0
+    assert window.step_ring.text == "fin"
+    window.confirm_stop = lambda parent, action, question: window.confirmed.append(action) or False
+    window._space()
+    assert window.session.state is State.FINISHED and window.confirmed == ["Recommencer"]
+    window.confirm_stop = lambda parent, action, question: window.confirmed.append(action) or True
+    window._space()
+    assert window.session.state is State.RUNNING and window.session.elapsed_s == 0
+    window._space()  # en pleine séance : pause, sans question
+    assert window.session.state is State.PAUSED and window.confirmed == ["Recommencer", "Recommencer"]
 
 
 def test_nothing_asked_before_the_ride_starts(window):

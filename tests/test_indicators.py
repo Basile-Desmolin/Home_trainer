@@ -226,6 +226,29 @@ def test_target_in_each_mode_with_its_color():
     assert shown.color == route_grade_color(r.grade_pct).name()
 
 
+def test_workout_time_shows_what_remains_of_the_brick_and_the_workout():
+    """Étape 11a : sous le temps écoulé d'une séance, le reste de la brique et de la séance."""
+    s = workout()  # 10 min puis 5 min
+    s.start()
+    s.tick(400)
+    shown = show("elapsed", s)
+    assert (shown.value, shown.sub) == ("6:40", "brique 3:20 · reste 8:20")
+    opened = WorkoutSession(parse_workout("5m@150 open@200"), 250)  # brique ouverte (durée libre)
+    opened.start()
+    opened.tick(400)
+    assert show("elapsed", opened).sub == "brique ouverte · reste 0:00"
+    s.tick(900)
+    assert (show("elapsed", s).value, show("elapsed", s).sub) == ("15:00", "séance finie")
+
+
+def test_finished_workout_target_says_so():
+    """Étape 11a : séance finie, la cible n'affiche plus « libre »."""
+    s = workout()
+    s.start()
+    s.tick(900)
+    assert (show("target", s).value, show("target", s).sub) == ("fin", "séance terminée")
+
+
 def test_brick_remaining():
     s = workout()
     s.start()
