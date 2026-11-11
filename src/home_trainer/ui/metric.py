@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu, Q
 
 from .gauges import ZoneBar
 from .indicators import CATALOG, Mode, RideView
-from .theme import HEART_ZONES, SUB_PX, TEXT, number_font, set_style, tinted_card
+from .theme import HEART_ZONES, SUB_PX, TEXT, ElidedLabel, number_font, set_style, tinted_card
 
 # Unité détachée de la valeur et affichée en petit : « 238 W » → « 238 » + « W ».
 UNITS = ("W", "W/kg", "km", "%", "bpm", "rpm", "km/h", "tr/min", "kcal")
@@ -45,7 +45,7 @@ class Metric(QFrame):
         row.addWidget(self.value, 0, Qt.AlignBottom)
         row.addWidget(self.unit, 0, Qt.AlignBottom)
         row.addStretch(1)
-        self.sub = QLabel("")
+        self.sub = ElidedLabel("")  # état d'un capteur parfois long : il ne doit pas élargir la carte
         self.sub.setObjectName("metricSub")
         self._apply_sizes()
         self.body = QVBoxLayout()  # zone libre sous la valeur (barre de zones…)

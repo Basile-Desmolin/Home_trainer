@@ -12,11 +12,12 @@ QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
 from home_trainer.bricks import parse_workout  # noqa: E402
 from home_trainer.devices import DeviceBook  # noqa: E402
-from home_trainer.sensors import Slope  # noqa: E402
+from home_trainer.sensors import SensorState, Slope  # noqa: E402
 from home_trainer.route import Route  # noqa: E402
-from home_trainer.ui.app import MainWindow  # noqa: E402
+from home_trainer.ui.app import CHIP_MAX_PX, MainWindow  # noqa: E402
 from home_trainer.ui.route_ride import RouteMap, RouteProfile  # noqa: E402
 from home_trainer.ui.session import RouteSession, State  # noqa: E402
+from home_trainer.ui.theme import ElidedLabel  # noqa: E402
 
 EXAMPLE = Path(__file__).parents[1] / "examples" / "col-fictif.gpx"
 
@@ -159,3 +160,63 @@ def test_full_profile_is_kept_and_only_the_done_part_moves(app):
     chart.resize(900, 190)  # nouvelle taille : les images sont refaites
     chart.grab()
     assert chart._frame is not frame and chart._frame.area.width() == 900 - 48 - 12
+
+
+class Searching:
+    """Capteur qui cherche encore (au lancement, sans pédaler) : son état est long."""
+
+    def __init__(self, name):
+        self.name = name
+        self.state = SensorState.SEARCHING
+
+    @property
+    def status(self):
+        return f"{self.state.value} : aucun capteur à portée, pédalez pour le réveiller"
+
+    def latest(self):
+        return None
+
+
+def test_long_sensor_states_do_not_widen_the_window(app, tmp_path):
+    """Écran de 1 600 px à 200 % : des états de capteurs longs élargissaient le bandeau et les cartes
+    au-delà de l'écran, et le parcours était coupé à droite."""
+    window = MainWindow(parse_workout("10m@150"), book=DeviceBook(tmp_path / "a.json"))
+    assert window.open_path(str(EXAMPLE))
+    window.resize(1600, 950)
+    window.show()
+    app.processEvents()
+    bar = window.findChild(QtWidgets.QToolBar)
+    calm_window, calm_bar = window.minimumSizeHint().width(), bar.sizeHint().width()
+
+    window.power_meter = Searching("Assioma")
+    window.heart_rate = Searching("Cardio Bluetooth C0:7F:BA:95:3C:08")
+    window._refresh()
+    app.processEvents()
+    # Pastilles : l'état seul, le détail dans la bulle.
+    assert window.power_chip.text() == "Puissance : recherche…"
+    assert window.power_chip.toolTip().startswith("recherche… : aucun capteur à portée")
+    assert window.heart_chip.text() == "Cardio : recherche…"
+    # La ligne de la carte Cardio garde son texte entier mais n'impose pas sa largeur.
+    sub = window.route_panel.cards["heart"].sub
+    assert sub.text() == "Cardio Bluetooth C0:7F:BA:95:3C:08 : recherche… : aucun capteur à portée, pédalez pour le réveiller"
+    assert sub.minimumSizeHint().width() == 0
+    assert window.minimumSizeHint().width() == calm_window
+    # Bandeau : deux pastilles de plus (puissance, cardio en recherche), chacune de largeur bornée.
+    assert bar.sizeHint().width() <= calm_bar + 2 * (CHIP_MAX_PX + 60)
+    window.power_meter = window.heart_rate = None  # capteurs factices : rien à arrêter à la fermeture
+    window.close()
+
+
+def test_elided_label_cuts_long_text_and_shows_it_whole_in_the_tooltip(app):
+    label = ElidedLabel("court")
+    label.resize(400, 20)
+    label.show()  # un widget masqué ne reçoit pas ses changements de taille
+    assert label.toolTip() == ""
+    long = "Cardio Bluetooth C0:7F:BA:95:3C:08 : recherche… : aucun capteur à portée, pédalez pour le réveiller"
+    label.setText(long)
+    assert label.text() == long and label.toolTip() == long
+    shown = QtWidgets.QLabel.text(label)  # texte affiché
+    assert shown.endswith("…") and label.fontMetrics().horizontalAdvance(shown) <= 400
+    label.resize(4000, 20)  # assez de place : texte entier, plus de bulle
+    assert QtWidgets.QLabel.text(label) == long and label.toolTip() == ""
+    label.close()
