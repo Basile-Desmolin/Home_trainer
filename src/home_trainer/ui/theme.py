@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPainterPath, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy
 
@@ -115,6 +115,51 @@ def hint_label(text: str = "") -> QLabel:
     label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
     label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
     return label
+
+
+class ElidedLabel(QLabel):
+    """Ligne de texte (détail d'une carte, état d'un capteur, consigne) qui n'impose jamais sa largeur :
+    un texte long (« Cardio Bluetooth C0:7F:… : recherche… : aucun capteur à portée… ») élargissait la
+    fenêtre au-delà d'un écran de 1 600 px. Trop longue, la ligne finit par « … » et le texte entier
+    passe dans la bulle. `text()` rend le texte entier."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._full = ""
+        self._shown_tip = False  # bulle posée par l'élision (et non par l'écran)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 (API Qt)
+        if text != self._full:
+            self._full = text
+            self._elide()
+
+    def text(self) -> str:
+        return self._full
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (API Qt)
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        super().resizeEvent(event)
+        self._elide()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 (API Qt)
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._elide()  # taille de police changée (échelle de la fenêtre)
+
+    def _elide(self) -> None:
+        # Pas encore placé (largeur nulle) : le texte entier, pour que la hauteur de la ligne soit juste.
+        shown = (self.fontMetrics().elidedText(self._full, Qt.ElideRight, self.width())
+                 if self.width() > 0 else self._full)
+        if super().text() != shown:
+            super().setText(shown)
+        elided = shown != self._full
+        if elided or self._shown_tip:
+            self.setToolTip(self._full if elided else "")
+            self._shown_tip = elided
 
 
 def keycaps(text: str) -> str:

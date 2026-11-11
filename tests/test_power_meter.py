@@ -203,7 +203,8 @@ def test_window_uses_power_meter_watts_and_corrects_erg(app, tmp_path):
     meter._latest = None  # capteur muet : on revient aux watts du home trainer
     window._on_tick()
     assert window._last_reading.power_w == 212
-    assert window.power_chip.text() == "Puissance : erreur : déconnecté"
+    assert window.power_chip.text() == "Puissance : erreur"  # pastille courte, le détail dans la bulle
+    assert window.power_chip.toolTip().startswith("erreur : déconnecté\n")
     window.set_power_meter(None)
     assert trainer.target_w == pytest.approx(200, abs=0.5)
     assert not window.power_chip_action.isVisible()

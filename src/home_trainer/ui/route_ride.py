@@ -21,7 +21,7 @@ from .chart import ACCENT, MUTED, TEXT, hms, paint_panel
 from .indicators import DESCENT, Mode, RideView, grade_color, grade_text, km_text, route_grade_color  # noqa: F401
 from .metric import MetricGrid, Slot
 from .session import DIFFICULTY_STEP, RouteSession, State
-from .theme import hint_label, icon, keycaps, number_font, set_icon, set_style
+from .theme import ElidedLabel, hint_label, icon, keycaps, number_font, set_icon, set_style
 
 AHEAD_M = 2000.0  # le zoom montre les 2 km à venir
 BEHIND_M = 200.0
@@ -285,7 +285,7 @@ class RoutePanel(QWidget):
         layout.setContentsMargins(14, 10, 14, 14)
         layout.setSpacing(10)
 
-        self.title = QLabel()
+        self.title = ElidedLabel()  # nom du fichier GPX, parfois très long
         self.title.setObjectName("title")
         layout.addWidget(self.title)
 
@@ -296,7 +296,7 @@ class RoutePanel(QWidget):
             grid.setColumnStretch(c, 1)
         layout.addLayout(grid)
 
-        self.status_label = QLabel()
+        self.status_label = ElidedLabel()
         self.status_label.setObjectName("current")
         layout.addWidget(self.status_label)
 

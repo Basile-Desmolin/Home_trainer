@@ -79,8 +79,8 @@ from .rescue import (DISCARD as RESCUE_DISCARD, RESCUE_EVERY_S, SAVE as RESCUE_S
 from .power import (SMOOTHING_CHOICES_S, PowerAverage, PowerSource, Reading, SimulatedTrainer, open_power_source,
                     next_speed_kmh)
 from .route_ride import RoutePanel
-from .theme import (GOOD, OFF, WAIT, dot, hint_label, icon, install, keycaps, number_font, pill, set_icon, set_style,
-                    SUB_PX, window_scale, zone_index, zone_label)
+from .theme import (GOOD, OFF, WAIT, ElidedLabel, dot, hint_label, icon, install, keycaps, number_font, pill, set_icon,
+                    set_style, SUB_PX, window_scale, zone_index, zone_label)
 from .sounds import SOUND_NAMES, BeepPlayer
 from .session import (DIFFICULTY_STEP, FREE_STEP_W, GRADE_STEP_PCT, MIN_RIDE_SAMPLES, FreeMode,
                       FreeRideSession, RouteSession, SecondSampler, State, WorkoutSession, brick_summary,
@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         bar.addWidget(spacer)
 
-        self.source_label = self._header_button("", "Choisir ou calibrer le home trainer", "chip")
+        self.source_label = self._header_button("", TRAINER_TIP, "chip")
         self.source_label.clicked.connect(self._choose_trainer)
         bar.addWidget(self.source_label)
         self.power_chip = self._header_button("", POWER_TIP, "chip")
@@ -346,7 +346,7 @@ class MainWindow(QMainWindow):
         self.click_chip.clicked.connect(lambda: self._choose_click())
         # Pastille montrée seulement avec un Click : il se choisit depuis la pastille du home trainer.
         self.click_chip_action = bar.addWidget(self.click_chip)
-        self.heart_chip = self._header_button("", "Choisir la ceinture cardio", "chip")
+        self.heart_chip = self._header_button("", HEART_TIP, "chip")
         self.heart_chip.clicked.connect(self._choose_heart_rate)
         bar.addWidget(self.heart_chip)
         self.ftp_box = QSpinBox()
@@ -443,7 +443,7 @@ class MainWindow(QMainWindow):
         self.step_ring.setToolTip("Temps restant sur la brique")
         self.m_target.row.addWidget(self.step_ring, 0, Qt.AlignTop)
         self.zone_tag = QLabel()
-        self.next_label = QLabel()
+        self.next_label = ElidedLabel()  # nom de brique parfois long : il ne doit pas élargir la fenêtre
         self.next_label.setObjectName("metricSub")
         tag_row = QHBoxLayout()
         tag_row.addWidget(self.zone_tag)
@@ -456,7 +456,7 @@ class MainWindow(QMainWindow):
             grid.setColumnStretch(c, stretch)
         layout.addLayout(grid)
 
-        self.current_label = QLabel()
+        self.current_label = ElidedLabel()
         self.current_label.setObjectName("current")
         layout.addWidget(self.current_label)
 
@@ -2035,25 +2035,47 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    @staticmethod
+    def _sensor_state(sensor) -> tuple[str, str]:
+        """État court d'un capteur sans mesure, pour sa pastille (« recherche… », « signal perdu »), et le
+        détail pour la bulle (« recherche… : aucun capteur à portée, pédalez pour le réveiller »)."""
+        if sensor.state is SensorState.CONNECTED:
+            return "signal perdu", ""
+        state = sensor.state.value
+        return state, "" if sensor.status == state else sensor.status
+
+    @staticmethod
+    def _set_chip(chip: QToolButton, text: str, tip: str, detail: str = "") -> None:
+        """Texte d'une pastille du bandeau, coupé par « … » au-delà de CHIP_MAX_PX : sur un écran de 1 600 px,
+        une pastille longue repoussait la FTP, le poids et le profil hors du bandeau. Le texte entier et le
+        détail de l'état vont dans la bulle."""
+        chip.ensurePolished()  # police de la feuille de style, pour mesurer le texte
+        shown = chip.fontMetrics().elidedText(text, Qt.ElideRight, CHIP_MAX_PX)
+        tip = "\n".join(line for line in (text if shown != text else "", detail, tip) if line)
+        if chip.text() != shown:
+            chip.setText(shown)
+        if chip.toolTip() != tip:
+            chip.setToolTip(tip)
+
     def _refresh_source(self) -> None:
         source = self.source
         self._remember("trainer", source)
         text = self._display_name("trainer", source)
-        color = GOOD
+        color, detail = GOOD, ""
         if isinstance(source, Trainer) and (source.state is not SensorState.CONNECTED or source.latest() is None):
-            text += f" : {source.status if source.state is not SensorState.CONNECTED else 'signal perdu'}"
+            state, detail = self._sensor_state(source)
+            text += f" : {state}"
             color = WAIT
         elif not isinstance(source, Trainer):
             color = OFF  # simulé
-        if self.source_label.text() != text:
-            self.source_label.setText(text)
+        self._set_chip(self.source_label, text, TRAINER_TIP, detail)
         if getattr(self, "_source_color", None) != color:
             self._source_color = color
             self.source_label.setIcon(dot(color))
 
     def _refresh_power_chip(self) -> None:
         sensor = self.power_meter
-        tip = None
+        tip, detail = None, ""
         self.power_chip_action.setVisible(sensor is not None)
         if sensor is None:
             text, color = "Puissance : aucun", OFF
@@ -2067,13 +2089,9 @@ class MainWindow(QMainWindow):
                     tip = (f"{name} : ses watts font foi. Le home trainer lit {abs(offset)} W de "
                            f"{'plus' if offset >= 0 else 'moins'} : la consigne ERG est corrigée de {offset:+d} W.")
             else:
-                state = sensor.status if sensor.state is not SensorState.CONNECTED else "signal perdu"
+                state, detail = self._sensor_state(sensor)
                 text, color = f"Puissance : {state}", WAIT
-        tip = tip or POWER_TIP
-        if self.power_chip.toolTip() != tip:
-            self.power_chip.setToolTip(tip)
-        if self.power_chip.text() != text:
-            self.power_chip.setText(text)
+        self._set_chip(self.power_chip, text, tip or POWER_TIP, detail)
         if getattr(self, "_power_color", None) != color:
             self._power_color = color
             self.power_chip.setIcon(dot(color))
@@ -2084,30 +2102,32 @@ class MainWindow(QMainWindow):
         if sensor is None:
             return
         self._remember("click", sensor)
+        detail = ""
         if sensor.state is SensorState.CONNECTED:
             text, color = f"Braquet {self.gears.label}", GOOD
             status = sensor.latest()
             if status is not None and status.battery_pct is not None and status.battery_pct <= 20:
                 text += f" · pile {status.battery_pct} %"
         else:
-            text, color = f"Click : {sensor.status}", WAIT
-        if self.click_chip.text() != text:
-            self.click_chip.setText(text)
+            state, detail = self._sensor_state(sensor)
+            text, color = f"Click : {state}", WAIT
+        self._set_chip(self.click_chip, text, CLICK_TIP, detail)
         if getattr(self, "_click_color", None) != color:
             self._click_color = color
             self.click_chip.setIcon(dot(color))
 
     def _refresh_heart_chip(self) -> None:
         sensor = self.heart_rate
+        detail = ""
         if sensor is None:
             text, color = "Cardio : aucun", OFF
         elif sensor.latest() is not None:
             name = self._display_name("hr", sensor)
             text, color = (name if "cardio" in name.lower() else f"Cardio · {name}"), GOOD
         else:
-            text, color = f"Cardio : {sensor.status if sensor.state is not SensorState.CONNECTED else 'signal perdu'}", WAIT
-        if self.heart_chip.text() != text:
-            self.heart_chip.setText(text)
+            state, detail = self._sensor_state(sensor)
+            text, color = f"Cardio : {state}", WAIT
+        self._set_chip(self.heart_chip, text, HEART_TIP, detail)
         if getattr(self, "_heart_color", None) != color:
             self._heart_color = color
             self.heart_chip.setIcon(dot(color))
@@ -2155,6 +2175,9 @@ CLICK_TIP = ("Zwift Click : ses boutons + / − changent le braquet virtuel hors
              "(parcours, mode libre en pente, séance ERG off)")
 POWER_TIP = ("Capteur de puissance externe (pédales, manivelle) : ses watts font foi "
              "et l'ERG se règle dessus")
+TRAINER_TIP = "Choisir ou calibrer le home trainer"
+HEART_TIP = "Choisir la ceinture cardio"
+CHIP_MAX_PX = 220  # largeur de texte d'une pastille du bandeau : tout le bandeau tient dans 1 600 px
 def confirm_stop(parent, action: str, question: str) -> bool:
     """Confirmation avant d'arrêter la sortie : « Annuler » est le choix par défaut, pour qu'un
     Entrée ou un Échap en pleine séance ne coupe rien."""
