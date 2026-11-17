@@ -1,8 +1,10 @@
-"""Sons du bip avant un changement de brique, fabriqués et joués par l'application.
+"""Sons du bip avant un changement de brique, joués par l'application.
 
-Chaque son est un petit fichier WAV (mono, 16 bits, 44,1 kHz) écrit une fois dans le dossier
-temporaire, puis joué par `QSoundEffect` (QtMultimedia). Sans QtMultimedia, ou si le son ne se
-charge pas, le son système de Windows (`QApplication.beep()`) prend le relais.
+Le bip standard (par défaut) est un fichier WAV livré avec l'application (`assets/sounds/`). Les
+autres sont fabriqués : chacun est un petit fichier WAV (mono, 16 bits, 44,1 kHz) écrit une fois
+dans le dossier temporaire. Tous sont joués par `QSoundEffect` (QtMultimedia), qui ne lit que le
+WAV. Sans QtMultimedia, ou si le son ne se charge pas, le son système de Windows
+(`QApplication.beep()`) prend le relais.
 """
 
 from __future__ import annotations
@@ -25,8 +27,11 @@ VOLUME = 0.5  # sur 1 : assez fort pour couvrir le home trainer, sans saturer
 FADE_S = 0.008  # montée et descente de chaque note : pas de clic
 
 # Nom affiché dans le menu, dans l'ordre du menu. « windows » : son système, pas de fichier.
-SOUND_NAMES = {"double": "Double bip", "court": "Bip court", "montant": "Bip montant", "windows": "Son de Windows"}
+SOUND_NAMES = {"standard": "Bip standard", "double": "Double bip", "court": "Bip court",
+               "montant": "Bip montant", "windows": "Son de Windows"}
 LAST = "dernier"  # son distinct de la dernière seconde
+# Sons livrés en fichier plutôt que fabriqués.
+FILE_SOUNDS = {"standard": Path(__file__).with_name("assets") / "sounds" / "beep.wav"}
 
 
 def _note(freq: float, seconds: float, end_freq: float | None = None) -> list[float]:
@@ -47,7 +52,7 @@ def _silence(seconds: float) -> list[float]:
 
 
 def samples(name: str) -> list[float]:
-    """Échantillons d'un son (`SOUND_NAMES` sauf « windows », ou `LAST`)."""
+    """Échantillons d'un son fabriqué (`SOUND_NAMES` sauf « windows » et `FILE_SOUNDS`, ou `LAST`)."""
     if name == "court":
         return _note(880, 0.12)
     if name == "double":
@@ -70,7 +75,13 @@ def wav_bytes(name: str) -> bytes:
 
 
 def sound_file(name: str, folder: Path | None = None) -> Path:
-    """Fichier WAV du son, écrit au premier appel (réécrit s'il a changé)."""
+    """Fichier WAV du son : celui livré avec l'application, ou celui fabriqué, écrit au premier
+    appel (réécrit s'il a changé)."""
+    if name in FILE_SOUNDS:
+        path = FILE_SOUNDS[name]
+        if not path.is_file():  # installation incomplète : rattrapé par BeepPlayer (son de Windows)
+            raise FileNotFoundError(path)
+        return path
     folder = folder or Path(tempfile.gettempdir()) / "home-trainer-sons"
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{name}.wav"
@@ -95,7 +106,7 @@ class BeepPlayer:
             effect = QSoundEffect()
             effect.setSource(QUrl.fromLocalFile(str(sound_file(name))))
             effect.setVolume(1.0)
-        except Exception:  # pas de QtMultimedia, dossier temporaire inaccessible : son de Windows
+        except Exception:  # pas de QtMultimedia, fichier absent, dossier temporaire inaccessible
             log.warning("son %s indisponible, son de Windows à la place", name, exc_info=True)
             effect = None
         self._effects[name] = effect

@@ -174,7 +174,8 @@ dans le profil, écran par écran, et **Disposition d'origine** le défait.
 
 **Changement de brique** : bip et « Dans 3 s : … » avant chaque brique, puis
 le bilan de la brique finie. Au clic droit sur la carte Cible : marche / arrêt,
-son (double bip, bip court, bip montant ou son de Windows), compte à rebours
+son (bip standard par défaut, double bip, bip court, bip montant ou son de
+Windows), compte à rebours
 de 3, 5 ou 10 s, son distinct à la dernière seconde. En fin de séance, la cible
 affiche « fin » et Espace demande confirmation avant de recommencer.
 
@@ -634,7 +635,8 @@ sans matériel (`tests/test_sensors.py`).
   vers Strava, JSON (fichier en base64) vers Nolio (`sync/`).
 - **Chiffrement des jetons** : DPAPI de Windows par `ctypes`, sans
   dépendance (`sync/secret.py`).
-- **Sons du bip** : fabriqués par l'appli (WAV) et joués par QtMultimedia
+- **Sons du bip** : bip standard livré en WAV (`ui/assets/sounds/beep.wav`),
+  les autres fabriqués par l'appli (WAV) ; tous joués par QtMultimedia
   (`ui/sounds.py`) ; son de Windows si QtMultimedia manque.
 - Interface **PySide6 (Qt)**, Bluetooth via **bleak** (FTMS, et le service
   Wahoo propriétaire en repli), ANT+ via **openant** (profil FE-C) avec une
