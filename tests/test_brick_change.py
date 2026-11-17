@@ -236,7 +236,7 @@ def test_beep_sound_and_countdown_length_are_kept_in_the_profile(app, tmp_path):
                         profiles=book, profile=profile)
     window.timer.stop()
     window.clock = Clock()
-    assert (window.beep_sound, window.beep_before_s, window.beep_last_distinct) == ("double", 3, True)
+    assert (window.beep_sound, window.beep_before_s, window.beep_last_distinct) == ("standard", 3, True)
     window.set_beep(sound="montant", before_s=5, last_distinct=False)
     window.set_beep(before_s=7)  # durée hors des choix : ignorée
     beeps = []
@@ -266,9 +266,10 @@ def test_beep_menu_lists_the_sounds_and_durations(app, tmp_path):
     texts = [a.text() for a in menu.actions()]
     assert texts[0] == "Bip 3 s avant chaque brique" and "Son distinct à la dernière seconde" in texts
     sounds = next(a.menu() for a in menu.actions() if a.text() == "Son du bip")
-    assert [a.text() for a in sounds.actions()] == ["Double bip", "Bip court", "Bip montant", "Son de Windows"]
-    assert [a.isChecked() for a in sounds.actions()] == [True, False, False, False]
-    sounds.actions()[3].trigger()
+    assert [a.text() for a in sounds.actions()] == ["Bip standard", "Double bip", "Bip court", "Bip montant",
+                                                    "Son de Windows"]
+    assert [a.isChecked() for a in sounds.actions()] == [True, False, False, False, False]
+    sounds.actions()[4].trigger()
     assert window.beep_sound == "windows"
     durations = next(a.menu() for a in menu.actions() if a.text() == "Compte à rebours")
     durations.actions()[2].trigger()
@@ -333,11 +334,46 @@ def test_low_cadence_alert_after_five_seconds_under_the_threshold(app, tmp_path)
 def test_sounds_are_short_valid_wav_files(tmp_path):
     import wave
 
-    from home_trainer.ui.sounds import LAST, RATE, SOUND_NAMES, sound_file
-    for name in [*[k for k in SOUND_NAMES if k != "windows"], LAST]:
+    from home_trainer.ui.sounds import FILE_SOUNDS, LAST, RATE, SOUND_NAMES, sound_file
+    made = [k for k in SOUND_NAMES if k != "windows" and k not in FILE_SOUNDS]
+    for name in [*made, LAST]:
         path = sound_file(name, tmp_path)
         with wave.open(str(path)) as w:
             assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (1, 2, RATE)
             seconds = w.getnframes() / RATE
         assert 0.05 < seconds < 0.5, name
     assert sound_file("double", tmp_path).stat().st_mtime == path.with_name("double.wav").stat().st_mtime
+
+
+def test_standard_beep_is_the_wav_shipped_with_the_app_and_the_default(tmp_path):
+    """Bip standard : fichier WAV PCM livré dans assets (rien d'écrit dans le dossier temporaire),
+    court ; choisi par défaut pour un nouveau profil et pour un profil d'avant ce réglage."""
+    import json
+    import wave
+
+    from home_trainer.ui.sounds import FILE_SOUNDS, SOUND_NAMES, sound_file
+    assert next(iter(SOUND_NAMES)) == "standard"  # premier du menu
+    path = sound_file("standard", tmp_path)
+    assert path == FILE_SOUNDS["standard"] and path.parent.name == "sounds" and not list(tmp_path.iterdir())
+    with wave.open(str(path)) as w:
+        assert w.getcomptype() == "NONE" and w.getnchannels() in (1, 2)
+        assert 0.05 < w.getnframes() / w.getframerate() < 0.5
+    book = ProfileBook(tmp_path / "profils.json", rides_root=tmp_path / "sorties")
+    assert book.create("A").beep_sound == "standard"
+    book.save()
+    data = json.loads(book.path.read_text(encoding="utf-8"))
+    for item in data["profiles"]:
+        del item["beep_sound"]  # profil enregistré avant ce réglage
+    data["profiles"].append({**data["profiles"][0], "id": "b", "name": "B", "beep_sound": "inconnu"})
+    book.path.write_text(json.dumps(data), encoding="utf-8")
+    loaded = ProfileBook.load(book.path, tmp_path / "sorties")
+    assert [p.beep_sound for p in loaded.profiles] == ["standard", "standard"]
+
+
+def test_a_missing_sound_file_falls_back_to_the_windows_sound(app, monkeypatch, tmp_path):
+    from home_trainer.ui import sounds
+    monkeypatch.setitem(sounds.FILE_SOUNDS, "standard", tmp_path / "absent.wav")
+    beeps = []
+    monkeypatch.setattr(sounds.QApplication, "beep", lambda: beeps.append(1))
+    sounds.BeepPlayer().play("standard")
+    assert beeps == [1]

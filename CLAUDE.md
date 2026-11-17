@@ -26,7 +26,7 @@ dans `README.md`.
 | `ui/indicators.py` | Catalogue d'indicateurs commun aux trois écrans et à la vignette : `RideView` (instantané construit par `_ride_view` dans `app.py`), `CATALOG` (texte de chaque carte). Un nouvel indicateur s'ajoute ici. |
 | `ui/mini.py` | Vignette au premier plan pendant une sortie, application en arrière-plan : valeurs du catalogue choisies au clic droit, par mode, gardées dans le profil (`layouts`, clés `mini:…`). |
 | `ui/metric.py`, `ui/gauges.py`, `ui/theme.py` | Carte de valeur `Metric`, grille `MetricGrid` (cartes placées par `Slot`, indicateur de chaque place choisi au clic droit et gardé dans le profil), barres de zones (puissance, FC ESIE), anneau, couleurs, échelle des tailles selon la fenêtre. |
-| `ui/sounds.py` | Sons du bip avant un changement de brique, fabriqués par l'application (WAV), joués par QtMultimedia. |
+| `ui/sounds.py` | Sons du bip avant un changement de brique, joués par QtMultimedia (WAV seulement) : bip standard par défaut livré dans `ui/assets/sounds/beep.wav`, les autres fabriqués par l'application. |
 | `ui/rescue.py` | Sortie de secours : mesures gardées toutes les 10 s dans `%APPDATA%\HomeTrainer\secours\`, proposées au lancement si la sortie n'a pas été enregistrée. |
 | `ui/power.py` | Interface `PowerSource`, home trainer simulé, modèle physique : `road_speed_kmh` (vitesse d'équilibre), `next_speed_kmh` (élan et roue libre, vitesse de tous les modes). |
 | `sensors/` | Protocoles : `trainer.py` (décodeurs FTMS et Cycling Power), `trainer_ble.py`, `trainer_ant.py`, `power_meter.py`, `heart_rate.py`, `zwift_click.py`. |

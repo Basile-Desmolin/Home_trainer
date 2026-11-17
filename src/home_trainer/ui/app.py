@@ -50,8 +50,8 @@ from ..heart_zones import to_power
 from ..history import FILE_NAME as HISTORY_FILE, RideHistory
 from ..logs import setup_logging
 from ..keep_awake import KeepAwake
-from ..profiles import (BEEP_BEFORE_CHOICES, CADENCE_ALERT_CHOICES, DEFAULT_CADENCE_ALERT_RPM, MAX_BIKE_KG,
-                        MIN_BIKE_KG, SPEED_APP, SPEED_TRAINER, Profile, ProfileBook, default_rides_root)
+from ..profiles import (BEEP_BEFORE_CHOICES, CADENCE_ALERT_CHOICES, DEFAULT_BEEP_SOUND, DEFAULT_CADENCE_ALERT_RPM,
+                        MAX_BIKE_KG, MIN_BIKE_KG, SPEED_APP, SPEED_TRAINER, Profile, ProfileBook, default_rides_root)
 from ..ride_stats import RideSummary, summarize
 from ..route import RouteError, load_route
 from ..sensors import (BackgroundSensor, HeartRateReading, PowerMatch, PowerMeterReading, SensorState, Slope,
@@ -213,7 +213,7 @@ class MainWindow(QMainWindow):
         # Changement de brique : bip et compte à rebours (son et durée choisis dans le profil), bilan de la
         # brique finie.
         self.brick_beep = True
-        self.beep_sound = "double"
+        self.beep_sound = DEFAULT_BEEP_SOUND
         self.beep_before_s = BEEP_BEFORE_S
         self.beep_last_distinct = True
         self.beeper = BeepPlayer()
